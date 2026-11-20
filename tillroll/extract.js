@@ -1,3 +1,4 @@
+import {receiptCurrency} from './photo-currency.js';
 import {inspectReference} from './reference.js?v=6';
 import {isGtin,isPrintedItemNumber,parsePrintedItemId,printedBarcodeDetail,barcodesBelowNames} from './product-code.js?v=productcodes3';
 import {readPurchaseDate} from './purchase-date.js?v=8';
@@ -128,7 +129,22 @@ function columns(line) {
 const retailers = [/Harvey\s+Nichols/i,/Harrods/i,/Selfridges/i,/Liberty(?: London)?/i,/Fortnum\s*(?:and|&)\s*Mason/i,/Flannels/i,/Net[-\s]a[-\s]Porter/i,/Bicester Village/i];
 function findMerchant(lines, text) {
   for (const name of retailers) { const seen = text.match(name); if (seen) return seen[0]; }
-  if(lines.slice(0,3).some(l=>/^(?:[\d\W]+)?new balance[.\W]*$/i.test(l.text.trim())))return 'New Balance';
+  const header=[];
+  for(const line of lines.slice(0,8)) {
+    if(/\breceipt\b|\bsale transaction\b|\b(?:sub)?total\b|\d[.,]\d{2}\b/i.test(line.text))break;
+    header.push(line.text);
+  }
+  const signs=[
+    [/^(?:[\d\W]+)?new balance[.\W]*$/i,'New Balance'],
+    [/\bwww\.uniqlo\.com\b|^\W*uniqlo\b/i,'Uniqlo'],
+    [/\bfnac\b/i,'Fnac'],
+    [/^\W*waterstones\b/i,'Waterstones'],
+    [/^\W*jack(?:\s*(?:&|and)|s)\s+jones\b/i,'Jack & Jones'],
+  ];
+  for(const line of header) {
+    const sign=signs.find(([pattern])=>pattern.test(line));
+    if(sign)return sign[1];
+  }
   return lines.slice(0,4).map(l => l.text.trim()).find(line => /\p{L}/u.test(line) && line.length >= 3 && !/\d|receipt|invoice|thank you|order (id|no|confirmation)|welcome|telephone|register|subtotal|^date\b/i.test(line)) || null;
 }
 const refLabels = {orderNumber:/\border\s*(?:number|no\.?|#)/i, orderId:/\border\s*i\.?d\.?\b/i};
@@ -147,12 +163,12 @@ function references(lines, receipt) {
   }
 }
 const tidyLine=text=>text.trim().replace(/^[^\p{L}\p{N}£€$]+/u,'');
-const totalLabel=/^(?:(?:(?:grand|order|receipt|net|gross)\s+)?total\b|(?:amount|balance)\s+(?:due|paid)\b|net\s+[àa]\s+payer\b|(?:montant|prix)\s+ttc\b|gesamt(?:betrag|summe)?\b|summe\b)/i;
+const totalLabel=/^(?:(?:(?:grand|order|receipt|net|gross)\s+)?total\b|(?:amount|balance)\s+(?:due|paid|to\s+pay)\b|net\s+[àa]\s+payer\b|(?:montant|prix)\s+ttc\b|gesamt(?:betrag|summe)?\b|summe\b)/i;
 const otherTotal=/^(?:total(?:\s+(?:net|des))?\s+(?:h\.?\s?t\.?\b|tva|tua|vat|tax|discount|saving|reduction|remise|item|qty|quantity|number|points|change|cash|card|tender|deposit|before|weight)|gross total\b)/i;
 const subLabel=/^(?:sub\s*total|sous[-~\s]*total|zwischensumme|total\s+(?:net\s+)?h\.?\s?t\.?\b)/i;
 const taxLabel=/^(?:(?:includes?|included|sales|total)\s+)?(?:tax|vat|tva)\b/i;
 const discountLabel=/^(?:discount|savings|remise|rabatt)\b/i;
-const metadata=/^(?:sub\s*total|sous[-~\s]*total|(?:(?:grand|order|receipt|gross|net)\s+)?total\b|(?:amount|balance)\s+(?:due|paid)|net\s+[àa]\s+payer|tva\b|gesamt(?:betrag|summe)?\b|summe\b|montant\b|(?:sales\s+)?tax\b|vat\b|includes?\s+vat|discount\b|shipping\b|delivery\b|savings\b|remise\b|rabatt\b|cash\b|change\b|credit\b|tender\b|paid\b|payment\b|card\b|contactless\b|master\s*card\b|visa\b|american express\b|apple pay\b|thank you\b|auth\b|returns?\b)/i;
+const metadata=/^(?:sub\s*total|sous[-~\s]*total|(?:(?:grand|order|receipt|gross|net)\s+)?total\b|(?:amount|balance)\s+(?:due|paid|to\s+pay)|net\s+[àa]\s+payer|tva\b|gesamt(?:betrag|summe)?\b|summe\b|montant\b|(?:sales\s+)?tax\b|vat\b|includes?\s+vat|discount\b|shipping\b|delivery\b|savings\b|remise\b|rabatt\b|cash\b|change\b|credit\b|tender\b|paid\b|payment\b|card\b|contactless\b|master\s*card\b|visa\b|american express\b|apple pay\b|thank you\b|auth\b|returns?\b)/i;
 const noProduct = /(?:\border\s*(?:no|number|id)\b|^receipt\b|\binvoice\b|^date\b|^time\b|^till\b|^cashier\b|^placed\b|^store\b|style\s*[:#]|\b(?:qty|price)\b.*\b(?:price|amount|total)\b|\bdescription\b.*\bqty\b|^\d{1,2}[\s/-]\w+[\s/-](?:\d{2}|\d{4})\b|\d{1,2}:\d{2}|^demonstration\b)/i;
 function possibleLabel(line) {
   return line && /\p{L}/u.test(line.text) && !metadata.test(tidyLine(line.text)) && !noProduct.test(line.text) && !/^style\b|^sku\b|^(?:item|product|article)\s+(?:id|code)\b|^(?:upc|ean|barcode)\b/i.test(line.text) && !amounts(line.text).length;
@@ -168,18 +184,52 @@ function details(row, text) {
   row.sku = parts.shift()?.trim() || null;
   for(const part of parts) { if(/^size\b/i.test(part)) row.size = part.replace(/^size\s*:?\s*/i,''); else if (!row.colour) row.colour = part; }
 }
+const printedCurrency=/^(?:RM|MYR|SGD|EUR|GBP|USD|CAD|CHF|AUD|NZD)$/;
+function codedPrice(line) {
+  if(!line)return null;
+  const prices=amounts(line.text);
+  if(prices.length!==1)return null;
+  const price=prices[0];
+  const tail=line.text.slice(price.end).trim();
+  if(!/^(?:[A-Z*]{1,2}|\d)?(?:\s*[|])?$/.test(tail))return null;
+  const head=line.text.slice(0,price.start).trim().split(/\s+/);
+  const currency=printedCurrency.test(head.at(-1))?head.pop():null;
+  const [id,qty]=head;
+  const complete=head.length<=2 && isGtin(id) && (!qty || /^(?:\d{1,3}|\|)$/.test(qty));
+  return {currency,id:complete?id:null,qty:complete && /^\d+$/.test(qty)?Number(qty):null};
+}
+function nearbyCodedPrices(lines,i,currency) {
+  const mark=lines[i].words?.find(w=>w.text===currency);
+  if(!mark)return false;
+  let witnesses=0;
+  for(const step of [-2,2]){
+    for(let offset=step;Math.abs(offset)<=8;offset+=step){
+      const line=lines[i+offset],name=lines[i+offset-1];
+      if(!possibleLabel(name) || !neighbouringRows(name,line))break;
+      const other=codedPrice(line);
+      if(other?.currency!==currency || !line.words?.some(w=>w.text===currency && Math.abs(w.x-mark.x)<.04))break;
+      if(other.id && ++witnesses===2)return true;
+    }
+  }
+  return false;
+}
 function barcodeProduct(lines,i,belowNames) {
   const line=lines[i], prev=lines[i-1], next=lines[i+1];
+  if(!possibleLabel(prev) || !neighbouringRows(prev,line))return null;
   const detail=printedBarcodeDetail(line);
-  const code=detail?.id || line.text.trim().match(/^(\d{4,14})\s+/)?.[1];
-  if(!isPrintedItemNumber(code) || !possibleLabel(prev) || !neighbouringRows(prev,line))return null;
+  const printed=codedPrice(line);
+  // A damaged barcode may interrupt a repeated description / product-detail layout.
+  // Require two intact neighbouring details with the same aligned currency column.
+  const sameLayout=printed?.currency && !printed.id && nearbyCodedPrices(lines,i,printed.currency);
+  const code=printed?.id || detail?.id || line.text.trim().match(/^(\d{4,14})\s+/)?.[1];
+  if(!sameLayout && !isPrintedItemNumber(code))return null;
   const prices=amounts(line.text);
   const head=prices.length && line.text.slice(0,prices[0].start).trim();
   const quantity=detail && head && head.startsWith(code+' ') && head.slice(code.length).trim().match(/^\d{1,3}$/);
-  const simple=prices.length===1 && (head===code || quantity) &&
+  const simple=printed?.id || sameLayout || prices.length===1 && (head===code || quantity) &&
     /^\s*(?:(?:EUR|USD|GBP|CAD|[€£$])\s*)?(?:[A-Z*]|\d)?\s*$/i.test(line.text.slice(prices[0].end));
   if (!simple && !(detail && belowNames.has(i) && !prices.length && clearCode(line,code))) return null;
-  const row={...itemShape(),itemId:code,qty:quantity ? Number(quantity[0]) : null,amount:simple ? prices[0].value : null};
+  const row={...itemShape(),itemId:sameLayout?null:code,qty:printed?.qty ?? (quantity ? Number(quantity[0]) : null),amount:simple ? prices[0].value : null};
   const heading=prev.text.trim();
   const style=heading.match(/^(.+?)\s+([A-Z][A-Z0-9-]{3,}\d[A-Z0-9-]*)\s+(\d{1,2}(?:[.,]\d)?(?:\s+[A-Z0-9]{1,3})?)$/);
   if(style) {
@@ -192,6 +242,23 @@ function barcodeProduct(lines,i,belowNames) {
   const hasUnit=Boolean(unitQuantity && unit?.length===1 && !next.text.slice(unit[0].end).trim());
   if(hasUnit){row.qty=Number(unitQuantity[1]);row.unitPrice=unit[0].value;}
   return {row,hasUnit};
+}
+// A priced description may be followed by an aligned GTIN and a till classification.
+// Keep distinct barcodes attached to their own rows even for identical descriptions.
+function pricedNameAboveCode(line,next) {
+  if(!line.words?.length || !next?.words?.length || !neighbouringRows(line,next) || amounts(next.text).length)return null;
+  const nextWords=next.words.filter(w=>w.confidence>=.65);
+  const codes=nextWords.filter(w=>isGtin(w.text) && w.confidence>=.8);
+  if(codes.length!==1 || nextWords.some(w=>w!==codes[0] && /\p{L}/u.test(w.text)))return null;
+  const [code]=codes;
+  const prices=amounts(line.text);
+  if(prices.length!==1 || !/^(?:¢?€|GBP|USD|EUR|[£$])?\s*[|=]?$/i.test(line.text.slice(prices[0].end).trim()))return null;
+  const start=line.words.findIndex(w=>Math.abs(w.x-code.x)<.025 && /\p{L}/u.test(w.text));
+  const end=line.words.findIndex(w=>amounts(w.text).length);
+  if(start<0 || end<=start)return null;
+  const label=line.words.slice(start,end).map(w=>w.text).join(' ');
+  if(!/\p{L}{2}/u.test(label) || metadata.test(tidyLine(label)) || noProduct.test(label))return null;
+  return {...itemShape(),itemId:code.text,item:label,amount:prices[0].value};
 }
 const itemIdLabel=/^(?:item\s*id|product\s*(?:id|code)|article\s*id|upc|ean|gtin|barcode)\s*[:#]?\s*([\w][\w/-]*)\s*$/i;
 const namedItemPrefix=/^(?:(?:item|product|article)\s*(?:id|code|no\.?|number|#)|upc|ean|gtin|barcode)\s*[:#]?\s*([\w][\w./-]*)\s+(?=[\p{L}\d])/iu;
@@ -286,6 +353,9 @@ function itemsFromLines(lines, trace) {
     if(used.has(i))continue;
     const header=productColumns(line);
     if(header){layout=header;lastHeader=i;lastProduct=-10;continue;}
+    // Some tills print loyalty offers and tax breakdowns below the final payment.
+    if(/^balance\s+to\s+pay\b/i.test(tidyLine(text)) && amounts(text).length===1 &&
+       lines.slice(i+1,i+4).some(l=>/^(?:maestro|credit|debit|visa|mastercard|cash|tax summary)\b/i.test(tidyLine(l.text))))break;
     if(metadata.test(tidyLine(text))){layout=null;lastProduct=-10;continue;}
     const barcode=barcodeProduct(lines,i,belowNames);
     if(barcode){record(barcode.row,i,i-1,barcode.hasUnit?i+1:i);lastProduct=i;if(barcode.hasUnit)used.add(i+1);continue;}
@@ -311,9 +381,16 @@ function itemsFromLines(lines, trace) {
         record(row,i,i,i,lastHeader);lastProduct=i;continue;
       }
     }
+    const aboveCode=pricedNameAboveCode(line,lines[i+1]);
+    if(aboveCode){
+      record(aboveCode,i);
+      if(trace)trace.at(-1).idLine=i+1;
+      lastProduct=i;used.add(i+1);continue;
+    }
     const prices=amounts(text); if (!prices.length) continue;
     const final=prices.at(-1); if (text.slice(final.end).trim() && !/^(?:[A-Z*]|EUR|GBP|USD|CAD|CHF|AUD|NZD|[€£$])(?:\s*[|*])?$/i.test(text.slice(final.end).trim())) continue;
     let label=text.slice(0,prices[0].start).trim();
+    if(printedCurrency.test(label))continue;
     const row=itemShape(); row.amount=final.value;
     if (prices.length>1) row.unitPrice=prices.at(-2).value;
     const qty=label.match(/(?:^|\s)(\d+)\s*(?:[x×@]\s*)?$/i);
@@ -470,10 +547,7 @@ export function extractLocal(ocr) {
   const date=readPurchaseDate(text);result.date=date.date;result.dateIssue=date.issue;
   result.time=text.match(/\b(?:[01]?\d|2[0-3]):[0-5]\d\b/)?.[0] || null;
   references(lines,result);
-  const cur=text.match(/\b(?:GBP|USD|EUR|CAD|AUD|NZD|CHF|CNY|JPY)\b/i)?.[0];
-  // The dollar sign alone is shared by several currencies. Require a US postal address too.
-  const usAddress=lines.slice(0,10).some(l=>/\b(?:AL|AK|AZ|AR|CA|CO|CT|DE|DC|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY)\s+\d{5}(?:-\d{4})?\b/.test(l.text));
-  result.currency=cur?.toUpperCase() || (text.includes('£')?'GBP':text.includes('€')?'EUR':text.includes('$')&&usAddress?'USD':null);
+  result.currency=receiptCurrency(lines.map(line=>line.text));
   result.payment=text.match(/\b(?:Apple Pay|Google Pay|American Express|Master\s*Card|Visa(?: Debit| Credit)?|cash)\b/i)?.[0] || null;
   result.card=text.match(/(?:ending(?:\s+in)?\s*|[*•]{2,}\s*)(\d{4})\b/i)?.[1] || null;
   const totals=new Set();
@@ -486,7 +560,7 @@ export function extractLocal(ocr) {
     else if (totalLabel.test(label) && !otherTotal.test(label)) key='total';
     if (!key)continue;
     // OCR can separate the cents after a visible punctuation mark.
-    const monetaryText=l.text.replace(/([£€$]\s*\d+)[.,]\s+(\d{2})(?!\d)/g,'$1.$2');
+    const monetaryText=l.text.replace(/([£€$]\s*\d+)\s*[.,]\s*(\d{2})(?!\d)/g,'$1.$2');
     let values=amounts(monetaryText);
     if(!values.length && key==='total') {
       // A missing decimal is resolved only when the printed total and nearby tender

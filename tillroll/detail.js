@@ -400,7 +400,7 @@ export function showDetail(r, callbacks={}, focusPath='') {
   const panel=element('div',undefined,'review-panel');
   if (r.state==='done' && r.origin!=='achung') showReference(pictureLink,panel,r.reference,
     callbacks.onConfirmReference && ((candidate,kind)=>act('onConfirmReference',candidate,kind)));
-  if (r.demo?.note) panel.append(element('p',r.demo.note,'hint'));
+  if (r.useSaved && r.demo?.note) panel.append(element('p',r.demo.note,'hint'));
   if (r.duplicateOf || r.exactOf) {
     const id=r.exactOf || r.duplicateOf;
     const duplicate=section(r.exactOf?'Identical file':'Possible duplicate');

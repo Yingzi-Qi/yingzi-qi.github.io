@@ -1,14 +1,14 @@
 import {oldestPurchaseFirst,purchaseDateText} from './receipt-date-display.js?v=8';
 import {inspectReference,combineReferenceReadings} from './reference.js?v=6';
-import {readPhoto,secondReadPhoto,extractLocal,extractAI,reconcileReadings,photoFieldConflicts,recoverPhotoItemIds} from './extract.js?v=productcodes3';
+import {readPhoto,secondReadPhoto,extractLocal,extractAI,reconcileReadings,photoFieldConflicts,recoverPhotoItemIds} from './extract.js?v=curatedphotos1';
 import {checkReceipt,samePurchase,reviewForLine,verifyImportedItemIds} from './checks.js?v=productcodes3';
 import {exportExcel,exportCSV,readOrderFile,readAchungWorkbook,readTillrollEdits} from './exports.js?v=excelrefresh1';
 import {planWorkbookRefresh,restoreWorkbookReceipts,nextWorkbookBaseline,withLegacyWorkbookBaseline,nextLegacyWorkbookBaseline} from './workbook-refresh.js?v=2';
 import {bindExcelRefresh} from './excel-refresh-ui.js?v=1';
-import {loadSamples} from './samples.js?v=productcodes3';
+import {loadSamples} from './samples.js?v=curatedphotos1';
 import {compareOrder,orderNeedsReview} from './orders.js?v=lineverify1';
-import {verifyOutputItems} from './item-verification.js?v=lineverify1';
-import {photoVerificationRows} from './verification-photo.js?v=productcodes3';
+import {verifyOutputItems} from './item-verification.js?v=curatedphotos1';
+import {photoVerificationRows} from './verification-photo.js?v=curatedphotos1';
 import {captureLineWarnings,classifyVerification,hasVerificationMismatch} from './verification-history.js?v=lineverify1';
 const $ = s=>document.querySelector(s);
 const escape = v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -151,14 +151,14 @@ function duplicates(){
     else canonical.push(r);
   }
 }
-function startInput(entries){
+function startInput(entries, useSaved=savedSamples){
   if(!entries.length)return;
   if(!startTime)startTime=Date.now();
   else if(finishedTime)startTime+=Date.now()-finishedTime;
   finishedTime=0;
   for(const entry of entries){const file=entry.file;if(!file)continue;
     const r={id:++seq,filename:file.name,file,url:URL.createObjectURL(file),state:'queued',method:'Queued',review:{flags:[],photo:[],repeats:[]},ack:new Set(),notes:[],reasons:[],generation,origin:'',usedAI:false};
-    r.demo=entry.sample?entry:null;r.useSaved=Boolean(r.demo && savedSamples);r.readerSettings={mode,key:apiKey};batch.push(r);queue.push(r);
+    r.demo=entry.sample?entry:null;r.useSaved=Boolean(r.demo && useSaved);r.readerSettings={mode,key:apiKey};batch.push(r);queue.push(r);
   }
   filter='all';render();pump();
 }
@@ -289,7 +289,6 @@ function rowHTML(r){
   if(!d.items.length)return `<tbody aria-label="Receipt ${r.id}"><tr>${shared}<td colspan="4" class="no-items">No items read</td></tr></tbody>`;
   return `<tbody aria-label="Receipt ${r.id}">${visible.map(({item,index},position)=>itemRow(r,item,index,position===0?shared:'')).join('')}</tbody>`;
 }
-const sampleLabels={photos:'25 real receipt photos',demo:'25 demo receipts'};
 let loadingSamples=false;
 function render(){
   const has=batch.length>0;$('#landing').hidden=has;$('#workspace').hidden=!has;
@@ -298,14 +297,19 @@ function render(){
   if(!has)return;
   const sets=new Set(batch.map(r=>r.demo?.set).filter(Boolean));
   const more=$('#more-samples');
-  more.hidden=sets.size!==1;
-  if(!more.hidden){more.dataset.next=sets.has('photos')?'demo':'photos';more.textContent='Add '+sampleLabels[more.dataset.next];more.disabled=loadingSamples;}
+  more.hidden=!sets.size || (sets.has('featured') && sets.has('photos'));
+  if(!more.hidden){
+    more.dataset.next=sets.has('photos')?'featured':'photos';
+    more.textContent=sets.has('photos')?'Add remaining demo photos':'Add photos from the 25-photo collection';
+    more.disabled=loadingSamples;
+  }
   $('#verify-import-photos').hidden=!batch.some(r=>r.origin==='achung' || r.origin==='workbook');
   $('#verify-import-photos').disabled=verifyingPhotos;
   const done=active(), work=batch.some(notDone)||verifyingPhotos,nRows=done.reduce((n,r)=>n+Math.max(1,r.data.items.length),0);
   const dollars=batch.reduce((n,r)=>n+Number(r.firstData?.cost||0)+(r.previous?Number(r.data?.cost||0):0),0);
+  const checkedDemo=batch.every(r=>r.demo?.set==='featured' && r.useSaved) ? '<span>Checked demo readings</span>' : '';
   const timing=work?'<span>Processing…</span>':startTime?`<span>${((Math.max(finishedTime||Date.now(),startTime)-startTime)/1000).toFixed(1)} s</span>`:'';
-  $('#summary').innerHTML=`<span><b>${batch.length}</b> receipt${batch.length===1?'':'s'}</span><span><b>${nRows}</b> export row${nRows===1?'':'s'}</span><span><b>${batch.filter(isReview).length}</b> to review</span>${timing}${dollars?`<span>Est. model cost $${dollars.toFixed(4)}</span>`:''}${orderList?`<span>Order list · ${escape(orderFilename)}</span>`:''}`;
+  $('#summary').innerHTML=`<span><b>${batch.length}</b> receipt${batch.length===1?'':'s'}</span><span><b>${nRows}</b> export row${nRows===1?'':'s'}</span><span><b>${batch.filter(isReview).length}</b> to review</span>${checkedDemo}${timing}${dollars?`<span>Est. model cost $${dollars.toFixed(4)}</span>`:''}${orderList?`<span>Order list · ${escape(orderFilename)}</span>`:''}`;
   $('#filters').innerHTML=Object.entries(filterTitles).map(([k,t])=>`<button data-filter="${k}" aria-pressed="${filter===k}">${t} <span class="num">${batch.filter(r=>filt(r,k)).length}</span></button>`).join('');
   const q=$('#search').value.trim().toLowerCase(), shown=batch.filter(r=>filt(r,filter)&&(!q||textOf(r).includes(q))).sort(oldestPurchaseFirst);
   const headers=['Receipt','Purchase date','Shop','Order number','Brand','Item ID','Item','Price'].map(title=>
@@ -357,7 +361,7 @@ function updateReceiptFields(r,data,removeIndex=null){
 }
 async function openDetail(id,path=''){
   const r=batch.find(x=>x.id===Number(id));if(!r)return;
-  const {showDetail}=await import('./detail.js?v=excelrefresh1');
+  const {showDetail}=await import('./detail.js?v=curatedphotos1');
   const refresh=()=>{duplicates();render();};
   const rerender=(focus='')=>{refresh();openDetail(r.id,focus).catch(e=>note(e.message));};
   showDetail({...r,data:r.record||r.data},{
@@ -394,12 +398,15 @@ document.addEventListener('dragenter',e=>{if(isFileDrag(e)){e.preventDefault();d
 document.addEventListener('dragleave',e=>{if(isFileDrag(e)&&--dragDepth<=0){dragDepth=0;document.body.classList.remove('dragging');}});
 document.addEventListener('dragover',e=>{if(isFileDrag(e))e.preventDefault();});
 document.addEventListener('drop',e=>{if(isFileDrag(e)){e.preventDefault();dragDepth=0;document.body.classList.remove('dragging');if(!document.querySelector('dialog[open]'))fileSelection(e.dataTransfer.files);}});
-async function addSampleSet(set) {
+async function addSampleSet(set, useSaved=savedSamples) {
   if(loadingSamples || batch.some(r=>r.demo?.set===set))return;
   loadingSamples=true;
   const controls=document.querySelectorAll('[data-sample-set],#more-samples');
   for(const button of controls)button.disabled=true;
-  try { startInput(await loadSamples(set)); }
+  try {
+    const existing=new Set(batch.filter(r=>r.demo).map(r=>r.filename));
+    startInput(await loadSamples(set,existing),useSaved);
+  }
   catch(error) { note(error.message); }
   finally { loadingSamples=false;for(const button of controls)button.disabled=false;render(); }
 }
@@ -607,3 +614,7 @@ $('#settings').onclick=()=>{$('#reader').value=mode;$('#key').value=apiKey;$('#s
 $('#settings-form').onsubmit=e=>{e.preventDefault();const selected=$('#reader').value,key=$('#key').value.trim();if(selected==='ai'&&!key)return;mode=selected;apiKey=selected==='ai'?key:'';savedSamples=$('#sample-reading').value==='saved';$('#key').value='';$('#settings-dialog').close();note('Reading settings saved.');};
 for(const b of document.querySelectorAll('[data-close]'))b.onclick=()=>document.getElementById(b.dataset.close).close();
 for(const d of document.querySelectorAll('dialog'))d.addEventListener('click',e=>{if(e.target===d){const b=d.getBoundingClientRect();if(e.clientX<b.left||e.clientX>b.right||e.clientY<b.top||e.clientY>b.bottom)d.close();}});
+
+const example=new URLSearchParams(location.search).get('examples');
+if(example==='fictional')addSampleSet('demo');
+if(example==='checked')addSampleSet('featured',true);

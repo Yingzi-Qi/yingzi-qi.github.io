@@ -2,6 +2,7 @@ import {currencyCode,readMoney} from './orders.js?v=lineverify1';
 
 const text = value => String(value ?? '').trim();
 const words = value => text(value).normalize('NFKC').toLowerCase().replace(/\s+/g,' ');
+const productName = value => words(value).replace(/[‘’]/g,"'");
 const labels = {item:'Item name',brand:'Brand',amount:'Price',itemId:'Item ID'};
 const orderRefs = [['orderId','order_id'],['orderNumber','order_number']];
 const unique = values => [...new Set(values.filter(Boolean))];
@@ -84,7 +85,7 @@ function compareField(key,item,currency,rows,source,purchase) {
   const evidence=rows.map(row=>{
     if (key==='amount') return priceObservation(item,currency,row,purchase);
     const expected=text(row[key]);
-    return expected ? {actual,expected,signature:words(expected),agrees:words(expected)===words(actual)} : null;
+    return expected ? {actual,expected,signature:productName(expected),agrees:productName(expected)===productName(actual)} : null;
   });
   const observed=evidence.filter(Boolean);
   const values=unique(observed.map(x=>x.signature));
@@ -120,10 +121,10 @@ function summarize(fields,notes) {
 // A supplied order can identify a different printed ID only when a separate
 // line anchor agrees. An unsuccessful ID lookup alone is not a discrepancy.
 function differentOrderId(item,id,rows,source) {
-  const sku=text(item.sku), name=words(item.item), brand=words(item.brand);
+  const sku=text(item.sku), name=productName(item.item), brand=productName(item.brand);
   const anchors=rows.filter(row=>{
     if (sku && text(row.sku)) return text(row.sku)===sku;
-    return name && brand && words(row.item)===name && words(row.brand)===brand;
+    return name && brand && productName(row.item)===name && productName(row.brand)===brand;
   });
   const values=unique(anchors.map(row=>text(row.item_id)));
   return values.length===1 && anchors.every(row=>text(row.item_id)) && values[0]!==id

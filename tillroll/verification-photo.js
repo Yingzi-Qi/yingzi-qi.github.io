@@ -1,4 +1,5 @@
-import {readPrintedProductRows,readPrintedAmounts,nearbyPrintedRows} from './extract.js?v=productcodes3';
+import {currencyMarks,receiptCurrency} from './photo-currency.js';
+import {readPrintedProductRows,readPrintedAmounts,nearbyPrintedRows} from './extract.js?v=curatedphotos1';
 
 const fields=['item','brand','amount','unitPrice','qty','currency'];
 const fold=value=>String(value??'').normalize('NFKC').replace(/\s+/g,' ').trim().toLowerCase();
@@ -17,21 +18,6 @@ function readLine(line) {
 function visiblePrices(line) {
   return readPrintedAmounts(line.text).map(({value,start,end})=>
     line.clear.slice(start,end)===line.text.slice(start,end) ? value : null);
-}
-function currencyMarks(text) {
-  const iso=text.toUpperCase().match(/\b(?:GBP|EUR|USD|CAD|AUD|NZD|CHF|CNY|JPY)\b/g) || [];
-  if(text.includes('£'))iso.push('GBP');
-  if(text.includes('€'))iso.push('EUR');
-  return unique(iso);
-}
-function receiptCurrency(lines) {
-  const all=lines.map(line=>line.clear).join('\n');
-  const codes=currencyMarks(all);
-  if(codes.length===1)return codes[0];
-  // A bare dollar sign alone leaves the dollar currency unresolved.
-  if(!codes.length && all.includes('$') && lines.slice(0,10).some(({clear})=>
-    /\b(?:AL|AK|AZ|AR|CA|CO|CT|DE|DC|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY)\s+\d{5}(?:-\d{4})?\b/.test(clear)))return 'USD';
-  return null;
 }
 function idEvidence(ocr,lines,entry) {
   const {item,nameLine,priceLine,idLine}=entry;
@@ -53,7 +39,7 @@ function idEvidence(ocr,lines,entry) {
 }
 function readPhoto(ocr) {
   if(!ocr?.lines?.length)return [];
-  const lines=ocr.lines.map(readLine), defaultCurrency=receiptCurrency(lines), rows=[];
+  const lines=ocr.lines.map(readLine), defaultCurrency=receiptCurrency(lines.map(line=>line.clear)), rows=[];
   for(const entry of readPrintedProductRows(ocr)){
     const {item:product,nameLine,priceLine,unitLine,header}=entry;
     if(!product.itemId)continue;
@@ -87,7 +73,7 @@ function readPhoto(ocr) {
       hasQtyHeading && includesPhrase(unitText,String(product.qty))) ? product.qty : null;
     const here=currencyMarks(price.clear+' '+unit.clear);
     let currency=here.length===1 ? here[0] : here.length ? null : defaultCurrency;
-    if((price.clear+unit.clear).includes('$') && !['USD','CAD','AUD','NZD'].includes(currency))currency=null;
+    if((price.clear+unit.clear).includes('$') && !['USD','CAD','AUD','NZD','SGD'].includes(currency))currency=null;
     const evidence=unique([idAt,nameLine,priceLine,unitLine]).sort((a,b)=>a-b).map(i=>lines[i].text).join(' | ');
     rows.push({itemId:product.itemId,item,brand,amount,unitPrice,qty,currency,evidence});
   }
