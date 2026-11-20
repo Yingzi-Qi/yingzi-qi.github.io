@@ -182,9 +182,17 @@ function inspectDate(value, now, flag) {
   if (parsed < fiveYearsAgo) flag('date','Purchase date is more than five years ago.', 'check');
 }
 
+function includedLineDiscount(item) {
+  const discount=number(item.lineDiscount), qty=number(item.qty), price=number(item.unitPrice), amount=number(item.amount);
+  if(discount===null || discount<=0 || qty===null || price===null || amount===null) return 0;
+  return near(qty*price-discount,amount) ? discount : 0;
+}
+
 function arithmetic(data, items, flag, repeats) {
   const amounts = items.map(i => number(i.amount)), total = number(data.total);
-  const sum = amounts.reduce((a, b) => a + (b || 0), 0), discount = number(data.discount) ?? 0, tax = number(data.tax);
+  const sum = amounts.reduce((a, b) => a + (b || 0), 0), tax = number(data.tax);
+  const alreadyApplied = items.reduce((value,item)=>value+includedLineDiscount(item),0);
+  const discount = Math.max(0,(number(data.discount) ?? 0)-alreadyApplied);
   const balances = beforeDiscount => total !== null && (
     near(beforeDiscount - discount, total) || (tax !== null && near(beforeDiscount - discount + tax, total)));
   const repeated = new Map();
@@ -257,7 +265,7 @@ export function checkReceipt(data, ocr, previous = null, {independentPhoto = fal
     if (text(item.item) && !text(item.brand)) add(path+'brand','No brand was read for this item.', 'info');
     const amount = number(item.amount), qty = number(item.qty), unit = number(item.unitPrice);
     if (amount === null) add(path+'amount','Line amount is missing or unreadable.', 'fix');
-    else if (qty !== null && unit !== null && !near(qty*unit, amount)) add(path+'amount','Quantity multiplied by unit price differs from the line amount.', 'fix');
+    else if (qty !== null && unit !== null && !near(qty*unit-includedLineDiscount(item), amount)) add(path+'amount','Quantity multiplied by unit price differs from the line amount.', 'fix');
   });
   arithmetic(data, items, add, repeats);
   for (const issue of Array.isArray(data.fieldIssues) ? data.fieldIssues : []) {

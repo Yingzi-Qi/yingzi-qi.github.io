@@ -1,7 +1,7 @@
 import {readPhoto,secondReadPhoto,extractLocal,extractAI} from './extract.js';
-import {checkReceipt,samePurchase} from './checks.js';
+import {checkReceipt,samePurchase} from './checks.js?v=2';
 import {exportExcel,exportCSV,readOrderFile} from './exports.js';
-import {loadSamples} from './samples.js';
+import {loadSamples} from './samples.js?v=2';
 import {compareOrder} from './orders.js';
 const $ = s=>document.querySelector(s);
 const escape = v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -57,7 +57,7 @@ async function run(r){
     const owner=hashOwners.get(r.hash);
     if(owner && owner!==r.id){r.exactOf=owner;r.duplicateOf=owner;r.state='duplicate';return;}
     hashOwners.set(r.hash,r.id);
-    if(r.demo){r.data=normalData(structuredClone(r.demo.data));r.ocr=r.demo.ocr;r.origin='sample';r.method='Sample';}
+    if(r.demo){r.data=normalData(structuredClone(r.demo.data));r.ocr=r.demo.ocr;r.origin='sample';r.method=r.demo.set==='photos'?'Photo sample':'Demo';}
     else{
       const modelEnabled=chosenMode==='ai'&&!!chosenKey;
       const [ocrRead,aiRead]=await Promise.allSettled([readPhoto(r.file),modelEnabled?extractAI(r.file,chosenKey,1,[]):Promise.resolve(null)]);if(!current())return;
@@ -95,8 +95,14 @@ function rowHTML(r){
   const d=r.data, items=d.items.length?d.items:[blankItem()];
   return items.map((it,i)=>{const prop=k=>cell(r,`items.${i}.${k}`,it[k]);return `<tr><td>${first}</td><td>${cell(r,'merchant',d.merchant)}</td><td>${cell(r,'orderId',d.orderId)}</td><td>${prop('brand')}</td><td>${prop('item')}</td><td class="qty">${prop('qty')}</td><td class="money">${cell(r,`items.${i}.amount`,it.amount==null?null:Number(it.amount).toLocaleString('en-GB',{minimumFractionDigits:2,maximumFractionDigits:2}))}</td><td>${r.duplicateOf?badge('Duplicate of #'+r.duplicateOf,'muted'):photoBadge(r.review.photo[i])}</td><td>${r.orders?badge(r.orders[i]?.status||'Needs review',r.orders[i]?.status==='Matched'?'':'warn'):cell(r,'payment',d.payment)}</td><td>${r.duplicateOf?'—':badge(isReview(r)?'Needs review':'Checked',isReview(r)?'warn':'')}</td><td>${escape(r.method)}</td></tr>`;}).join('');
 }
+const sampleLabels={photos:'25 real receipt photos',demo:'25 demo receipts'};
+let loadingSamples=false;
 function render(){
   const has=batch.length>0;$('#landing').hidden=has;$('#workspace').hidden=!has;if(!has)return;
+  const sets=new Set(batch.map(r=>r.demo?.set).filter(Boolean));
+  const more=$('#more-samples');
+  more.hidden=sets.size!==1;
+  if(!more.hidden){more.dataset.next=sets.has('photos')?'demo':'photos';more.textContent='Add '+sampleLabels[more.dataset.next];more.disabled=loadingSamples;}
   const done=active(), work=batch.some(notDone),nRows=done.reduce((n,r)=>n+Math.max(1,r.data.items.length),0);
   const dollars=batch.reduce((n,r)=>n+Number(r.firstData?.cost||0)+(r.previous?Number(r.data?.cost||0):0),0);
   $('#summary').innerHTML=`<span><b>${batch.length}</b> receipt${batch.length===1?'':'s'}</span><span><b>${nRows}</b> export row${nRows===1?'':'s'}</span><span><b>${batch.filter(isReview).length}</b> to review</span>${work?'<span>Processing…</span>':`<span>${((Math.max(finishedTime||Date.now(),startTime)-startTime)/1000).toFixed(1)} s</span>`}${dollars?`<span>Est. model cost $${dollars.toFixed(4)}</span>`:''}${orderList?`<span>Order list · ${escape(orderFilename)}</span>`:''}`;
@@ -107,7 +113,7 @@ function render(){
 }
 async function openDetail(id,path=''){
   const r=batch.find(x=>x.id===Number(id));if(!r)return;
-  const {showDetail}=await import('./detail.js');
+  const {showDetail}=await import('./detail.js?v=2');
   const refresh=()=>{duplicates();render();};
   const rerender=(focus='')=>{refresh();openDetail(r.id,focus).catch(e=>note(e.message));};
   showDetail(r,{
@@ -129,7 +135,18 @@ document.addEventListener('dragenter',e=>{if(isFileDrag(e)){e.preventDefault();d
 document.addEventListener('dragleave',e=>{if(isFileDrag(e)&&--dragDepth<=0){dragDepth=0;document.body.classList.remove('dragging');}});
 document.addEventListener('dragover',e=>{if(isFileDrag(e))e.preventDefault();});
 document.addEventListener('drop',e=>{if(isFileDrag(e)){e.preventDefault();dragDepth=0;document.body.classList.remove('dragging');if(!document.querySelector('dialog[open]'))fileSelection(e.dataTransfer.files);}});
-$('#samples').onclick=async()=>{const b=$('#samples');b.disabled=true;try{startInput(await loadSamples());}catch(e){note(e.message);}finally{b.disabled=false;}};
+async function addSampleSet(set) {
+  if(loadingSamples || batch.some(r=>r.demo?.set===set))return;
+  loadingSamples=true;
+  const controls=document.querySelectorAll('[data-sample-set],#more-samples');
+  for(const button of controls)button.disabled=true;
+  try { startInput(await loadSamples(set)); }
+  catch(error) { note(error.message); }
+  finally { loadingSamples=false;for(const button of controls)button.disabled=false;render(); }
+}
+for(const button of document.querySelectorAll('[data-sample-set]'))
+  button.onclick=()=>addSampleSet(button.dataset.sampleSet);
+$('#more-samples').onclick=e=>addSampleSet(e.currentTarget.dataset.next);
 $('#filters').onclick=e=>{const b=e.target.closest('[data-filter]');if(b){filter=b.dataset.filter;render();}};
 $('#search').oninput=render;
 $('#table').onclick=e=>{const b=e.target.closest('[data-id]');if(b)openDetail(b.dataset.id,b.dataset.path).catch(err=>note(err.message));};

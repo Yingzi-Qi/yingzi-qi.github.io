@@ -208,6 +208,16 @@ export function showDetail(r, callbacks={}, focusPath='') {
     const image=element('img');image.alt='Original photo for '+r.filename;image.src=r.url;
     const link=element('a');link.href=r.url;link.target='_blank';link.rel='noopener noreferrer';link.title='Open full-size receipt';link.append(image);picture.append(link);
   }
+  if(r.demo?.credit) {
+    const credit=element('p',undefined,'picture-credit');
+    const source=element('a',r.demo.credit.label);
+    source.href=r.demo.credit.url;source.target='_blank';source.rel='noopener noreferrer';
+    credit.append(source);picture.append(credit);
+  }
+  if(Number.isFinite(r.data?.total)) {
+    const amount=r.data.total.toLocaleString('en-GB',{minimumFractionDigits:2,maximumFractionDigits:2});
+    heading.append(element('small',['Receipt total',r.data.currency,amount].filter(Boolean).join(' ')));
+  }
   const panel=element('div',undefined,'review-panel');
   if (r.demo?.note) panel.append(element('p',r.demo.note,'hint'));
   if (r.duplicateOf || r.exactOf) {
