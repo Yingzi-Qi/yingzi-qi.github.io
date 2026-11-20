@@ -7,3 +7,11 @@
 .real-card .photos{background:#dde4e7}.source-link{margin-top:16px;font-size:.9rem}.source-link a,.picture-credit a,.source-page a{color:var(--green);text-underline-offset:.2em}.picture-credit{font-size:.85rem;line-height:1.45;margin-top:12px}.source-page{max-width:760px;margin:48px auto}.source-page h1{font-size:clamp(2.4rem,6vw,4rem)}.source-page h2{font-size:1.6rem;margin:32px 0 12px}.source-page p,.source-page li{line-height:1.6}.source-page li+li{margin-top:7px}
 
 button.review-reason{min-height:28px;border-color:transparent;font-weight:500}button.review-reason:hover{border-color:#b68b48;background:#fce6a5}
+.photo-frame{--photo-height:78vh;position:relative;display:inline-block;vertical-align:top;width:min(100%,calc(var(--photo-height)*var(--photo-ratio,1)))}
+.picture .photo-frame img{width:100%;height:auto;max-height:none}
+.reference-marker{position:absolute;pointer-events:none;outline:2px solid #02524a;box-shadow:0 0 0 4px white;background:rgb(14 144 116 / 13%)}
+.reference-marker.tentative{outline:2px dashed #704800;background:rgb(255 197 68 / 15%)}
+.reference-value{margin-top:6px;font-size:.94rem;font-weight:550;overflow-wrap:anywhere}
+@media(max-width:800px){.photo-frame{--photo-height:255px}}
+
+td button.reference-cell{height:auto;text-align:left}button.reference-cell small{display:block;color:var(--muted);font-size:.74rem}

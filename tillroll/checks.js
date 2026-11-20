@@ -1,3 +1,5 @@
+import {orderNeedsReview} from './orders.js?v=4';
+import {inspectReference} from './reference.js?v=4';
 // Geometry is normalized to the upright photo, with the origin at its top left.
 const PHOTO_CONFIDENCE = 0.8;
 const ID_LABEL = /^order\s+i\.?d\.?\s*[:#]?$/i;
@@ -159,15 +161,18 @@ function labelledProductLines(lines) {
   return pairs;
 }
 
-function verifyPhoto(data, ocr, independent) {
+function verifyPhoto(data, ocr, independent, reference) {
   const lines = visualLines(ocr), ids = printedIds(lines);
   const labelled = labelledProductLines(lines);
+  const locatedId = reference.status==='found' && reference.kind==='orderId';
+  if(locatedId && !ids.some(id=>id.id===reference.value))
+    ids.push({id:reference.value,evidence:reference.evidence,confidence:reference.certainty});
   const idEvidence = unique(ids.map(id => id.evidence)).join(' | ');
   const orderId = text(data.orderId);
   let idIssue = '';
   const expectsId = Boolean(orderId || ids.length);
   if (!orderId && ids.length) idIssue = 'The photo has a labelled order ID that is missing from the extracted record.';
-  else if (orderId && !ids.length) idIssue = 'Could not read the extracted order ID beside an order ID label.';
+  else if (orderId && !ids.length) idIssue = 'The extracted order ID could not be located on the photo.';
   else if (ids.some(entry => entry.id !== orderId)) idIssue = 'The printed order ID differs or the photo shows conflicting IDs.';
   else if (ids.length && Math.max(...ids.map(id => id.confidence)) < PHOTO_CONFIDENCE) idIssue = 'The printed ID is unclear.';
 
@@ -202,7 +207,7 @@ function verifyPhoto(data, ocr, independent) {
       const hit = match?.hits[index] || match?.hits[0];
       const paired = enough && !collides && hit?.confidence >= PHOTO_CONFIDENCE;
       if (conflict) issueList.push('The labelled brand or item on the photo differs from the extracted product.');
-      else if (expectsId && match && !paired) {
+      else if (expectsId && reference.basis!=='order-list' && match && !paired) {
         if (!match.hits.length) issueList.push('The full item and brand could not be paired on the printed line.');
         else if (!enough || collides) issueList.push('Repeated or overlapping product lines could not be paired uniquely.');
         else issueList.push('The product line is unclear.');
@@ -216,11 +221,11 @@ function verifyPhoto(data, ocr, independent) {
         status = 'Needs review'; reason = issueList.join(' ');
       } else if (paired && expectsId) {
         status = independent ? 'Confirmed on photo' : 'Text agrees';
-        reason = 'The labelled order ID and the paired brand and item agree with the receipt reading.';
+        reason = 'The located order ID and the paired brand and item agree with the receipt reading.';
       } else {
         status = paired ? 'Brand and item found' : itemHit ? 'Item found' : skuLine ? 'SKU found' : 'Not verified';
         const evidence = paired ? 'The brand and item appear together.' : itemHit ? 'The item wording appears on the receipt.' : skuLine ? 'The printed SKU agrees. The item wording could not be confirmed.' : 'The item could not be independently identified in the photo text.';
-        reason = evidence + (expectsId ? ' The labelled order ID agrees.' : ' No labelled order ID was available for comparison.');
+        reason = evidence + (expectsId ? ' The located order ID agrees.' : ' No order ID was established for comparison.');
       }
       result[i] = {
         status, reason, idEvidence,
@@ -321,7 +326,7 @@ function printedOrderNumbers(ocr) {
   return printedNumbers;
 }
 
-export function checkReceipt(data, ocr, previous = null, {independentPhoto = false, today = new Date()} = {}) {
+export function checkReceipt(data, ocr, previous = null, {independentPhoto = false, today = new Date(), reference = inspectReference(data,ocr)} = {}) {
   const items = data.items || [], flags = [], confirmedFields = [];
   const repeats = Array(items.length).fill(null);
   const add = (field, message, severity, escalate = severity !== 'info') => {
@@ -335,10 +340,15 @@ export function checkReceipt(data, ocr, previous = null, {independentPhoto = fal
   const retailer = identifier(data.merchant);
   const format = retailFormats.find(([key]) => retailer.includes(key))?.[1];
   const printedNumbers = printedOrderNumbers(ocr);
+  if(reference.status==='found' && data[reference.kind] && name(data[reference.kind])!==name(reference.value)) {
+    add(reference.kind,reference.label+' differs from the value on the photo ('+reference.value+').','check');
+  } else if(reference.reasonCode==='conflict') {
+    add('receipt',reference.reason,'check');
+  }
   const orderNumber = text(data.orderNumber);
   if (!orderNumber) {
     if (printedNumbers.size) add('orderNumber','A labelled order number is visible on the photo but is missing from the record.', 'fix');
-    else add('orderNumber',text(data.orderId) ? 'Only an order ID is available.' : 'No order reference is available for matching.', 'info');
+    else if (!text(data.orderId)) add('orderNumber',text(data.receiptReference) ? 'A receipt reference is available. Order-list matching requires a shared order reference.' : 'No confirmed order reference is available for matching.', 'info');
   } else if ([...printedNumbers].some(value => {
     if (value.toLowerCase() === orderNumber.toLowerCase()) return false;
     // A Q or O in a digits-only field is a common OCR reading of zero.
@@ -372,7 +382,7 @@ export function checkReceipt(data, ocr, previous = null, {independentPhoto = fal
     if (text(previous?.[key]) && text(data[key]) && text(previous[key]) !== text(data[key]))
       add(key,'The two readings disagree. First reading: '+text(previous[key])+'.', 'check', false);
   }
-  const photo = verifyPhoto(data, ocr, independentPhoto);
+  const photo = verifyPhoto(data, ocr, independentPhoto, reference);
   photo.forEach((row, i) => {
     if (row.status === 'Needs review') add('items.'+i+'.photo', row.reason, 'check', true);
   });
@@ -386,7 +396,7 @@ export function reviewForLine(receipt, index) {
   const messages = flags.map(flag => flag.message);
   const photo = receipt.review?.photo?.[index], order = receipt.orders?.[index];
   if (photo?.status === 'Needs review') messages.push(photo.reason);
-  if (order && order.status !== 'Matched') messages.push(order.reason || order.status);
+  if (orderNeedsReview(order)) messages.push(order.reason || order.status);
   return {flags, messages:unique(messages.filter(Boolean))};
 }
 

@@ -19,6 +19,10 @@ function result(status,reason,line={}) {
     order_sku:text(line.sku),order_qty:text(line.qty)};
 }
 
+export function orderNeedsReview(order) {
+  return Boolean(order?.status && order.status !== 'Matched' && order.status !== 'Not compared');
+}
+
 function lookup(data,orders) {
   const retailer=name(data.merchant);
   if (!retailer) return result('Needs review','Receipt retailer is missing.');
@@ -27,7 +31,7 @@ function lookup(data,orders) {
   const values={order_id:reference(data.orderId),order_number:reference(data.orderNumber)};
   const ref=values[primary], extra=values[other];
   const label=primary==='order_id'?'order ID':'order number';
-  if (!ref) return result('Needs review','Receipt has neither an order ID nor an order number.');
+  if (!ref) return result('Not compared','There is no shared order ID or order number to look up.');
   const retailerOrders=orders.filter(row=>name(row.retailer)===retailer);
   const lines=retailerOrders.filter(row=>reference(row[primary])===ref);
   if (!lines.length) {

@@ -1,4 +1,5 @@
-import {reviewForLine} from './checks.js?v=3';
+import {orderNeedsReview} from './orders.js?v=4';
+import {reviewForLine} from './checks.js?v=4';
 import * as zipPackage from './export-vendor/jszip.min.js';
 
 const JSZip = zipPackage.default ?? globalThis.JSZip;
@@ -19,7 +20,10 @@ const receiptColumns = [
   ['Needs Checking','message',48,'review'], ['File','filename',28,'meta'],
   ['Photo check','status',22,'photo'], ['Photo check reason','reason',52,'photo'],
   ['Order ID on photo','idEvidence',30,'photo'], ['Brand on photo','brandEvidence',29,'photo'],
-  ['Item on photo','itemEvidence',38,'photo']
+  ['Item on photo','itemEvidence',38,'photo'],
+  ['Receipt reference','receiptReference',24], ['Located reference','value',24,'reference'],
+  ['Reference type','label',22,'reference'], ['Reference evidence','evidence',46,'reference'],
+  ['Reference finding','reason',52,'reference']
 ];
 const orderColumns = [
   ['Order check','status',24,'order'], ['Order check detail','reason',52,'order'],
@@ -41,7 +45,7 @@ function exportData(receipts) {
       const photo = r.review?.photo?.[i] ?? {};
       const order = r.orders?.[i] ?? {};
       const sources = {
-        receipt:r.data, line, photo, order, meta:r,
+        receipt:r.record || r.data, line, photo, order, meta:r, reference:r.reference || {},
         review:{message:messages.join('; ')}
       };
       rows.push(columns.map(([,key,,source='receipt',type]) => {
@@ -51,7 +55,7 @@ function exportData(receipts) {
         const field = source === 'line' ? prefix+key : key;
         const flagged = flags.some(f=>f.field===field) || (source==='review' && value!=='')
           || (source==='photo' && ['status','reason'].includes(key) && photo.status === 'Needs review')
-          || (source==='order' && ['status','reason'].includes(key) && order.status && order.status!=='Matched');
+          || (source==='order' && ['status','reason'].includes(key) && orderNeedsReview(order));
         return {value,numeric,style:flagged ? (type==='money' ? 5 : 4) : type==='money' ? 3 : 0};
       }));
     });

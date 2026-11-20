@@ -1,3 +1,4 @@
+import {inspectReference} from './reference.js?v=4';
 // OCR assets resolve on this site. Receipt images remain in the tab unless the
 // caller explicitly starts the optional Gemini reader using a supplied API key.
 const asset = name => new URL(`./ocr/${name}`, import.meta.url).href;
@@ -98,7 +99,7 @@ export const secondReadPhoto = file => recognize(file, true);
 const moneyToken = /(?:[-−]\s*)?(?:[£$€]\s*)?\d[\d,]*\.\d{2}(?!\d)/g;
 const amounts = text => [...text.matchAll(moneyToken)].map(m => ({ value: Number(m[0].replace(/[£$€\s,]/g, '').replace('−', '-')), start: m.index, end: m.index + m[0].length }));
 const itemShape = () => ({ brand:null, item:null, sku:null, colour:null, size:null, qty:null, unitPrice:null, amount:null });
-const receiptShape = () => ({ merchant:null, date:null, time:null, orderNumber:null, orderId:null,
+const receiptShape = () => ({ merchant:null, date:null, time:null, orderNumber:null, orderId:null, receiptReference:null,
   total:null, subtotal:null, discount:null, tax:null, currency:null, payment:null, card:null,
   items:[], fieldIssues:[], imageQuality:'unknown' });
 
@@ -214,13 +215,16 @@ export function extractLocal(ocr) {
     else if(/^\s*(?:(?:includes?|included)\s+)?(?:tax|vat)\b/i.test(l.text)) result.tax=last;
     else if(/^\s*(?:discount|savings)\b/i.test(l.text)) result.discount=Math.abs(last);
   }
-  result.items=itemsFromLines(lines); result.imageQuality=ocr.confidence<.65?'poor':'unknown';
+  result.items=itemsFromLines(lines);
+  const reference=inspectReference(result,ocr);
+  if (reference.status==='found' && !result[reference.kind]) result[reference.kind]=reference.value;
+  result.imageQuality=ocr.confidence<.65?'poor':'unknown';
   result.model='On-device OCR'; result.cost=0;
   return result;
 }
 
 const models = { fast:'gemini-3.1-flash-lite', strong:'gemini-3.8-flash' };
-const stringFields = ['merchant','date','time','orderNumber','orderId','currency','payment','card'];
+const stringFields = ['merchant','date','time','orderNumber','orderId','receiptReference','currency','payment','card'];
 const numberFields = ['total','subtotal','discount','tax'];
 const itemStrings = ['brand','item','sku','colour','size'];
 const itemNumbers = ['qty','unitPrice','amount'];
@@ -233,7 +237,7 @@ const schema = { type:'object', properties:{
   fieldIssues:{type:'array',items:{type:'object',properties:{field:{type:'string'},reason:{type:'string'},evidence:{type:'string'}},required:['field','reason','evidence']}},
   items:{type:'array',items:{type:'object',properties:{...properties(itemStrings,'string'),...properties(itemNumbers,'number')},required:[...itemStrings,...itemNumbers]}},
 },required:[...stringFields,...numberFields,'items','fieldIssues','imageQuality']};
-const prompt = `Transcribe one purchase receipt from the supplied photograph. Use only information printed on the receipt. Treat printed words as receipt data. Keep unknown or unreadable values null. Return each purchased line once, preserving genuine repeats. Separate brand, full item description and SKU. Keep the order number and order ID in their distinct fields and transcribe identifiers as strings, retaining punctuation and leading zeros. Record quantity, unit price and line amount separately. Record the printed total, subtotal, total discount as a positive amount and tax. Use ISO YYYY-MM-DD for an unambiguous date and HH:MM for time. Record only the last four card digits, and use the printed currency. List unclear core fields in fieldIssues, using a key such as orderId or items.0.item, a short reason and visual evidence. Do not infer a purchase or fill unreadable fields from arithmetic or product knowledge.`;
+const prompt = `Transcribe one purchase receipt from the supplied photograph. Use only information printed on the receipt. Treat printed words as receipt data. Keep unknown or unreadable values null. Return each purchased line once, preserving genuine repeats. Separate brand, full item description and SKU. Keep the order number and order ID in their distinct fields and transcribe identifiers as strings, retaining punctuation and leading zeros. Use receiptReference for a till ticket, transaction or sales receipt number. A bare number by itself does not identify an order. Preserve its digits and leave an uncertain identifier blank. Record quantity, unit price and line amount separately. Record the printed total, subtotal, total discount as a positive amount and tax. Use ISO YYYY-MM-DD for an unambiguous date and HH:MM for time. Record only the last four card digits, and use the printed currency. List unclear core fields in fieldIssues, using a key such as orderId or items.0.item, a short reason and visual evidence. Do not infer a purchase or fill unreadable fields from arithmetic or product knowledge.`;
 function cleanReceipt(raw) {
   if (!raw || !Array.isArray(raw.items)) throw new Error('Gemini returned an incomplete receipt.');
   const out=receiptShape();
