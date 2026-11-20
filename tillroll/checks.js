@@ -1,4 +1,5 @@
 import {orderNeedsReview} from './orders.js?v=6';
+import {isPrintedItemNumber,parsePrintedItemId} from './product-code.js?v=itemid2';
 import {referenceFormat} from './retail-rules.js?v=6';
 import {validCalendarDate} from './purchase-date.js?v=6';
 import {inspectReference} from './reference.js?v=6';
@@ -95,18 +96,23 @@ function productLines(lines) {
     let hadPrice = false;
     while (cells.length > 1 && PRICE.test(cells.at(-1).text)) { cells.pop(); hadPrice = true; }
     if (hadPrice && cells.length > 1 && /^\d+$/.test(cells.at(-1).text)) cells.pop();
-    const wording = cells.map(c => c.text).join(' ').replace(TRAILING_PRICE, '');
-    return {line, cells, wording: name(wording), confidence: Math.min(...cells.map(c => c.confidence))};
+    const plain = cells.map(c => c.text).join(' ').replace(TRAILING_PRICE, '');
+    const parsed = parsePrintedItemId(codeDescription(line.text));
+    return {line,cells,parsed,wording:name(parsed?.item || plain),confidence:Math.min(...cells.map(c => c.confidence))};
   });
 }
 
 function productEvidence(lines, brand, item) {
   const hits = [];
   let brandEvidence = '', itemEvidence = '';
-  for (const [i, {line, wording, cells, confidence}] of lines.entries()) {
+  for (const [i, {line, wording, cells, confidence, parsed}] of lines.entries()) {
+    const fieldText=value=>{
+      const read=parsed && parsePrintedItemId(value);
+      return name(read && read.itemId===parsed.itemId ? read.item : value);
+    };
     const split = cells.some((_, splitAt) => splitAt > 0 &&
-      name(cells.slice(0, splitAt).map(c => c.text).join(' ')) === brand &&
-      name(cells.slice(splitAt).map(c => c.text).join(' ').replace(TRAILING_PRICE, '')) === item);
+      fieldText(cells.slice(0, splitAt).map(c => c.text).join(' ')) === brand &&
+      fieldText(cells.slice(splitAt).map(c => c.text).join(' ').replace(TRAILING_PRICE, '')) === item);
     const delimiter = [' - ', ' – ', ' | ', ': '].some(separator => wording === brand + separator + item);
     if (split || delimiter) hits.push({rows:[i], brand:line.text, item:line.text, confidence});
     if (wording === item) {
@@ -161,7 +167,29 @@ const nonProductLine=/^\s*(?:sub\s*total|total|payment|visa|amex|master\s*card|c
 const productCodeLabel=/\b(sku|style(?:\s*(?:\/\s*sku|code|no\.?|number|id))?|(?:(?:item|product|article)\s*(?:id|code|no\.?|number))|upc|ean|gtin|barcode)\b\s*[:#=]?\s*/ig;
 const codeKind=label=>/^(sku|style)/i.test(label)?'sku':'itemId';
 
-function codeObservations(lines, groups) {
+function codeDescription(value) {
+  // Price columns (sometimes followed by a tax code) end the item description.
+  const amount=/(?:^|\s)(?:(?:GBP|USD|EUR|CAD|CHF|AUD|NZD|[£€$])\s*)?-?(?:\d{1,3}(?:[., ]\d{3})+|\d+)[.,]\d{2}(?=\s|$)/i.exec(value);
+  let description=amount ? value.slice(0,amount.index) : value;
+  if (amount && /\d[.,]\d{2}/.test(value.slice(amount.index+amount[0].length))) description=description.replace(/\s+\d{1,3}$/, '');
+  return description.replace(/\s+(?:\d+\s*[@×x]|(?:qty|quantity)\s*[:=]?\s*\d+)\s*$/i,'').trim();
+}
+
+// A number under a specific heading inherits its printed role. In particular,
+// a numeric SKU or size beside the name is never evidence for a missing item ID.
+function productCodeLayout(line) {
+  if (line.confidence<PHOTO_CONFIDENCE || !/\b(?:description|product name|item name|item description)\b/i.test(line.text)) return null;
+  const names=/\b(item\s*(?:id|code|no|number)|product\s*(?:id|code)|article\s*(?:id|code)|barcode|upc|gtin|ean|sku|style(?:\s*\/\s*sku)?|qty|quantity|size|price|amount|item description|description|item name|product name)\b/gi;
+  const headers=[...line.text.matchAll(names)];
+  if (headers.length<2) return null;
+  const kind=label=>/description|name/i.test(label) ? 'description' : /^(?:size|qty|quantity|price|amount)$/i.test(label) ? 'other' : codeKind(label);
+  const columns=line.cells.filter(c=>headers.some(h=>name(h[0])===name(c.text))).map(c=>({kind:kind(c.text),x:c.x,center:c.x+c.w/2}));
+  const kinds=headers.map(h=>kind(h[0]));
+  const index=kinds.indexOf('description'), before=kinds.slice(0,index), after=kinds.slice(index+1).filter((_,i)=>!/^(?:amount|price)$/i.test(headers[index+1+i][0]));
+  return {columns,prefix:before.length===1 ? before[0] : null,suffix:after.length===1 ? after[0] : null};
+}
+
+function codeObservations(lines, groups, items) {
   // Only assign an identifier to a named product when that product has a unique position on the photo.
   const owners=new Map();
   for (const {positions,itemHits,match} of groups.values()) {
@@ -173,20 +201,49 @@ function codeObservations(lines, groups) {
       owners.set(line,previous===undefined?positions[i]:null);
     });
   }
-  const byValue=new Map(), byProduct=new Map();
+  const byValue=new Map(), byProduct=new Map(), uncertain=new Map();
+  const remember=(map,key,value)=>{
+    const entries=map.get(key)||[];
+    entries.push(value);
+    map.set(key,entries);
+  };
+  const nearRow=(a,b)=>a && b && b.y-a.y-a.h<=Math.min(.095,3.2*Math.max(a.h,b.h));
+  let layout=null;
   for (const [i,line] of lines.entries()) {
-    if (nonProductLine.test(line.text)) continue;
+    if (nonProductLine.test(line.text)) {layout=null;continue;}
+    const header=productCodeLayout(line);
+    if (header) {layout=header;continue;}
     const labels=[...line.text.matchAll(productCodeLabel)];
+    const description=codeDescription(line.text);
+    const parsed=!labels.length && parsePrintedItemId(description);
+    const bare=isPrintedItemNumber(description) ? description : null;
+    const bareRow=bare && line.text.trim()===bare;
+    const previous=lines[i-1], next=lines[i+1];
     let owner=owners.get(line);
+    const previousOwner=nearRow(previous,line) ? owners.get(previous) : undefined;
+    const nextOwner=nearRow(line,next) ? owners.get(next) : undefined;
+    const afterHeading=previous && (nonProductLine.test(previous.text) ||
+      /^(?:sku|style|size|qty|quantity|barcode|upc|ean|item id)\s*[:#=]?\s*$/i.test(previous.text));
+    const ambiguousOwners=[];
+    // A standalone number between two product rows has no unique owner. A code
+    // and price below a description, in contrast, share its product block.
+    if (owner===undefined && bare && !labels.length) {
+      if (bareRow) {
+        if (!afterHeading && Number.isInteger(previousOwner)) ambiguousOwners.push(previousOwner);
+        if (!afterHeading && Number.isInteger(nextOwner) && !ambiguousOwners.includes(nextOwner)) ambiguousOwners.push(nextOwner);
+        if (ambiguousOwners.length===1) owner=ambiguousOwners.pop();
+      } else if (Number.isInteger(previousOwner)) owner=previousOwner;
+    }
     const detailRow=labels.length || /^\s*[\w/-]*\d[\w/-]*\s+(?:[$£€]|\d+[.,]\d{2}(?:\s|$)|\d+\s*[x×@])/i.test(line.text);
     if (owner===undefined && detailRow && i>0) {
       let start=i-1;
       // Two labelled detail rows can follow one product name (e.g. Style, then UPC).
       if (labels.length && !owners.has(lines[start]) && start>0 && [...lines[start].text.matchAll(productCodeLabel)].length) start--;
-      const anchor=lines[start];
-      if (line.y-anchor.y-anchor.h<=Math.min(.095,3.2*Math.max(line.h,anchor.h))) owner=owners.get(anchor);
+      if (nearRow(lines[start],line)) owner=owners.get(lines[start]);
     }
-    if (owner===undefined && !labels.length) continue;
+    if (owner===undefined && !labels.length && !ambiguousOwners.length) continue;
+    const edgeCodes=(!labels.length && !parsed && !bare) ? description.match(/^(\d+)\s+.*\p{L}.*\s+(\d+)$/u) : null;
+    const alternativeEdges=edgeCodes && isPrintedItemNumber(edgeCodes[1]) && isPrintedItemNumber(edgeCodes[2]) && edgeCodes[1]!==edgeCodes[2] ? edgeCodes.slice(1) : [];
     let index=0;
     for (const word of line.words) {
       const offset=line.text.indexOf(word.text,index);
@@ -200,57 +257,57 @@ function codeObservations(lines, groups) {
         const label=labels.find(l=>l.index+l[0].length===point);
         if (value.length<2 || (!label && (!/\d/.test(value) || /^(?:\d+[.,]\d{2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})$/.test(value)))) continue;
         if (!/\d/.test(value) && !(label && /[:#=]/.test(label[0]) && /^[A-Z]+$/.test(value))) continue;
-        const key=name(value), kind=label?codeKind(label[1]):null;
-        const observation={owner,kind,value,text:line.text};
-        const entries=byValue.get(key) || [];
-        entries.push(observation);
-        byValue.set(key,entries);
-        if (kind && Number.isInteger(owner)) {
-          const id=owner+'|'+kind, known=byProduct.get(id) || [];
-          known.push(observation);byProduct.set(id,known);
+        let column;
+        if (layout && Number.isInteger(owner) && owners.get(line)===owner && isPrintedItemNumber(value)) {
+          const wordCenter=word.x+word.w/2;
+          const aligned=word.text===value ? layout.columns.filter(c=>Math.min(Math.abs(word.x-c.x),Math.abs(wordCenter-c.center))<.035) : [];
+          if (aligned.length===1 && aligned[0].kind!=='description') column=aligned[0].kind;
+          else if (value===parsed?.itemId) column=point<line.text.indexOf(parsed.item) ? layout.prefix : layout.suffix;
         }
+        const ownItem=items[owner];
+        // An unseparated number already in the full product name can be its model
+        // number. A separately printed style/SKU makes that ambiguity material.
+        const modelInName=parsed?.evidence==='position' && name(ownItem?.sku) && name(ownItem.sku)!==name(value) &&
+          itemWording(ownItem.item).split(' ').includes(name(value));
+        const positional=!labels.length && (column==='itemId' || (!column && !modelInName)) && (value===parsed?.itemId || value===bare);
+        const kind=label ? codeKind(label[1]) : column || (positional ? 'itemId' : null);
+        const observation={owner,kind,value,text:line.text};
+        if (positional) for (const possible of ambiguousOwners) remember(uncertain,possible,observation);
+        if (Number.isInteger(owner) && alternativeEdges.includes(value)) remember(uncertain,owner,observation);
+        remember(byValue,name(value),observation);
+        if ((kind==='itemId' || kind==='sku') && Number.isInteger(owner)) remember(byProduct,owner+'|'+kind,observation);
       }
     }
   }
-  return {byValue,byProduct};
+  return {byValue,byProduct,uncertain};
 }
 
 function verifyProductCode(observations, item, field, index) {
   const value=name(item[field]);
-  if (!value) return {};
   const label=field==='sku'?'SKU':'Item ID';
-  const hits=(observations.byValue.get(value)||[]).filter(hit=>!hit.kind || hit.kind===field);
+  const known=observations.byProduct.get(index+'|'+field) || [];
+  const printed=unique(known.map(hit=>name(hit.value)));
+  if (field==='itemId' && printed.length>1) return {issue:'Several item IDs could belong to this product line.',evidence:unique(known.map(hit=>hit.text)).join(' | ')};
+  const observed=field==='itemId' && printed.length===1 ? {printedItemId:known[0].value} : {};
+  if (!value && observed.printedItemId) return {...observed,issue:'The printed item ID '+observed.printedItemId+' is missing from the record.',evidence:known[0].text};
+  const hits=value ? (observations.byValue.get(value)||[]).filter(hit=>hit.kind===field || (!hit.kind && field==='sku')) : [];
   const own=hits.find(hit=>hit.owner===index);
-  if (own) return {found:true,evidence:own.text};
-  const labelled=observations.byProduct.get(index+'|'+field) || [];
-  if (labelled.length && labelled.every(hit=>name(hit.value)!==value)) {
-    return {issue:label+' on this product line differs from the extracted '+text(item[field])+'.',evidence:labelled[0].text};
-  }
+  if (own) return {...observed,found:true,evidence:own.text};
   if (hits.length && hits.every(hit=>Number.isInteger(hit.owner))) {
-    return {issue:label+' '+text(item[field])+' is printed with a different item on this receipt.',evidence:hits[0].text};
+    return {...observed,issue:label+' '+text(item[field])+' is printed with a different item on this receipt.',evidence:hits[0].text};
   }
+  if (value && known.length) return {...observed,issue:label+' on this product line differs from the extracted '+text(item[field])+'.',evidence:known[0].text};
+  const uncertain=field==='itemId' ? observations.uncertain.get(index) : null;
+  if (uncertain?.length) return {issue:'The printed item ID cannot be assigned uniquely to this item.',evidence:unique(uncertain.map(hit=>hit.text)).join(' | ')};
   const unlinked=hits.find(hit=>hit.kind===field);
   return unlinked ? {unlinked:true,evidence:unlinked.text} : {};
 }
 
-function verifyPhoto(data, ocr, independent, reference) {
-  const lines = visualLines(ocr), ids = printedIds(lines).filter(id=>!reference.reviewedValues?.some(v=>name(v)===name(id.id)));
-  const labelled = labelledProductLines(lines);
-  const locatedId = reference.status==='found' && reference.kind==='orderId';
-  if(locatedId && !ids.some(id=>id.id===reference.value))
-    ids.push({id:reference.value,evidence:reference.evidence,confidence:reference.certainty});
-  const idEvidence = unique(ids.map(id => id.evidence)).join(' | ');
-  const orderId = text(data.orderId);
-  let idIssue = '';
-  const expectsId = Boolean(orderId || ids.length);
-  if (!orderId && ids.length) idIssue = 'The photo has a labelled order ID that is missing from the extracted record.';
-  else if (orderId && !ids.length) idIssue = 'The extracted order ID could not be located on the photo.';
-  else if (ids.some(entry => entry.id !== orderId)) idIssue = 'The printed order ID differs or the photo shows conflicting IDs.';
-  else if (ids.length && reference.basis!=='user-confirmed' && Math.max(...ids.map(id => id.confidence)) < PHOTO_CONFIDENCE) idIssue = 'The printed ID is unclear.';
-
+function collectProductEvidence(lines,items) {
+  const labelled=labelledProductLines(lines);
   const products = productLines(lines);
   const groups = new Map(), owners = new Map();
-  const items = data.items || [];
+
   for (const [i, product] of items.entries()) {
     const brand = name(product.brand), item = name(product.item), key = JSON.stringify([brand,item]);
     if (!groups.has(key)) {
@@ -270,7 +327,36 @@ function verifyPhoto(data, ocr, independent, reference) {
     }
     groups.get(key).positions.push(i);
   }
-  const codes=codeObservations(lines,groups);
+  return {groups,owners,codes:codeObservations(lines,groups,items)};
+}
+
+export function verifyImportedItemIds(data,ocr) {
+  const items=data.items || [];
+  const {codes}=collectProductEvidence(visualLines(ocr),items);
+  return items.map((item,index)=>{
+    const checked=verifyProductCode(codes,item,'itemId',index);
+    const status=checked.issue ? 'Needs review' : checked.found ? 'Item ID found' : 'Not verified';
+    const reason=checked.issue || (checked.found ? 'Item ID agrees on the product line.' : 'No item ID could be confirmed for this product on the photo.');
+    return {status,reason,itemIdEvidence:checked.evidence || '',printedItemId:checked.printedItemId || null};
+  });
+}
+
+function verifyPhoto(data, ocr, independent, reference) {
+  const lines = visualLines(ocr), ids = printedIds(lines).filter(id=>!reference.reviewedValues?.some(v=>name(v)===name(id.id)));
+  const locatedId = reference.status==='found' && reference.kind==='orderId';
+  if(locatedId && !ids.some(id=>id.id===reference.value))
+    ids.push({id:reference.value,evidence:reference.evidence,confidence:reference.certainty});
+  const idEvidence = unique(ids.map(id => id.evidence)).join(' | ');
+  const orderId = text(data.orderId);
+  let idIssue = '';
+  const expectsId = Boolean(orderId || ids.length);
+  if (!orderId && ids.length) idIssue = 'The photo has a labelled order ID that is missing from the extracted record.';
+  else if (orderId && !ids.length) idIssue = 'The extracted order ID could not be located on the photo.';
+  else if (ids.some(entry => entry.id !== orderId)) idIssue = 'The printed order ID differs or the photo shows conflicting IDs.';
+  else if (ids.length && reference.basis!=='user-confirmed' && Math.max(...ids.map(id => id.confidence)) < PHOTO_CONFIDENCE) idIssue = 'The printed ID is unclear.';
+
+  const items=data.items || [];
+  const {groups,owners,codes}=collectProductEvidence(lines,items);
   const result = Array(items.length);
   for (const {positions, match, conflict, itemHits} of groups.values()) {
     const enough = match?.hits.length === positions.length;

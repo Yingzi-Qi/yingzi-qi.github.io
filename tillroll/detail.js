@@ -230,12 +230,12 @@ function showReading(panel, r) {
 
 function showProof(panel, r) {
   const imported=r.origin==='achung';
-  if (imported && !r.orders?.length) return;
-  const block = section(imported ? 'Order comparison' : 'Photo check');
+  if (imported && !r.orders?.length && !r.review.photo.length) return;
+  const block = section(imported && !r.review.photo.length ? 'Order comparison' : 'Photo check');
   const items=r.data.items || [];
   const rows=items.length ? items : r.orders?.length ? [null] : [];
   rows.forEach((item,i) => {
-    const receipt = imported ? null : r.review.photo?.[i], order = r.orders?.[i];
+    const receipt = r.review.photo?.[i], order = r.orders?.[i];
     const line = element('div',undefined,'proof');
     const label = item ? 'Line '+(i+1)+(item.item ? ' · '+item.item : '') : 'Receipt';
     line.append(element('h3',label));

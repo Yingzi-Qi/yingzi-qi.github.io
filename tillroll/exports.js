@@ -1,6 +1,7 @@
 import {orderNeedsReview} from './orders.js?v=6';
-import {reviewForLine} from './checks.js?v=6';
+import {reviewForLine} from './checks.js?v=itemid2';
 import {validateOrderPatterns} from './retail-rules.js?v=6';
+import {parsePrintedItemId} from './product-code.js?v=itemid2';
 import * as zipPackage from './export-vendor/jszip.min.js';
 
 const JSZip = zipPackage.default ?? globalThis.JSZip;
@@ -54,8 +55,9 @@ function exportData(receipts) {
       const imported=r.origin==='achung';
       const originalNote=imported ? r.sourceNotes?.[i] : undefined;
       const orderIssue=orderNeedsReview(order) ? order.reason || order.status : '';
+      const photoIssue=photo.status==='Needs review' ? photo.reason || photo.status : '';
       const note=typeof originalNote==='string'
-        ? [...new Set([originalNote,orderIssue].filter(Boolean))].join('; ')
+        ? [...new Set([originalNote,photoIssue,orderIssue].filter(Boolean))].join('; ')
         : messages.join('; ');
       const ref=r.reference || {};
       const suggested=ref.requiresReview ? ref.suggestion?.value : '';
@@ -76,8 +78,9 @@ function exportData(receipts) {
           const style=fieldFlags.some(f=>f.severity==='fix') ? 8 : 6;
           return {value,numeric,style:type==='money' ? style+1 : style};
         }
-        if (imported && source==='review' && value && !orderIssue) return {value,numeric,style:2};
-        const flagged = fieldFlags.length || (source==='review' && value!=='' && (!imported || orderIssue))
+        if (imported && source==='review' && value && !photoIssue && !orderIssue) return {value,numeric,style:2};
+        const flagged = fieldFlags.length || (source==='review' && value!=='' && (!imported || photoIssue || orderIssue))
+          || (imported && photoIssue && r.itemIdReadings?.length && source==='line' && key==='itemId')
           || (source==='proposal' && value!=='')
           || (source==='photo' && ['status','reason'].includes(key) && photo.status === 'Needs review')
           || (source==='order' && ['status','reason'].includes(key) && orderNeedsReview(order));
@@ -322,10 +325,10 @@ export async function readOrderFile(file) {
   return records;
 }
 
-// The original "Line items" sheet has 19 columns. Its two identifiers and its
-// SKU are independent text fields, even when they consist entirely of digits.
-const achungColumns=receiptColumns.slice(0,receiptColumns.findIndex(c=>c[0]==='File')+1).filter(c=>c[1]!=='itemId');
-const nativeReferences=new Set(['orderNumber','orderId','sku','card']);
+// The original 19 headers remain required. Some workbooks also include an item ID.
+const achungColumns=receiptColumns.slice(0,receiptColumns.findIndex(c=>c[0]==='File')+1);
+const achungItemId=achungColumns.find(c=>c[1]==='itemId');
+const nativeReferences=new Set(['orderNumber','orderId','itemId','sku','card']);
 function nativeValue(cell,column,book) {
   const key=column[1], value=cellValue(cell,book.strings,book.formats,nativeReferences.has(key));
   if (value==='') return null;
@@ -355,7 +358,8 @@ function nativeValue(cell,column,book) {
 const noteClues={
   orderNumber:/order[- ]number/i, orderId:/order[- ]id/i, merchant:/merchant|source of purchase/i,
   date:/\bdate\b/i, total:/\breceipt total\b|lines add up|\btotal is missing\b/i,
-  item:/item name|description|repeated row/i, amount:/line (?:total|amount)|[×]|quantity multiplied/i,
+  item:/item name|description|repeated row/i, itemId:/item[- ]id|product[- ]id|barcode|\b(?:ean|upc|gtin)\b/i,
+  amount:/line (?:total|amount)|[×]|quantity multiplied/i,
   brand:/\bbrand\b/i
 };
 function nativeFlags(rows) {
@@ -400,13 +404,15 @@ export async function readAchungWorkbook(file) {
     const title=cellValue(cell,book.strings,book.formats,false).trim().toLowerCase();
     if (['photo check','photo check reason','order id on photo','reference finding','other possible references'].includes(title))
       throw new Error('This is a Tillroll workbook. Choose the original Excel file exported by Achung.');
-    const column=achungColumns.find(c=>c[0].toLowerCase()===title);
+    const column=aliases.item_id.includes(title.replace(/[^a-z0-9]/g,''))
+      ? achungItemId : achungColumns.find(c=>c[0].toLowerCase()===title);
     if (!column) continue;
     if (seen.has(column)) throw new Error('Repeated header in receipt workbook: '+column[0]+'.');
     seen.add(column);
     schema.set(columnIndex(cell)??schema.size,column);
   }
-  if (seen.size!==achungColumns.length) throw new Error('Choose the Excel file exported by Achung. Missing '+achungColumns.filter(c=>!seen.has(c)).map(c=>c[0]).join(', ')+'.');
+  const missing=achungColumns.filter(c=>c!==achungItemId && !seen.has(c));
+  if (missing.length) throw new Error('Choose the Excel file exported by Achung. Missing '+missing.map(c=>c[0]).join(', ')+'.');
   const groups=new Map();
   for (const row of rows) {
     const values={}, cells=new Map();
@@ -427,6 +433,21 @@ export async function readAchungWorkbook(file) {
       if (scope==='receipt') data[key]=values[key]??null;
       if (scope==='line') item[key]=values[key]??null;
     }
+    const printed=parsePrintedItemId(item.item||'');
+    let itemIdIssue='';
+    if (printed) {
+      const positional=printed.evidence==='position';
+      // A trailing model number can belong to a description beside a separate
+      // SKU. Preserve those words until the original photo provides evidence.
+      const identified=!positional || !item.sku ||
+        (item.item.trimStart().startsWith(printed.itemId) && item.sku!==printed.itemId);
+      if (item.itemId===printed.itemId || (!item.itemId && identified)) {
+        item.itemId=printed.itemId;
+        item.item=printed.item;
+      } else if (item.itemId && identified && printed.itemId!==item.sku) {
+        itemIdIssue='Item ID '+item.itemId+' differs from the code '+printed.itemId+' beside the item name.';
+      }
+    }
     // Distinct purchases from photos with the same filename remain distinct.
     const signature=JSON.stringify([filename,data]);
     if (!groups.has(signature)) groups.set(signature,{filename,data:{...data,items:[]},rows:[]});
@@ -437,10 +458,12 @@ export async function readAchungWorkbook(file) {
       if (severity && (scope==='receipt' || scope==='line'))
         marks.push({title,key,field:scope==='line'?'items.'+index+'.'+key:key,value:values[key],severity});
     }
-    group.rows.push({note:values.message??'',marks});
+    group.rows.push({note:values.message??'',marks,itemIdIssue});
   }
   if (!groups.size) throw new Error('The receipt workbook contains no receipt rows.');
   return Array.from(groups.values(),({filename,data,rows})=>({
-    filename,data,flags:nativeFlags(rows),sourceNotes:rows.map(row=>row.note)
+    filename,data,flags:nativeFlags(rows).concat(rows.flatMap((row,i)=>row.itemIdIssue
+      ? [{field:'items.'+i+'.itemId',message:row.itemIdIssue,severity:'check',escalate:false}] : [])),
+    sourceNotes:rows.map(row=>[row.note,row.itemIdIssue].filter(Boolean).join('; '))
   }));
 }
