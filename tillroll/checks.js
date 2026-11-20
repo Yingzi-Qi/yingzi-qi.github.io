@@ -1,4 +1,4 @@
-import {orderNeedsReview} from './orders.js?v=6';
+import {orderNeedsReview} from './orders.js?v=lineverify1';
 import {isPrintedItemNumber,parsePrintedItemId} from './product-code.js?v=itemid2';
 import {referenceFormat} from './retail-rules.js?v=6';
 import {validCalendarDate} from './purchase-date.js?v=6';
@@ -393,7 +393,7 @@ function verifyPhoto(data, ocr, independent, reference) {
         else reason+=' '+label+' could not be confirmed on the product line.';
       }
       result[i] = {
-        status, reason, idEvidence, skuEvidence:sku.evidence||'', itemIdEvidence:itemId.evidence||'',
+        status, reason, lineIssue:issueList.filter(issue=>issue!==idIssue).join(' '), idEvidence, skuEvidence:sku.evidence||'', itemIdEvidence:itemId.evidence||'',
         brandEvidence:conflict?.line.text || hit?.brand || match?.brandEvidence || '', itemEvidence:conflict?.line.text || hit?.item || itemHit?.line.text || match?.itemEvidence || '',
       };
     }

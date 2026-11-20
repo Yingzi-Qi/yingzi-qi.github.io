@@ -55,12 +55,12 @@ function lookup(data,orders) {
 }
 
 // Currency must come from the independent record or its amount text. A bare dollar sign cannot identify a currency.
-function currencyCode(input) {
+export function currencyCode(input) {
   const value=text(input).toUpperCase();
   return ({'€':'EUR','£':'GBP'})[value] || (/^[A-Z]{3}$/.test(value) ? value : '');
 }
 
-function readMoney(input) {
+export function readMoney(input) {
   let value=text(input);
   const prefix=value.match(/^([a-z]{3}|[£€$])\s*/i);
   const suffix=value.match(/\s*([a-z]{3}|[£€$])$/i);
@@ -257,6 +257,7 @@ export function compareOrder(data,orders) {
     }
   }
   if (!items.length) results.push(result('Needs review','No receipt items were extracted for comparison.'));
+  for (const line of results) line.lineIssue=orderNeedsReview(line) ? line.reason : '';
   const extra=lines.length-items.length;
   if (extra>0 && items.length) {
     const onlyOnce=results[0];

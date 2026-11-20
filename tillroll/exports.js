@@ -1,5 +1,5 @@
-import {orderNeedsReview} from './orders.js?v=6';
-import {reviewForLine} from './checks.js?v=itemid2';
+import {orderNeedsReview} from './orders.js?v=lineverify1';
+import {reviewForLine} from './checks.js?v=lineverify1';
 import {validateOrderPatterns} from './retail-rules.js?v=6';
 import {parsePrintedItemId} from './product-code.js?v=itemid2';
 import * as zipPackage from './export-vendor/jszip.min.js';
@@ -38,11 +38,16 @@ const orderColumns = [
   ['Order record line amount','order_amount','order','money'], ['Order record purchase total','order_total','order','money'],
   ['Order record currency','order_currency','order']
 ];
+const verificationColumns = [
+  ['Item verification','status','verification'], ['Verification source','source','verification'],
+  ['Verification detail','reason','verification']
+];
 const esc = value => String(value ?? '').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]/g,'')
   .replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
 const colName = n => n > 26 ? colName(Math.floor((n-1)/26)) + colName((n-1)%26+1) : String.fromCharCode(64+n);
 function exportData(receipts) {
-  const columns = receipts.some(r => r.orders?.length) ? [...receiptColumns,...orderColumns] : receiptColumns;
+  const includeOrders = receipts.some(r => r.orders?.length);
+  const columns = [...receiptColumns,...(includeOrders ? orderColumns : []),...verificationColumns];
   const rows = [];
   for (const r of receipts) {
     if (!r.data) continue;
@@ -52,18 +57,20 @@ function exportData(receipts) {
       const {flags,messages} = reviewForLine(r,i);
       const photo = r.review?.photo?.[i] ?? {};
       const order = r.orders?.[i] ?? {};
+      const verification=r.verification?.[i] ?? {};
+      const verificationMismatch=verification.status==='Verification error' || verification.status==='Previously flagged';
       const imported=r.origin==='achung';
       const originalNote=imported ? r.sourceNotes?.[i] : undefined;
       const orderIssue=orderNeedsReview(order) ? order.reason || order.status : '';
       const photoIssue=photo.status==='Needs review' ? photo.reason || photo.status : '';
-      const note=typeof originalNote==='string'
-        ? [...new Set([originalNote,photoIssue,orderIssue].filter(Boolean))].join('; ')
-        : messages.join('; ');
+      const earlierNotes=typeof originalNote==='string' ? [originalNote,photoIssue,orderIssue] : messages;
+      const finalNote=verificationMismatch ? [verification.status,verification.reason].filter(Boolean).join(' · ') : '';
+      const note=[...new Set([...earlierNotes,finalNote].filter(Boolean))].join('; ');
       const ref=r.reference || {};
       const suggested=ref.requiresReview ? ref.suggestion?.value : '';
       const alternatives=suggested ? [...new Set(ref.candidates.map(c=>c.value))].filter(v=>v!==suggested).join(' / ') : '';
       const sources = {
-        receipt:r.record || r.data, line, photo, order, meta:r,
+        receipt:r.record || r.data, line, photo, order, verification, meta:r,
         reference:suggested ? {...ref,reason:[ref.reason,ref.suggestion.reason].filter(Boolean).join(' ')} : ref,
         proposal:{suggested,alternatives},
         review:{message:note}
@@ -78,8 +85,11 @@ function exportData(receipts) {
           const style=fieldFlags.some(f=>f.severity==='fix') ? 8 : 6;
           return {value,numeric,style:type==='money' ? style+1 : style};
         }
-        if (imported && source==='review' && value && !photoIssue && !orderIssue) return {value,numeric,style:2};
-        const flagged = fieldFlags.length || (source==='review' && value!=='' && (!imported || photoIssue || orderIssue))
+        if (source==='verification' && verification.status==='Verification error' && key!=='source')
+          return {value,style:8};
+        if (imported && source==='review' && value && !photoIssue && !orderIssue && !verificationMismatch) return {value,numeric,style:2};
+        const flagged = fieldFlags.length || (source==='review' && value!=='' && (!imported || photoIssue || orderIssue || verificationMismatch))
+          || (source==='verification' && verificationMismatch && key!=='source')
           || (imported && photoIssue && r.itemIdReadings?.length && source==='line' && key==='itemId')
           || (source==='proposal' && value!=='')
           || (source==='photo' && ['status','reason'].includes(key) && photo.status === 'Needs review')
@@ -148,9 +158,10 @@ function download(blob,extension) {
   link.href=url; link.download='Tillroll receipts.'+extension;
   document.body.append(link); link.click(); link.remove();
   setTimeout(()=>URL.revokeObjectURL(url),2000);
+  return blob;
 }
-export function exportCSV(receipts) { download(buildCsvBlob(receipts),'csv'); }
-export async function exportExcel(receipts) { download(await buildXlsxBlob(receipts),'xlsx'); }
+export function exportCSV(receipts) { return download(buildCsvBlob(receipts),'csv'); }
+export async function exportExcel(receipts) { return download(await buildXlsxBlob(receipts),'xlsx'); }
 
 const aliases = {
   retailer:['retailer','source','merchant','store','mall','issuer'], order_id:['orderid','orderidentifier'],
@@ -158,6 +169,7 @@ const aliases = {
   item:['item','itemname','itemdescription','product','productname','description'],
   item_id:['itemid','productid','barcode','upc','upca','ean','ean8','ean13','gtin','gtin8','gtin12','gtin13','gtin14'],
   sku:['sku','stylesku','style','productcode','itemcode'], qty:['qty','quantity'],
+  unit_price:['unitprice','priceperitem','priceperunit','unitamount'],
   amount:['amount','lineamount','linetotal','itemamount','extendedamount'],
   total:['purchasetotal','purchaseamount','receipttotal','ordertotal','totalpaid','amountpaid'],
   currency:['currency','currencycode'], order_id_pattern:['orderidpattern','orderidformat'],
@@ -168,14 +180,19 @@ function orderSchema(headers) {
   const schema=new Map(), duplicates=[];
   const fields=headers.map(value=>String(value??'').toLowerCase().replace(/[^a-z0-9#]/g,''));
   const hasRetailer=fields.some(header=>['retailer','source','merchant','store'].includes(header));
+  const catalogue=fields.some(header=>keys.get(header)==='item_id') &&
+    !fields.some(header=>['order_id','order_number'].includes(keys.get(header)));
   fields.forEach((header,i)=>{
     if (hasRetailer && ['mall','issuer'].includes(header)) return;
-    const key=keys.get(header);
+    const key=catalogue && header==='price' ? 'unit_price' : keys.get(header);
     if (!key) return;
     if (schema.has(key)) duplicates.push(key);
     schema.set(key,i);
   });
-  if (!(schema.has('order_id')||schema.has('order_number')) || !(schema.has('item')||schema.has('sku')||schema.has('item_id'))) return null;
+  const orderLines=(schema.has('order_id') || schema.has('order_number')) &&
+    (schema.has('item') || schema.has('sku') || schema.has('item_id'));
+  const productList=schema.has('retailer') && schema.has('item_id');
+  if (!orderLines && !productList) return null;
   if (duplicates.length) throw new Error('Multiple order-list columns refer to '+duplicates.join(', ')+'.');
   return schema;
 }
@@ -319,7 +336,7 @@ export async function readOrderFile(file) {
     records=schema ? orderRows(rows,schema) : null;
   } else if (/\.xlsx$/i.test(file.name)) records=await readOrderXlsx(file);
   else throw new Error('Choose an Excel (.xlsx) or CSV order list.');
-  if (records===null) throw new Error('Order list needs Order ID or Order Number and an Item, Item ID or SKU header. Include Retailer and Brand for verification.');
+  if (records===null) throw new Error('Use Retailer and Item ID for a product list, or an order reference and Item, Item ID or SKU for an order list.');
   if (!records.length) throw new Error('The order list contains no item rows.');
   validateOrderPatterns(records);
   return records;

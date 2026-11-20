@@ -1,5 +1,5 @@
 import {purchaseDateText} from './receipt-date-display.js?v=8';
-import {orderNeedsReview} from './orders.js?v=6';
+import {orderNeedsReview} from './orders.js?v=lineverify1';
 // Receipt data and OCR are untrusted strings. Only write them through DOM text/value APIs.
 function element(tag, content, className) {
   const node = document.createElement(tag);
@@ -230,8 +230,10 @@ function showReading(panel, r) {
 
 function showProof(panel, r) {
   const imported=r.origin==='achung';
-  if (imported && !r.orders?.length && !r.review.photo.length) return;
-  const block = section(imported && !r.review.photo.length ? 'Order comparison' : 'Photo check');
+  const hasVerification=Boolean(r.verification?.length);
+  if (imported && !hasVerification && !r.orders?.length && !r.review.photo.length) return;
+  const title=hasVerification ? 'Item verification' : imported && !r.review.photo.length ? 'Order comparison' : 'Photo check';
+  const block = section(title);
   const items=r.data.items || [];
   const rows=items.length ? items : r.orders?.length ? [null] : [];
   rows.forEach((item,i) => {
@@ -242,6 +244,22 @@ function showProof(panel, r) {
     if (item?.itemId || item?.sku) {
       const codes=[item.itemId && 'Item ID '+item.itemId,item.sku && 'Style / SKU '+item.sku];
       line.append(element('p',codes.filter(Boolean).join(' · '),'hint'));
+    }
+    const verification=r.verification?.[i];
+    if (verification) {
+      const audit=element('div');
+      audit.id='verification-line-'+i;
+      audit.tabIndex=-1;
+      audit.setAttribute('role','group');
+      audit.setAttribute('aria-label',label+' · Item verification');
+      const result=element('p');
+      const status=verification.status;
+      const tone=status==='Verification error' ? 'bad' : status==='Previously flagged' ? 'warn' : status==='Verified' ? '' : 'muted';
+      result.append(element('span',status,'status '+tone));
+      if (verification.source) result.append(document.createTextNode(' '+verification.source));
+      audit.append(result);
+      if (verification.reason) audit.append(element('p',verification.reason,'hint'));
+      line.append(audit);
     }
     if (receipt) {
       const summary = element('p');
@@ -398,7 +416,10 @@ export function showDetail(r, callbacks={}, focusPath='') {
     panel.append(element('h3','Could not read photo'),element('p',r.error || 'The receipt reader could not finish.', 'hint'));
     if (callbacks.onRetry) panel.append(button('Retry',()=>act('onRetry')));
   } else if(r.state==='done' && r.data) {
-    showReading(panel,r);showProof(panel,r);showFlags(panel,r,act,callbacks);focused=showEditor(panel,r,act,focusPath);
+    showReading(panel,r);showProof(panel,r);showFlags(panel,r,act,callbacks);
+    const verificationLine=/^verification\.(\d+)$/.exec(focusPath);
+    focused=showEditor(panel,r,act,verificationLine ? '' : focusPath);
+    if (verificationLine) focused=panel.querySelector('#verification-line-'+verificationLine[1]);
   } else if(!r.exactOf) {
     panel.append(element('p',r.state==='second'?'Second reading in progress…':r.state==='queued'?'Waiting for a reader…':'Reading receipt…','hint'));
   }

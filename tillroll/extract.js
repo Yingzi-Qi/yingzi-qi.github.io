@@ -268,21 +268,31 @@ function embeddedModelNumber(item,parsed,sku) {
   return parsed?.evidence==='position' && sku && sku!==parsed.itemId &&
     String(item??'').trim().endsWith(parsed.itemId);
 }
-function itemsFromLines(lines) {
+function itemsFromLines(lines, trace) {
   const items=[]; const used=new Set(), inlineSuffixes=new Map();
   const prefixes=printedProductPrefixes(lines);
-  let layout=null, lastProduct=-10;
+  let layout=null, lastHeader=-1, lastProduct=-10;
+  function record(row,priceLine,nameLine=priceLine,unitLine=priceLine,header=-1) {
+    items.push(row);
+    if(trace)trace.push({priceLine,nameLine,unitLine,header,idLine:null});
+  }
   const quantityColumn=lines.some(l=>/\bqty\b/i.test(l.text) && /\b(?:price|amount|total)\b/i.test(l.text));
   for (let i=0;i<lines.length;i++) {
     const line=lines[i], text=line.text.trim();
     if(used.has(i))continue;
     const header=productColumns(line);
-    if(header){layout=header;lastProduct=-10;continue;}
+    if(header){layout=header;lastHeader=i;lastProduct=-10;continue;}
     if(metadata.test(tidyLine(text))){layout=null;lastProduct=-10;continue;}
     const barcode=barcodeProduct(lines,i);
-    if(barcode){items.push(barcode.row);lastProduct=i;if(barcode.hasUnit)used.add(i+1);continue;}
+    if(barcode){record(barcode.row,i,i-1,barcode.hasUnit?i+1:i);lastProduct=i;if(barcode.hasUnit)used.add(i+1);continue;}
     const printedId=text.match(itemIdLabel)?.[1];
-    if(printedId){if(i-lastProduct<=2)items.at(-1).itemId=printedId;continue;}
+    if(printedId){
+      if(i-lastProduct<=2){
+        items.at(-1).itemId=printedId;
+        if(trace)trace.at(-1).idLine=i;
+      }
+      continue;
+    }
     if (/^(?:style\b|sku\b)/i.test(text)) { if(i-lastProduct<=2)details(items.at(-1),text);continue; }
     if (noProduct.test(text))continue;
     if(layout){
@@ -294,7 +304,7 @@ function itemsFromLines(lines) {
             inlineSuffixes.set(row,{text:row.item,parsed:inline});row.itemId=inline.itemId;row.item=inline.item;
           }
         }
-        items.push(row);lastProduct=i;continue;
+        record(row,i,i,i,lastHeader);lastProduct=i;continue;
       }
     }
     const prices=amounts(text); if (!prices.length) continue;
@@ -316,8 +326,9 @@ function itemsFromLines(lines) {
       if(inline?.evidence==='position' && label.endsWith(inline.itemId))inlineSuffixes.set(row,{text:label,parsed:inline});
       row.itemId=inline?.itemId ?? prefix.id;
       row.item=inline?.item ?? label.slice(prefix.length).trim();
-      items.push(row);lastProduct=i;continue;
+      record(row,i);lastProduct=i;continue;
     }
+    let nameLine=i;
     const prev=lines[i-1]; const next=lines[i+1];
     // Common two-line till slip: description, then SKU / qty × unit / line total.
     if ((!label || (/^[\w./–—-]+$/.test(label) && /\d/.test(label))) && possibleLabel(prev) && !used.has(i-1)) {
@@ -325,17 +336,17 @@ function itemsFromLines(lines) {
       const parts=splitProduct(prev,prev.text.trim());
       if (parts.brand || !row.sku) Object.assign(row,parts);
       else { row.brand=null; row.item=prev.text.trim(); }
-      used.add(i-1);
+      nameLine=i-1;used.add(i-1);
     } else if (label && /\p{L}/u.test(label)) {
       const parts=splitProduct(line,label);
       if (prices.length>=2 && possibleLabel(next) && (qty || columns(line).length>2)) {
         // Brand, quantity and prices share a line; the description follows.
-        row.brand=columns(line)[0] || label; row.item=next.text.trim(); used.add(i+1);
+        row.brand=columns(line)[0] || label; row.item=next.text.trim(); nameLine=i+1;used.add(i+1);
       } else if (!parts.brand && possibleLabel(prev) && !used.has(i-1) && /^(?:[\p{Lu}\d .&'’-])+$/u.test(prev.text) && !/RECEIPT|AMOUNT|ITEM|TOTAL|STORE/i.test(prev.text)) {
         row.brand=prev.text.trim(); row.item=label; used.add(i-1);
       } else Object.assign(row,parts);
     }
-    if(row.item || row.brand || row.sku){items.push(row);lastProduct=i;}
+    if(row.item || row.brand || row.sku){record(row,i,nameLine);lastProduct=i;}
   }
   for(const [row,{text,parsed}] of inlineSuffixes){
     if(row.itemId===parsed.itemId && embeddedModelNumber(text,parsed,row.sku)){
@@ -413,6 +424,15 @@ export function recoverPhotoItemIds(data,ocr) {
   });
   return changed?{...data,items:recovered}:data;
 }
+
+// Retain the source lines of each price and description for the final photo check.
+export function readPrintedProductRows(ocr) {
+  const trace=[];
+  const items=itemsFromLines(ocr.lines,trace);
+  const recovered=recoverPhotoItemIds({items},ocr).items;
+  return recovered.map((item,i)=>({item,...trace[i]}));
+}
+export {amounts as readPrintedAmounts, neighbouringRows as nearbyPrintedRows};
 
 export function extractLocal(ocr) {
   const result=receiptShape();
