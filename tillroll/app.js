@@ -2,7 +2,9 @@ import {oldestPurchaseFirst,purchaseDateText} from './receipt-date-display.js?v=
 import {inspectReference,combineReferenceReadings} from './reference.js?v=6';
 import {readPhoto,secondReadPhoto,extractLocal,extractAI,reconcileReadings,photoFieldConflicts,recoverPhotoItemIds} from './extract.js?v=productcodes3';
 import {checkReceipt,samePurchase,reviewForLine,verifyImportedItemIds} from './checks.js?v=productcodes3';
-import {exportExcel,exportCSV,readOrderFile,readAchungWorkbook} from './exports.js?v=productcodes3';
+import {exportExcel,exportCSV,readOrderFile,readAchungWorkbook,readTillrollEdits} from './exports.js?v=excelrefresh1';
+import {planWorkbookRefresh,restoreWorkbookReceipts,nextWorkbookBaseline,withLegacyWorkbookBaseline,nextLegacyWorkbookBaseline} from './workbook-refresh.js?v=1';
+import {bindExcelRefresh} from './excel-refresh-ui.js?v=1';
 import {loadSamples} from './samples.js?v=productcodes3';
 import {compareOrder,orderNeedsReview} from './orders.js?v=lineverify1';
 import {verifyOutputItems} from './item-verification.js?v=lineverify1';
@@ -17,6 +19,8 @@ let mode='local',apiKey='',savedSamples=false,noticeTimer,startTime=0,finishedTi
 const queue=[], hashOwners=new Map();
 const receiptFileHashes=new Set();
 let referenceHash=null,referenceRevision=0;
+const excelBaselines=new Map();
+const legacyBaselines=new Map();
 const emptyOCR=()=>({text:'',confidence:0,lines:[]});
 const blankItem=()=>({brand:'',item:'',sku:'',itemId:'',colour:'',size:'',qty:null,unitPrice:null,amount:null});
 const referenceLabels={orderId:'Order ID',orderNumber:'Order number',receiptReference:'Receipt reference'};
@@ -96,9 +100,11 @@ function evaluateReceipt(r,fillMissing){
     r.orders=comparePurchase(r.record);
     return;
   }
-  const ocr=r.ocr||emptyOCR();
+  if(r.origin==='workbook' && fillMissing)importedPhotoChecks(r,true);
+  const ocr=r.itemIdReadings?.[0] || r.ocr || emptyOCR();
+  const other=r.itemIdReadings?.[1] || r.otherOcr;
   r.reference=inspectReference(r.data,ocr,orderList);
-  if(r.otherOcr)r.reference=combineReferenceReadings(r.reference,inspectReference(r.data,r.otherOcr,orderList));
+  if(other)r.reference=combineReferenceReadings(r.reference,inspectReference(r.data,other,orderList));
   r.record={...r.data};
   const choice=r.confirmedReference;
   const competing=choice?.values || (r.reference.suggestion ? r.reference.candidates.map(c=>c.value) : []);
@@ -117,6 +123,10 @@ function evaluateReceipt(r,fillMissing){
   if(ref.status==='found' && !r.record[ref.kind] && !r.editedReferences?.has(ref.kind))
     r.record[ref.kind]=ref.value;
   r.review=checkReceipt(r.record,ocr,r.previous||null,{...confidenceOptions(r),reference:ref,orders:orderList,demoFormats:r.demo?.set==='demo'});
+  if(r.origin==='workbook' && !ocr.text){
+    r.review.flags=r.review.flags.filter(f=>!f.field.endsWith('.photo'));
+    r.review.photo=r.data.items.map(()=>({status:'Not verified',reason:'No readable original photo is attached.'}));
+  }
   const extra=[...(r.readingConflicts||[])];
   if(r.origin==='ai' && ocr.text) {
     for(const issue of photoFieldConflicts(r.record,ocr)) extra.push({...issue,stage:'Model compared with photo OCR'});
@@ -136,7 +146,7 @@ function duplicates(){
     if(r.exactOf){r.duplicateOf=r.exactOf;continue;}
     r.duplicateOf=null;if(r.state!=='done')continue;
     // Achung already chose which receipts to include in its workbook.
-    const match=canonical.find(s=>!(r.origin==='achung' && s.importGroup===r.importGroup) && samePurchase(s.duplicateRecord,r.duplicateRecord));
+    const match=canonical.find(s=>!(r.importGroup && s.importGroup===r.importGroup) && samePurchase(s.duplicateRecord,r.duplicateRecord));
     if(match && !r.keepBoth) r.duplicateOf=match.id;
     else canonical.push(r);
   }
@@ -290,7 +300,7 @@ function render(){
   const more=$('#more-samples');
   more.hidden=sets.size!==1;
   if(!more.hidden){more.dataset.next=sets.has('photos')?'demo':'photos';more.textContent='Add '+sampleLabels[more.dataset.next];more.disabled=loadingSamples;}
-  $('#verify-import-photos').hidden=!batch.some(r=>r.origin==='achung');
+  $('#verify-import-photos').hidden=!batch.some(r=>r.origin==='achung' || r.origin==='workbook');
   $('#verify-import-photos').disabled=verifyingPhotos;
   const done=active(), work=batch.some(notDone)||verifyingPhotos,nRows=done.reduce((n,r)=>n+Math.max(1,r.data.items.length),0);
   const dollars=batch.reduce((n,r)=>n+Number(r.firstData?.cost||0)+(r.previous?Number(r.data?.cost||0):0),0);
@@ -301,7 +311,8 @@ function render(){
   const headers=['Receipt','Purchase date','Shop','Order number','Brand','Item ID','Item','Price'].map(title=>
     title==='Purchase date' ? '<th scope="col" aria-sort="ascending" title="Oldest purchase first">Purchase date <span aria-hidden="true">↑</span></th>' : `<th scope="col">${title}</th>`);
   $('#table').innerHTML=shown.length?`<table class="receipt-lines" aria-label="Receipt line items"><thead><tr>${headers.join('')}</tr></thead>${shown.map(rowHTML).join('')}</table>`:'<p class="empty">No receipts match this view.</p>';
-  $('#excel').disabled=$('#csv').disabled=!done.length||work;$('#startover').disabled=work;$('#clear-orders').hidden=!orderList;
+  $('#refresh-excel').disabled=$('#excel').disabled=$('#csv').disabled=!done.length||work;
+  $('#startover').disabled=work;$('#clear-orders').hidden=!orderList;
 }
 function resolveImportFlags(r, resolved){
   if(r.origin!=='achung' || !resolved.length)return;
@@ -328,27 +339,30 @@ function removeReceiptLine(r,i){
     });
   }
 }
+function updateReceiptFields(r,data,removeIndex=null){
+  if(r.origin==='achung'){
+    resolveImportFlags(r,r.nativeFlags.filter(f=>{
+      const after=get(data,f.field);
+      return after!=null && String(after).trim()!=='' && after!==get(r.record,f.field);
+    }));
+  }
+  if(data.date!==r.record.date)delete data.dateIssue;
+  r.readingConflicts=(r.readingConflicts||[]).filter(f=>JSON.stringify(get(data,f.field))===JSON.stringify(get(r.record,f.field)));
+  if(data.merchant!==r.data.merchant || (r.confirmedReference && data[r.confirmedReference.kind]!==r.record[r.confirmedReference.kind]))r.confirmedReference=null;
+  for(const key of Object.keys(referenceLabels)){
+    if(data[key]===r.record[key])data[key]=r.data[key];
+    else (r.editedReferences??=new Set()).add(key);
+  }
+  r.data=normalData(data);removeReceiptLine(r,removeIndex);r.ack.clear();evaluate(r);
+}
 async function openDetail(id,path=''){
   const r=batch.find(x=>x.id===Number(id));if(!r)return;
-  const {showDetail}=await import('./detail.js?v=productcodes3');
+  const {showDetail}=await import('./detail.js?v=excelrefresh1');
   const refresh=()=>{duplicates();render();};
   const rerender=(focus='')=>{refresh();openDetail(r.id,focus).catch(e=>note(e.message));};
   showDetail({...r,data:r.record||r.data},{
     onSave(data,removeIndex=null){
-      if(r.origin==='achung'){
-        resolveImportFlags(r,r.nativeFlags.filter(f=>{
-          const after=get(data,f.field);
-          return after!=null && String(after).trim()!=='' && after!==get(r.record,f.field);
-        }));
-      }
-      if(data.date!==r.record.date)delete data.dateIssue;
-      r.readingConflicts=(r.readingConflicts||[]).filter(f=>JSON.stringify(get(data,f.field))===JSON.stringify(get(r.record,f.field)));
-      if(data.merchant!==r.data.merchant || (r.confirmedReference && data[r.confirmedReference.kind]!==r.record[r.confirmedReference.kind]))r.confirmedReference=null;
-      for(const key of Object.keys(referenceLabels)){
-        if(data[key]===r.record[key])data[key]=r.data[key];
-        else (r.editedReferences??=new Set()).add(key);
-      }
-      r.data=normalData(data);removeReceiptLine(r,removeIndex);r.ack.clear();evaluate(r);refresh();note('Changes saved. Checks updated.');
+      updateReceiptFields(r,data,removeIndex);refresh();note('Changes saved. Checks updated.');
     },
     onConfirmReference(candidate,kind){
       if(!Object.hasOwn(referenceLabels,kind) || !r.reference.requiresReview)return;
@@ -405,6 +419,79 @@ async function downloadBatch(exporter) {
 }
 $('#excel').onclick=()=>downloadBatch(exportExcel);
 $('#csv').onclick=()=>downloadBatch(exportCSV);
+async function prepareExcelRefresh(file){
+  const currentGeneration=generation;
+  const [workbook,hash]=await Promise.all([readTillrollEdits(file),fingerprint(file)]);
+  if(currentGeneration!==generation)throw new Error('The batch changed. Choose the workbook again.');
+  const previousLegacy=workbook.exportKey ? null : legacyBaselines.get(file.name);
+  const parsed=previousLegacy ? withLegacyWorkbookBaseline(workbook,previousLegacy) : workbook;
+  const previous=excelBaselines.get(parsed.exportKey);
+  if(previous){
+    for(const row of parsed.rows)row.baseline=previous.get(row.lineKey) || row.baseline;
+  }
+  const prepared={filename:file.name,hash,parsed,currentGeneration};
+  if(!batch.length){
+    prepared.records=restoreWorkbookReceipts(parsed);
+  }else{
+    prepared.patches=planWorkbookRefresh(batch,parsed);
+    if(!parsed.exportKey && !previousLegacy && prepared.patches.length){
+      const count=prepared.patches.length;
+      prepared.confirmation=`This older workbook matches ${count} receipt${count===1?'':'s'} with changes. Applying it can replace values you edited in this tab.`;
+    }
+  }
+  return prepared;
+}
+
+function finishExcelRefresh({filename,hash,parsed,currentGeneration,records,patches}){
+  if(currentGeneration!==generation || (records && batch.length))throw new Error('The batch changed. Choose the workbook again.');
+  const nextBaseline=parsed.exportKey ? nextWorkbookBaseline(parsed) : null;
+  let nextLegacy=null;
+  const previousOrders=orderList, clearReference=referenceHash===hash;
+  if(clearReference)orderList=null;
+  const drafts=new Map();
+  let restored=[];
+  try{
+    if(records){
+      const group=Symbol();
+      restored=records.map((entry,i)=>{
+        const r={...entry,id:seq+i+1,data:normalData(entry.data),origin:'workbook',state:'done',
+          method:'Tillroll Excel',workbookName:filename,importGroup:group,editedReferences:new Set(Object.keys(referenceLabels)),
+          ack:new Set(),notes:[],reasons:[]};
+        evaluate(r);finalizeOutput(r);return r;
+      });
+      if(!parsed.exportKey)nextLegacy=nextLegacyWorkbookBaseline(parsed,restored,[]);
+    }else{
+      if(!parsed.exportKey)nextLegacy=nextLegacyWorkbookBaseline(parsed,batch,patches);
+      for(const {receipt:r,receiptChanges,itemChanges} of patches){
+        const data=structuredClone(r.record || r.data);
+        Object.assign(data,receiptChanges);
+        for(const {index,fields} of itemChanges)Object.assign(data.items[index],fields);
+        const draft={...r,ack:new Set(r.ack),editedReferences:new Set(r.editedReferences),sourceNotes:r.sourceNotes?.slice()};
+        updateReceiptFields(draft,data);drafts.set(r,draft);
+      }
+      if(clearReference){
+        for(const r of batch)if(r.data && !drafts.has(r)){
+          const draft={...r};evaluate(draft);drafts.set(r,draft);
+        }
+      }
+    }
+  }catch(err){orderList=previousOrders;throw err;}
+  if(clearReference){referenceHash=null;orderFilename='';referenceRevision++;}
+  for(const [target,draft] of drafts)Object.assign(target,draft);
+  if(records){batch=restored;seq+=restored.length;filter='all';$('#search').value='';}
+  if(nextBaseline)excelBaselines.set(parsed.exportKey,nextBaseline);
+  if(nextLegacy)legacyBaselines.set(filename,nextLegacy);
+  receiptFileHashes.add(hash);duplicates();render();
+  const n=records ? restored.length : patches.length;
+  const message=records ? `Opened ${n} receipt${n===1?'':'s'} from Excel.`
+    : n ? `Updated ${n} receipt${n===1?'':'s'} from Excel. Checks refreshed.` : 'Already up to date.';
+  note(message+(clearReference?' Select a separate file to compare orders.':''));
+}
+const unlinkWorkbook=bindExcelRefresh({
+  hasBatch:()=>batch.length>0,prepare:prepareExcelRefresh,finish:finishExcelRefresh,
+  onLinkChange(handle){$('#change-refresh').hidden=!handle;
+    $('#refresh-excel').title=handle?'Read the latest saved changes from '+handle.name:'Update this batch from a saved Tillroll workbook';}
+});
 let importingWorkbook=false;
 let verifyingPhotos=false;
 $('#verify-import-photos').onclick=()=>$('#import-photos-input').click();
@@ -420,7 +507,7 @@ $('#import-photos-input').onchange=async e=>{
   let attached=0, unmatched=0, failed=0, recovered=0, review=0, invalid=0;
   try {
     for (const file of files) {
-      const targets=batch.filter(r=>r.origin==='achung' && key(r.filename)===key(file.name));
+      const targets=batch.filter(r=>(r.origin==='achung' || r.origin==='workbook') && key(r.filename)===key(file.name));
       if (targets.length!==1 || counts.get(key(file.name))!==1) { unmatched++; continue; }
       const r=targets[0];
       const url=URL.createObjectURL(file);
@@ -514,7 +601,7 @@ $('#landing-clear-orders').onclick=$('#clear-orders').onclick=()=>{
   referenceRevision++;referenceHash=null;orderList=null;orderFilename='';
   batch.forEach(r=>evaluate(r));duplicates();render();
 };
-$('#startover').onclick=()=>$('#reset-dialog').showModal();$('#reset').onclick=()=>{generation++;for(const r of batch)URL.revokeObjectURL(r.url);batch=[];queue.length=0;hashOwners.clear();receiptFileHashes.clear();referenceHash=null;referenceRevision++;seq=0;orderList=null;orderFilename='';startTime=finishedTime=0;$('#search').value='';$('#reset-dialog').close();render();};
+$('#startover').onclick=()=>$('#reset-dialog').showModal();$('#reset').onclick=()=>{generation++;unlinkWorkbook();excelBaselines.clear();legacyBaselines.clear();for(const r of batch)URL.revokeObjectURL(r.url);batch=[];queue.length=0;hashOwners.clear();receiptFileHashes.clear();referenceHash=null;referenceRevision++;seq=0;orderList=null;orderFilename='';startTime=finishedTime=0;$('#search').value='';$('#reset-dialog').close();render();};
 const refreshSettings=()=>{const ai=$('#reader').value==='ai';$('#key-box').hidden=!ai;$('#key').required=ai;$('#local-explain').hidden=ai;};
 $('#settings').onclick=()=>{$('#reader').value=mode;$('#key').value=apiKey;$('#sample-reading').value=savedSamples?'saved':'live';refreshSettings();$('#settings-dialog').showModal();};$('#reader').onchange=refreshSettings;
 $('#settings-form').onsubmit=e=>{e.preventDefault();const selected=$('#reader').value,key=$('#key').value.trim();if(selected==='ai'&&!key)return;mode=selected;apiKey=selected==='ai'?key:'';savedSamples=$('#sample-reading').value==='saved';$('#key').value='';$('#settings-dialog').close();note('Reading settings saved.');};

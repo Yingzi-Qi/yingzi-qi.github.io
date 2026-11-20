@@ -423,7 +423,7 @@ export function showDetail(r, callbacks={}, focusPath='') {
   } else if(!r.exactOf) {
     panel.append(element('p',r.state==='second'?'Second reading in progress…':r.state==='queued'?'Waiting for a reader…':'Reading receipt…','hint'));
   }
-  if (picture.childElementCount || r.origin!=='achung') body.append(picture);
+  if (picture.childElementCount) body.append(picture);
   else panel.style.gridColumn='1 / -1';
   body.append(panel);dialog.replaceChildren(title,body);
   dialog.onclick=e=>{if(e.target===dialog){const b=dialog.getBoundingClientRect();if(e.clientX<b.left||e.clientX>b.right||e.clientY<b.top||e.clientY>b.bottom)close();}};

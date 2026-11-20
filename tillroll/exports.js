@@ -42,13 +42,29 @@ const verificationColumns = [
   ['Item verification','status','verification'], ['Verification source','source','verification'],
   ['Verification detail','reason','verification']
 ];
+const refreshReceiptHeader='Tillroll receipt key', refreshLineHeader='Tillroll line key';
+const baselineHeader='Tillroll original values';
+const editableColumns=receiptColumns.filter(([, ,scope='receipt'])=>scope==='receipt' || scope==='line');
+function baselineParts(baseline) {
+  const parts=[];
+  let json=JSON.stringify(baseline);
+  while (json.length>32767) {
+    // Keep a surrogate pair together at Excel's text-cell limit.
+    const end=/[\uD800-\uDBFF]/.test(json[32766]) ? 32766 : 32767;
+    parts.push(json.slice(0,end));json=json.slice(end);
+  }
+  parts.push(json);
+  return parts;
+}
 const esc = value => String(value ?? '').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]/g,'')
   .replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
 const colName = n => n > 26 ? colName(Math.floor((n-1)/26)) + colName((n-1)%26+1) : String.fromCharCode(64+n);
-function exportData(receipts) {
+function exportData(receipts,includeRefresh=false) {
   const includeOrders = receipts.some(r => r.orders?.length);
   const columns = [...receiptColumns,...(includeOrders ? orderColumns : []),...verificationColumns];
   const rows = [];
+  const exportKey=includeRefresh ? crypto.randomUUID() : null;
+  let maxParts=0;
   for (const r of receipts) {
     if (!r.data) continue;
     const lines = r.data.items?.length ? r.data.items : [{}];
@@ -75,10 +91,15 @@ function exportData(receipts) {
         proposal:{suggested,alternatives},
         review:{message:note}
       };
-      rows.push(columns.map(([,key,source='receipt',type]) => {
+      const baseline=includeRefresh ? {receipt:{},line:{},emptyReceipt:!r.data.items?.length,exportKey} : null;
+      const cells=columns.map(([,key,source='receipt',type]) => {
         let value = sources[source]?.[key] ?? '';
         const numeric = type && value !== '' && Number.isFinite(Number(value));
         value = numeric ? Number(value) : String(value);
+        if (baseline && (source==='receipt' || source==='line')) {
+          const saved=numeric ? value : value.slice(0,32767).replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]/g,'');
+          baseline[source][key]=saved==='' ? null : saved;
+        }
         const field = source === 'line' ? prefix+key : key;
         const fieldFlags=flags.filter(f=>f.field===field);
         if (imported && fieldFlags.length && (source==='receipt' || source==='line')) {
@@ -95,11 +116,24 @@ function exportData(receipts) {
           || (source==='photo' && ['status','reason'].includes(key) && photo.status === 'Needs review')
           || (source==='order' && ['status','reason'].includes(key) && orderNeedsReview(order));
         return {value,numeric,style:flagged ? (type==='money' ? 5 : 4) : type==='money' ? 3 : 0};
-      }));
+      });
+      if (includeRefresh) {
+        const receiptKey=r.refreshKey??=crypto.randomUUID();
+        const lineKey=r.data.items?.length ? (line.refreshKey??=crypto.randomUUID()) : (r.emptyLineRefreshKey??=crypto.randomUUID());
+        const parts=baselineParts(baseline);
+        maxParts=Math.max(maxParts,parts.length);
+        for (const value of [receiptKey,lineKey,...parts]) cells.push({value,style:0});
+      }
+      rows.push(cells);
     });
   }
   if (rows.length > 1048575) throw new Error('This batch exceeds the number of item rows allowed in one Excel worksheet.');
-  return {columns,rows};
+  const visibleCount=columns.length;
+  if (includeRefresh) {
+    columns.push([refreshReceiptHeader],[refreshLineHeader],[baselineHeader]);
+    for(let part=2;part<=maxParts;part++) columns.push([baselineHeader+' '+part]);
+  }
+  return {columns,rows,visibleCount};
 }
 
 function csvValue(value) {
@@ -134,14 +168,14 @@ const styles = XML + `<styleSheet xmlns="${MAIN}">
   </cellXfs>
   <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`;
 export async function buildXlsxBlob(receipts) {
-  const {columns,rows} = exportData(receipts);
+  const {columns,rows,visibleCount} = exportData(receipts,true);
   const range = 'A1:'+colName(columns.length)+(rows.length+1);
   const rowXml = (number, cells) =>
     `<row r="${number}" ht="${excelRowHeight}" customHeight="1">${cells.map((cell,i)=>cellXml(number,i+1,cell)).join('')}</row>`;
   const header = rowXml(1, columns.map(([title])=>({value:title,style:1})));
   const contents = rows.map((row,i)=>rowXml(i+2,row)).join('');
   const widths = columns.map((_,i)=>
-    `<col min="${i+1}" max="${i+1}" width="${excelColumnWidth}" customWidth="1"/>`).join('');
+    `<col min="${i+1}" max="${i+1}" width="${excelColumnWidth}" customWidth="1"${i>=visibleCount?' hidden="1"':''}/>`).join('');
   const worksheet = XML + `<worksheet xmlns="${MAIN}"><dimension ref="${range}"/><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" state="frozen" topLeftCell="A2" activePane="bottomLeft"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="${excelRowHeight}" defaultColWidth="${excelColumnWidth}"/><cols>${widths}</cols><sheetData>${header}${contents}</sheetData><autoFilter ref="${range}"/></worksheet>`;
   const zip = new JSZip();
   zip.file('[Content_Types].xml',XML+`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`);
@@ -345,7 +379,7 @@ export async function readOrderFile(file) {
 // The original 19 headers remain required. Some workbooks also include an item ID.
 const achungColumns=receiptColumns.slice(0,receiptColumns.findIndex(c=>c[0]==='File')+1);
 const achungItemId=achungColumns.find(c=>c[1]==='itemId');
-const nativeReferences=new Set(['orderNumber','orderId','itemId','sku','card']);
+const nativeReferences=new Set(['orderNumber','orderId','receiptReference','itemId','sku','card']);
 function nativeValue(cell,column,book) {
   const key=column[1], value=cellValue(cell,book.strings,book.formats,nativeReferences.has(key));
   if (value==='') return null;
@@ -354,7 +388,15 @@ function nativeValue(cell,column,book) {
     if (!Number.isFinite(n)) throw new Error('Invalid number in receipt cell '+cell.getAttribute('r')+'.');
     return n;
   }
-  if ((key==='date'||key==='time') && (cell.getAttribute('t')??'n')==='n') {
+  const cellType=cell.getAttribute('t')??'n';
+  if (cellType==='d' && (key==='date' || key==='time')) {
+    // Some editors use an ISO date cell in place of an Excel serial.
+    const iso=/^(?:(\d{4}-\d\d-\d\d)(?:T|$))?(?:(\d\d:\d\d)(?::(\d\d)(?:\.\d+)?)?(?:Z|[+-]\d\d:\d\d)?)?$/.exec(value);
+    if (key==='date' && iso?.[1]) return iso[1];
+    if (key==='time' && iso?.[2]) return iso[2]+(iso[3] && iso[3]!=='00'?':'+iso[3]:'');
+    throw new Error('Invalid Excel date or time in '+cell.getAttribute('r')+'.');
+  }
+  if ((key==='date'||key==='time') && cellType==='n') {
     // Achung writes these as strings. Excel can convert them to serials on save.
     const serial=Number(value);
     if (!Number.isFinite(serial) || serial<0) throw new Error('Invalid Excel date or time in '+cell.getAttribute('r')+'.');
@@ -370,6 +412,96 @@ function nativeValue(cell,column,book) {
     return date.toISOString().slice(0,10);
   }
   return value;
+}
+
+const refreshColumns=[...editableColumns,['File','filename','meta'],[refreshReceiptHeader,'receiptKey','meta'],
+  [refreshLineHeader,'lineKey','meta']];
+const refreshUuid=/^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i;
+const tillrollHeaders=new Set(['photo check','verification detail','reference finding']);
+
+function refreshBaseline(parts,rowNumber) {
+  let snapshot;
+  try { snapshot=JSON.parse(parts.join('')); } catch {}
+  if (typeof snapshot?.emptyReceipt!=='boolean' || !refreshUuid.test(snapshot.exportKey))
+    throw new Error('Missing original receipt information in row '+rowNumber+'. Export a fresh workbook.');
+  const baseline={receipt:{},line:{},emptyReceipt:snapshot.emptyReceipt,exportKey:snapshot.exportKey};
+  for (const [,key,scope='receipt',type] of editableColumns) {
+    const fields=snapshot?.[scope];
+    if (!fields || !Object.hasOwn(fields,key) || (fields[key]!==null &&
+        (type ? !Number.isFinite(fields[key]) : typeof fields[key]!=='string'))) {
+      throw new Error('The original Tillroll values in row '+rowNumber+' are damaged. Export a fresh workbook.');
+    }
+    baseline[scope][key]=fields[key];
+  }
+  return baseline;
+}
+
+export async function readTillrollEdits(file) {
+  if (file?.name && !/\.xlsx$/i.test(file.name)) throw new Error('Choose an edited Tillroll Excel (.xlsx) export.');
+  const book=await openWorkbook(file);
+  const sheet=book.sheets.find(s=>s.getAttribute('name')?.toLowerCase()==='line items');
+  if (!sheet) throw new Error('Choose a Tillroll Excel export with a Line items worksheet.');
+  const [head,...rows]=await book.sheetRows(sheet);
+  if (!head) throw new Error('The Line items worksheet is empty.');
+  const schema=new Map(), seen=new Set(), parts=new Set();
+  let tillroll=false, next=0;
+  for (const cell of children(head,'c')) {
+    const i=columnIndex(cell)??next; next=i+1;
+    const title=cellValue(cell,book.strings,book.formats,false).trim().toLowerCase();
+    if (tillrollHeaders.has(title)) tillroll=true;
+    const part=/^tillroll original values(?: (\d+))?$/.exec(title);
+    const column=part ? [title,Number(part[1]??1),'baseline'] : refreshColumns.find(c=>c[0].toLowerCase()===title);
+    if (!column) continue;
+    if (schema.has(i) || seen.has(title) || (part && parts.has(column[1])))
+      throw new Error('Repeated column in the Line items worksheet: '+title+'.');
+    if (part) parts.add(column[1]);
+    schema.set(i,column);seen.add(title);
+  }
+  const keyed=seen.has(refreshReceiptHeader.toLowerCase()) || seen.has(refreshLineHeader.toLowerCase()) || parts.size>0;
+  if (!tillroll && !keyed) throw new Error('Choose a workbook exported by Tillroll.');
+  const required=keyed ? refreshColumns : refreshColumns.filter(([title])=>title==='File' || title==='Item');
+  for(const [title] of required) {
+    if (!seen.has(title.toLowerCase())) throw new Error('Missing '+title+' column. Choose a complete Tillroll export.');
+  }
+  if (keyed && (!parts.has(1) || Math.max(...parts)!==parts.size))
+    throw new Error('The workbook is missing Tillroll refresh data. Export a fresh workbook.');
+
+  const result=[], lineKeys=new Set();
+  let exportKey=null;
+  for (const row of rows) {
+    const rowNumber=Number(row.getAttribute('r')) || result.length+2;
+    const entry={rowNumber,filename:null,receiptKey:null,lineKey:null,receipt:{},line:{},baseline:null};
+    const chunks=[], cells=new Map();
+    next=0;
+    for (const cell of children(row,'c')) {
+      const index=columnIndex(cell)??next; next=index+1;
+      if (cells.has(index)) throw new Error('Repeated cell in workbook row '+rowNumber+'.');
+      cells.set(index,cell);
+    }
+    for (const [index,column] of schema) {
+      const [,key,scope='receipt']=column;
+      const cell=cells.get(index);
+      const value=cell ? nativeValue(cell,column,book) : null;
+      if (scope==='baseline') chunks[key-1]=value??'';
+      else if (scope==='meta') entry[key]=value;
+      else entry[scope][key]=value;
+    }
+    if (!entry.filename && !entry.receiptKey && !entry.lineKey && !chunks.some(Boolean) &&
+        [...Object.values(entry.receipt),...Object.values(entry.line)].every(v=>v===null)) continue;
+    if (!entry.filename) throw new Error('Missing receipt filename in workbook row '+rowNumber+'.');
+    if (keyed) {
+      if (!refreshUuid.test(entry.receiptKey) || !refreshUuid.test(entry.lineKey) || lineKeys.has(entry.lineKey))
+        throw new Error('Missing, invalid or repeated Tillroll refresh key in row '+rowNumber+'. Use the original exported rows.');
+      lineKeys.add(entry.lineKey);
+      entry.baseline=refreshBaseline(chunks,rowNumber);
+      if (exportKey && exportKey!==entry.baseline.exportKey)
+        throw new Error('Row '+rowNumber+' belongs to a different Excel export. Refresh one workbook at a time.');
+      exportKey=entry.baseline.exportKey;
+    }
+    result.push(entry);
+  }
+  if (!result.length) throw new Error('The workbook has no receipt rows to refresh.');
+  return {rows:result,exportKey};
 }
 
 const noteClues={
