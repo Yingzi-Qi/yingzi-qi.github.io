@@ -5,3 +5,5 @@
 @media(min-width:801px){.cards{grid-template-columns:minmax(265px,1.27fr) repeat(2,minmax(205px,1fr))}}
 @media(min-width:581px) and (max-width:800px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.upload{grid-column:1/-1;height:210px}.sample-card{height:200px}}
 .real-card .photos{background:#dde4e7}.source-link{margin-top:16px;font-size:.9rem}.source-link a,.picture-credit a,.source-page a{color:var(--green);text-underline-offset:.2em}.picture-credit{font-size:.85rem;line-height:1.45;margin-top:12px}.source-page{max-width:760px;margin:48px auto}.source-page h1{font-size:clamp(2.4rem,6vw,4rem)}.source-page h2{font-size:1.6rem;margin:32px 0 12px}.source-page p,.source-page li{line-height:1.6}.source-page li+li{margin-top:7px}
+
+button.review-reason{min-height:28px;border-color:transparent;font-weight:500}button.review-reason:hover{border-color:#b68b48;background:#fce6a5}

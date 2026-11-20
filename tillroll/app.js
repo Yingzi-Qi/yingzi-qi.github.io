@@ -1,6 +1,6 @@
 import {readPhoto,secondReadPhoto,extractLocal,extractAI} from './extract.js';
-import {checkReceipt,samePurchase} from './checks.js?v=2';
-import {exportExcel,exportCSV,readOrderFile} from './exports.js';
+import {checkReceipt,samePurchase,reviewForLine} from './checks.js?v=3';
+import {exportExcel,exportCSV,readOrderFile} from './exports.js?v=3';
 import {loadSamples} from './samples.js?v=2';
 import {compareOrder} from './orders.js';
 const $ = s=>document.querySelector(s);
@@ -24,7 +24,7 @@ function evaluate(r){
   if(!r.data)return;
   r.review=checkReceipt(r.data,r.ocr||emptyOCR(),r.previous||null,confidenceOptions(r));
   r.review.flags=r.review.flags.filter(f=>!r.ack.has(f.field+'|'+f.message));
-  if(r.data.items.length && !r.review.photo.length)r.review.photo=r.data.items.map(()=>({status:'Needs review',reason:'No photo evidence available.'}));
+  if(r.data.items.length && !r.review.photo.length)r.review.photo=r.data.items.map(()=>({status:'Not verified',reason:'No photo evidence available.'}));
   r.orders=orderList?compareOrder(r.data,orderList):null;
 }
 function duplicates(){
@@ -86,14 +86,20 @@ async function run(r){
 const filt = (r,f)=>f==='all'||(f==='review'&&isReview(r))||(f==='photo'&&!r.duplicateOf&&r.review.photo.some(p=>p.status==='Needs review'))||(f==='dupes'&&!!r.duplicateOf)||(f==='second'&&r.second);
 const filterTitles={all:'All',review:'Needs review',photo:'Photo flags',dupes:'Duplicates',second:'Second pass'};
 const textOf=r=>[r.filename,r.data?.merchant,r.data?.orderNumber,r.data?.orderId,...r.review.photo.map(x=>x.idEvidence),...(r.data?.items||[]).flatMap(i=>[i.brand,i.item,i.sku])].join(' ').toLowerCase();
-function badge(label,style=''){return `<span class="status ${style}">${escape(label)}</span>`;}
-function photoBadge(photo){if(!photo)return '—';return badge(photo.status,photo.status==='Needs review'?'warn':'');}
+function badge(label,style='',reason=''){return `<span class="status ${style}" title="${escape(reason)}">${escape(label)}</span>`;}
+function photoBadge(photo){if(!photo)return '—';return badge(photo.status,photo.status==='Needs review'?'warn':photo.status==='Not verified'?'muted':'',photo.reason);}
 function cell(r,path,txt){const warning=r.review.flags.some(f=>f.field===path&&f.severity!=='info');return `<button class="cell ${warning?'marked':''}" data-id="${r.id}" data-path="${escape(path)}" title="${escape(txt??'Edit')}">${escape(txt??'')||'—'}</button>`;}
 function rowHTML(r){
   const first=`<button class="receipt-no" data-id="${r.id}" aria-label="Open receipt ${r.id}">#${r.id}</button>`;
   if(r.state!=='done'){const status=r.exactOf?`Same file as #${r.exactOf}`:r.state==='error'?'Could not read photo':r.state==='second'?'Second reading…':r.state==='checking'?'Checking photo…':r.state==='queued'?'Waiting…':'Reading…';return `<tr><td>${first}</td><td colspan="10">${badge(status,r.state==='error'?'bad':'muted')} &nbsp;${escape(r.filename)}</td></tr>`;}
   const d=r.data, items=d.items.length?d.items:[blankItem()];
-  return items.map((it,i)=>{const prop=k=>cell(r,`items.${i}.${k}`,it[k]);return `<tr><td>${first}</td><td>${cell(r,'merchant',d.merchant)}</td><td>${cell(r,'orderId',d.orderId)}</td><td>${prop('brand')}</td><td>${prop('item')}</td><td class="qty">${prop('qty')}</td><td class="money">${cell(r,`items.${i}.amount`,it.amount==null?null:Number(it.amount).toLocaleString('en-GB',{minimumFractionDigits:2,maximumFractionDigits:2}))}</td><td>${r.duplicateOf?badge('Duplicate of #'+r.duplicateOf,'muted'):photoBadge(r.review.photo[i])}</td><td>${r.orders?badge(r.orders[i]?.status||'Needs review',r.orders[i]?.status==='Matched'?'':'warn'):cell(r,'payment',d.payment)}</td><td>${r.duplicateOf?'—':badge(isReview(r)?'Needs review':'Checked',isReview(r)?'warn':'')}</td><td>${escape(r.method)}</td></tr>`;}).join('');
+  return items.map((it,i)=>{
+    const {messages}=reviewForLine(r,i);
+    if(filter==='review'&&!messages.length || filter==='photo'&&r.review.photo[i]?.status!=='Needs review')return '';
+    const reviewBadge=messages.length
+      ? `<button class="status warn review-reason" data-id="${r.id}" title="${escape(messages.join(' '))}" aria-label="${escape('Needs review. '+messages.join(' '))}">Needs review</button>`
+      : badge('Checked','','The automated receipt checks raised no issues for this line.');
+    const prop=k=>cell(r,`items.${i}.${k}`,it[k]);return `<tr><td>${first}</td><td>${cell(r,'merchant',d.merchant)}</td><td>${cell(r,'orderId',d.orderId)}</td><td>${prop('brand')}</td><td>${prop('item')}</td><td class="qty">${prop('qty')}</td><td class="money">${cell(r,`items.${i}.amount`,it.amount==null?null:Number(it.amount).toLocaleString('en-GB',{minimumFractionDigits:2,maximumFractionDigits:2}))}</td><td>${r.duplicateOf?badge('Duplicate of #'+r.duplicateOf,'muted'):photoBadge(r.review.photo[i])}</td><td>${r.orders?badge(r.orders[i]?.status||'Needs review',r.orders[i]?.status==='Matched'?'':'warn'):cell(r,'payment',d.payment)}</td><td>${r.duplicateOf?'—':reviewBadge}</td><td>${escape(r.method)}</td></tr>`;}).join('');
 }
 const sampleLabels={photos:'25 real receipt photos',demo:'25 demo receipts'};
 let loadingSamples=false;
@@ -113,7 +119,7 @@ function render(){
 }
 async function openDetail(id,path=''){
   const r=batch.find(x=>x.id===Number(id));if(!r)return;
-  const {showDetail}=await import('./detail.js?v=2');
+  const {showDetail}=await import('./detail.js?v=3');
   const refresh=()=>{duplicates();render();};
   const rerender=(focus='')=>{refresh();openDetail(r.id,focus).catch(e=>note(e.message));};
   showDetail(r,{

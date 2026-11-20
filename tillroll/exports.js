@@ -1,3 +1,4 @@
+import {reviewForLine} from './checks.js?v=3';
 import * as zipPackage from './export-vendor/jszip.min.js';
 
 const JSZip = zipPackage.default ?? globalThis.JSZip;
@@ -36,13 +37,12 @@ function exportData(receipts) {
     const lines = r.data.items?.length ? r.data.items : [{}];
     lines.forEach((line,i) => {
       const prefix = 'items.' + i + '.';
-      const flags = (r.review?.flags ?? []).filter(f =>
-        f.severity !== 'info' && (!String(f.field).startsWith('items.') || String(f.field).startsWith(prefix)));
+      const {flags,messages} = reviewForLine(r,i);
       const photo = r.review?.photo?.[i] ?? {};
       const order = r.orders?.[i] ?? {};
       const sources = {
         receipt:r.data, line, photo, order, meta:r,
-        review:{message:[...new Set(flags.map(f=>f.message).filter(Boolean))].join('; ')}
+        review:{message:messages.join('; ')}
       };
       rows.push(columns.map(([,key,,source='receipt',type]) => {
         let value = sources[source]?.[key] ?? '';
@@ -50,7 +50,7 @@ function exportData(receipts) {
         value = numeric ? Number(value) : String(value);
         const field = source === 'line' ? prefix+key : key;
         const flagged = flags.some(f=>f.field===field) || (source==='review' && value!=='')
-          || (source==='photo' && ['status','reason'].includes(key) && /review|mismatch|unconfirmed/i.test(photo.status ?? ''))
+          || (source==='photo' && ['status','reason'].includes(key) && photo.status === 'Needs review')
           || (source==='order' && ['status','reason'].includes(key) && order.status && order.status!=='Matched');
         return {value,numeric,style:flagged ? (type==='money' ? 5 : 4) : type==='money' ? 3 : 0};
       }));

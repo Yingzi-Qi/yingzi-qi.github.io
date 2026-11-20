@@ -58,7 +58,7 @@ function visualLines(ocr) {
       if (prior && word.x - prior.x - prior.w < Math.max(.014, 1.65 * glyph)) group.push(word);
       else groups.push([word]);
     }
-    return {...joinBoxes(row), cells: groups.map(joinBoxes)};
+    return {...joinBoxes(row), words, cells: groups.map(joinBoxes)};
   });
 }
 
@@ -124,15 +124,52 @@ function productEvidence(lines, brand, item) {
   return {hits, brandEvidence, itemEvidence};
 }
 
+function itemWording(value) {
+  return name(value).normalize('NFKD').replace(/\p{M}+/gu,'').replace(/[^\p{L}\p{N}]+/gu,' ').trim();
+}
+
+function standaloneItemHits(products, item) {
+  const wanted = itemWording(item);
+  if (wanted.length < 3 || !/\p{L}/u.test(wanted)) return [];
+  return products.filter(({line}) => {
+    // A faint trailing price need not undermine clear product words on the same row.
+    const words = line.words.map(word => word.confidence >= PHOTO_CONFIDENCE ? itemWording(word.text) : '�');
+    return (' '+words.filter(Boolean).join(' ')+' ').includes(' '+wanted+' ');
+  });
+}
+
+function labelledProductLines(lines) {
+  const pairs = [];
+  let columns;
+  for (const [i,line] of lines.entries()) {
+    const brandHead=line.cells.find(c=>/^brand$/i.test(c.text));
+    const itemHead=line.cells.find(c=>/^(item|description|product name)$/i.test(c.text));
+    if (brandHead && itemHead) { columns={brand:brandHead.x,item:itemHead.x}; continue; }
+    if (line.confidence < PHOTO_CONFIDENCE) continue;
+    const explicit=line.text.match(/^brand\s*:\s*(.+?)\s+[|–-]?\s*(?:item|description)\s*:\s*(.+)$/i);
+    if (explicit) {
+      pairs.push({row:i,brand:name(explicit[1]),item:name(explicit[2]),line});
+    } else if (columns) {
+      if (/^(total|subtotal|payment|change|tax|vat)\b/i.test(line.text)) { columns=null; continue; }
+      const at=x=>line.cells.find(c=>Math.abs(c.x-x)<.035 && c.confidence>=PHOTO_CONFIDENCE && /\p{L}/u.test(c.text));
+      const brand=at(columns.brand),item=at(columns.item);
+      if (brand && item && brand !== item) pairs.push({row:i,brand:name(brand.text),item:name(item.text),line});
+    }
+  }
+  return pairs;
+}
+
 function verifyPhoto(data, ocr, independent) {
   const lines = visualLines(ocr), ids = printedIds(lines);
+  const labelled = labelledProductLines(lines);
   const idEvidence = unique(ids.map(id => id.evidence)).join(' | ');
   const orderId = text(data.orderId);
   let idIssue = '';
-  if (!orderId) idIssue = 'The extracted order ID is empty.';
-  else if (!ids.length) idIssue = 'Could not read a labelled order ID.';
+  const expectsId = Boolean(orderId || ids.length);
+  if (!orderId && ids.length) idIssue = 'The photo has a labelled order ID that is missing from the extracted record.';
+  else if (orderId && !ids.length) idIssue = 'Could not read the extracted order ID beside an order ID label.';
   else if (ids.some(entry => entry.id !== orderId)) idIssue = 'The printed order ID differs or the photo shows conflicting IDs.';
-  else if (Math.max(...ids.map(id => id.confidence)) < PHOTO_CONFIDENCE) idIssue = 'The printed ID is unclear.';
+  else if (ids.length && Math.max(...ids.map(id => id.confidence)) < PHOTO_CONFIDENCE) idIssue = 'The printed ID is unclear.';
 
   const products = productLines(lines);
   const groups = new Map(), owners = new Map();
@@ -141,7 +178,14 @@ function verifyPhoto(data, ocr, independent) {
     const brand = name(product.brand), item = name(product.item), key = JSON.stringify([brand,item]);
     if (!groups.has(key)) {
       const match = brand && item ? productEvidence(products, brand, item) : null;
-      groups.set(key, {positions:[], match});
+      const corresponding = labelled.filter(p=>p.item===item || (items.length===1 && labelled.length===1));
+      const exact = corresponding.filter(p=>p.brand===brand && p.item===item);
+      for (const p of exact) {
+        if (match && !match.hits.some(hit=>hit.rows.includes(p.row)))
+          match.hits.push({rows:[p.row],brand:p.line.text,item:p.line.text,confidence:p.line.confidence});
+      }
+      const conflict = match && !match.hits.length && corresponding.length===1 ? corresponding[0] : null;
+      groups.set(key, {positions:[], match, conflict, itemHits:standaloneItemHits(products,item)});
       for (const hit of match?.hits || []) for (const row of hit.rows) {
         if (!owners.has(row)) owners.set(row, new Set());
         owners.get(row).add(key);
@@ -150,20 +194,37 @@ function verifyPhoto(data, ocr, independent) {
     groups.get(key).positions.push(i);
   }
   const result = Array(items.length);
-  for (const {positions, match} of groups.values()) {
+  for (const {positions, match, conflict, itemHits} of groups.values()) {
     const enough = match?.hits.length === positions.length;
     const collides = match?.hits.some(h => h.rows.some(i => owners.get(i).size > 1));
     for (const [index, i] of positions.entries()) {
       const issueList = idIssue ? [idIssue] : [];
       const hit = match?.hits[index] || match?.hits[0];
-      if (!match) issueList.push('A brand or item description is missing.');
-      else if (!match.hits.length) issueList.push('The full item and brand could not be paired on the printed line.');
-      else if (!enough || collides) issueList.push('Repeated or overlapping product lines could not be paired uniquely.');
-      else if (hit.confidence < PHOTO_CONFIDENCE) issueList.push('The product line is unclear.');
+      const paired = enough && !collides && hit?.confidence >= PHOTO_CONFIDENCE;
+      if (conflict) issueList.push('The labelled brand or item on the photo differs from the extracted product.');
+      else if (expectsId && match && !paired) {
+        if (!match.hits.length) issueList.push('The full item and brand could not be paired on the printed line.');
+        else if (!enough || collides) issueList.push('Repeated or overlapping product lines could not be paired uniquely.');
+        else issueList.push('The product line is unclear.');
+      }
+      const itemHit = itemHits.length === positions.length ? itemHits[index] : null;
+      const sku = name(items[i].sku);
+      const skuLine = !itemHit && sku.length >= 4 && /\d/.test(sku) && lines.find(line =>
+        line.words.some(w=>w.confidence>=PHOTO_CONFIDENCE && name(w.text)===sku));
+      let status, reason;
+      if (issueList.length) {
+        status = 'Needs review'; reason = issueList.join(' ');
+      } else if (paired && expectsId) {
+        status = independent ? 'Confirmed on photo' : 'Text agrees';
+        reason = 'The labelled order ID and the paired brand and item agree with the receipt reading.';
+      } else {
+        status = paired ? 'Brand and item found' : itemHit ? 'Item found' : skuLine ? 'SKU found' : 'Not verified';
+        const evidence = paired ? 'The brand and item appear together.' : itemHit ? 'The item wording appears on the receipt.' : skuLine ? 'The printed SKU agrees. The item wording could not be confirmed.' : 'The item could not be independently identified in the photo text.';
+        reason = evidence + (expectsId ? ' The labelled order ID agrees.' : ' No labelled order ID was available for comparison.');
+      }
       result[i] = {
-        status: issueList.length ? 'Needs review' : independent ? 'Confirmed on photo' : 'Text agrees',
-        reason: issueList.join(' ') || (independent ? 'Independent extraction agrees with the printed ID, brand and item.' : 'The OCR text contains the labelled order ID and this brand and item together.'),
-        idEvidence, brandEvidence:hit?.brand || match?.brandEvidence || '', itemEvidence:hit?.item || match?.itemEvidence || '',
+        status, reason, idEvidence,
+        brandEvidence:conflict?.line.text || hit?.brand || match?.brandEvidence || '', itemEvidence:conflict?.line.text || hit?.item || itemHit?.line.text || skuLine?.text || match?.itemEvidence || '',
       };
     }
   }
@@ -241,6 +302,25 @@ function ocrChecks(data, ocr, format, add, confirmed) {
   if (number(data.total) !== null && identifier(content).includes(identifier(number(data.total).toFixed(2)))) confirmed.push('total');
 }
 
+function printedOrderNumbers(ocr) {
+  const heading = /^order\s*(?:number\b|no\b\.?|#)\s*[:#]?\s*/i;
+  const valuePattern = /^(?=[\w./-]*\d)[\w][\w./-]*$/;
+  const ocrLines = ocr?.lines?.length ? ocr.lines : text(ocr?.text).split('\n').map(line => ({text:line,confidence:ocr?.confidence}));
+  const printedNumbers = new Set();
+  for (const [i,line] of ocrLines.entries()) {
+    const label = text(line.text);
+    if (!(line.confidence >= PHOTO_CONFIDENCE) || !heading.test(label)) continue;
+    const tail = label.replace(heading,'').trim();
+    const below = ocrLines[i+1];
+    let value = tail.split(/\s+/)[0];
+    if (!tail && below?.confidence >= PHOTO_CONFIDENCE && hasGeometry(line) && hasGeometry(below) && adjacent(line,below))
+      value = text(below.text);
+    const valueWord = tail && line.words?.find(word => word.text === value);
+    if (valuePattern.test(value) && (!valueWord || valueWord.confidence >= PHOTO_CONFIDENCE)) printedNumbers.add(value);
+  }
+  return printedNumbers;
+}
+
 export function checkReceipt(data, ocr, previous = null, {independentPhoto = false, today = new Date()} = {}) {
   const items = data.items || [], flags = [], confirmedFields = [];
   const repeats = Array(items.length).fill(null);
@@ -254,14 +334,26 @@ export function checkReceipt(data, ocr, previous = null, {independentPhoto = fal
   inspectDate(data.date, today, add);
   const retailer = identifier(data.merchant);
   const format = retailFormats.find(([key]) => retailer.includes(key))?.[1];
-  if (!text(data.orderNumber)) add('orderNumber', text(data.orderId) ? 'Order number is missing. An order ID was read.' : 'Both order references are missing.', text(data.orderId) ? 'check' : 'fix');
-  else if (format && !format.test(data.orderNumber)) add('orderNumber','The order number differs from this retailer’s expected format.', 'check');
+  const printedNumbers = printedOrderNumbers(ocr);
+  const orderNumber = text(data.orderNumber);
+  if (!orderNumber) {
+    if (printedNumbers.size) add('orderNumber','A labelled order number is visible on the photo but is missing from the record.', 'fix');
+    else add('orderNumber',text(data.orderId) ? 'Only an order ID is available.' : 'No order reference is available for matching.', 'info');
+  } else if ([...printedNumbers].some(value => {
+    if (value.toLowerCase() === orderNumber.toLowerCase()) return false;
+    // A Q or O in a digits-only field is a common OCR reading of zero.
+    const glyphs = ref => foldGlyphs(ref).replace(/q/g,'0');
+    return !(format?.test(orderNumber) && !format.test(value) && glyphs(value) === glyphs(orderNumber));
+  })) {
+    add('orderNumber','The labelled order number on the photo differs from the record.', 'check');
+  } else if (format && !format.test(orderNumber)) add('orderNumber','The order number differs from this retailer’s expected format.', 'check');
   else if (!format) add('orderNumber','This retailer has no configured order-number format.', 'info');
 
   items.forEach((item,i) => {
     const path = 'items.'+i+'.';
     if (!text(item.item)) add(path+'item',text(item.sku) ? 'Only the product code was read.' : 'Item description is missing.', 'fix');
-    else if (/^[A-Z\d/ .-]{4,24}$/.test(item.item) && /\d/.test(item.item)) add(path+'item','The item description looks like a product code.', 'check');
+    else if ((text(item.sku) && name(item.item) === name(item.sku)) || /^(?:\d{4,}|[A-Z]{1,6}[-/.]?\d{3,}[A-Z0-9]*(?:[-/.][A-Z0-9]+)*)$/i.test(text(item.item)))
+      add(path+'item','The item description looks like a product code.', 'check');
     if (text(item.item) && !text(item.brand)) add(path+'brand','No brand was read for this item.', 'info');
     const amount = number(item.amount), qty = number(item.qty), unit = number(item.unitPrice);
     if (amount === null) add(path+'amount','Line amount is missing or unreadable.', 'fix');
@@ -285,6 +377,17 @@ export function checkReceipt(data, ocr, previous = null, {independentPhoto = fal
     if (row.status === 'Needs review') add('items.'+i+'.photo', row.reason, 'check', true);
   });
   return {flags, photo, repeats, confirmedFields};
+}
+
+export function reviewForLine(receipt, index) {
+  const prefix = 'items.'+index+'.';
+  const flags = (receipt.review?.flags || []).filter(flag => flag.severity !== 'info' &&
+    (!flag.field.startsWith('items.') || flag.field.startsWith(prefix)));
+  const messages = flags.map(flag => flag.message);
+  const photo = receipt.review?.photo?.[index], order = receipt.orders?.[index];
+  if (photo?.status === 'Needs review') messages.push(photo.reason);
+  if (order && order.status !== 'Matched') messages.push(order.reason || order.status);
+  return {flags, messages:unique(messages.filter(Boolean))};
 }
 
 export function samePurchase(a, b) {

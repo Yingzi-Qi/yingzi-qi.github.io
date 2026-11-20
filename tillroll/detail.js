@@ -95,7 +95,7 @@ function showProof(panel, r) {
     line.append(element('h3',label));
     if (receipt) {
       const summary = element('p');
-      summary.append(element('span',receipt.status, 'status'+(receipt.status==='Needs review'?' warn':'')),document.createTextNode(' '+receipt.reason));
+      summary.append(element('span',receipt.status, 'status'+(receipt.status==='Needs review'?' warn':receipt.status==='Not verified'?' muted':'')),document.createTextNode(' '+receipt.reason));
       line.append(summary);
       const evidence = [...new Set([receipt.idEvidence, receipt.brandEvidence, receipt.itemEvidence].filter(Boolean))];
       if (evidence.length) line.append(element('blockquote',evidence.join('\n')));
