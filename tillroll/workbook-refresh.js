@@ -65,7 +65,7 @@ function receiptMatches(row,receipt) {
 function fieldsEqual(values,current,fields) {
   return Object.keys(fields).every(key=>!Object.hasOwn(values,key) || equal(values[key],current[key],key));
 }
-function legacyLineIndex(row,receipt,used,unchanged=false) {
+function legacyLineIndex(row,receipt,used) {
   const items=receipt.data.items;
   // Resolve by all surviving product identifiers, never by spreadsheet row order.
   // Ignore a changed identifier with no matches; refuse contradictory matches.
@@ -79,10 +79,6 @@ function legacyLineIndex(row,receipt,used,unchanged=false) {
   if (candidates?.length>1) {
     const exact=candidates.find(index=>!used.has(index) && fieldsEqual(row.line,items[index],itemFields));
     if (exact!==undefined) return exact;
-    // An unchanged spreadsheet line writes no item data. Website-only edits can
-    // make previously identical live items different without requiring a guess.
-    const available=unchanged ? candidates.find(index=>!used.has(index)) : undefined;
-    if (available!==undefined) return available;
   }
   if (!candidates && items.length===1 && receiptMatches(row,receipt)) return 0;
   throw new Error('Cannot identify the item on Excel row '+row.rowNumber+' in '+row.filename+'. Export a fresh workbook from this batch.');
@@ -100,8 +96,7 @@ function matchLine(row,receipt,keyed,used) {
   }
   if (!keyed) {
     const previous=row.legacyBaseline;
-    return legacyLineIndex(previous ? {...row,receipt:previous.appliedReceipt,line:previous.line} : row,
-      receipt,used,Boolean(previous && fieldsEqual(row.line,previous.line,itemFields)));
+    return legacyLineIndex(previous ? {...row,receipt:previous.appliedReceipt,line:previous.line} : row,receipt,used);
   }
   const index=receipt.data.items.findIndex(item=>item.refreshKey===row.lineKey);
   if (index===-1) throw new Error('Unknown or deleted item on Excel row '+row.rowNumber+' in '+row.filename+'. Export the current batch.');
@@ -136,20 +131,25 @@ export function planWorkbookRefresh(batch,{rows}) {
         throw new Error('The filename on Excel row '+row.rowNumber+' must match exactly one receipt in this batch: '+row.filename+'.');
       receipt=matches[0];
     }
-    if (!groups.has(receipt)) groups.set(receipt,new Map());
+    if (!groups.has(receipt)) groups.set(receipt,{rows:[],lines:new Map()});
     const group=groups.get(receipt);
-    const index=matchLine(row,receipt,keyed,group);
-    if (group.has(index))
-      throw new Error('Excel rows '+group.get(index).rowNumber+' and '+row.rowNumber+' identify the same item in '+receipt.filename+'. Export one row per item.');
-    group.set(index,row);
+    group.rows.push(row);
+    // A legacy row already linked to its last saved copy needs no live item
+    // match until an item cell changes. The website may have edited its SKU.
+    if (row.legacyBaseline && fieldsEqual(row.line,row.legacyBaseline.line,itemFields)) continue;
+    const index=matchLine(row,receipt,keyed,group.lines);
+    if (group.lines.has(index))
+      throw new Error('Excel rows '+group.lines.get(index).rowNumber+' and '+row.rowNumber+' identify the same item in '+receipt.filename+'. Export one row per item.');
+    group.lines.set(index,row);
   }
   const plans=[];
-  for (const [receipt,lines] of groups) {
+  for (const [receipt,{rows:groupRows,lines}] of groups) {
     // A new item in Tillroll that never received an export key was not in the
     // workbook. Preserve it. Never interpret an absent workbook row as a deletion.
-    const missing=receipt.data.items.some((item,index)=>!lines.has(index) && (!keyed || item.refreshKey));
+    const missing=keyed ? receipt.data.items.some((item,index)=>item.refreshKey && !lines.has(index))
+      : groupRows.length!==Math.max(1,receipt.data.items.length);
     if (missing) throw new Error('Excel is missing an item row for '+receipt.filename+'. Restore the row or export the current batch.');
-    const receiptChanges=fieldChanges([...lines.values()],'receipt',receiptFields,currentReceipt(receipt));
+    const receiptChanges=fieldChanges(groupRows,'receipt',receiptFields,currentReceipt(receipt));
     const itemChanges=[];
     for (const [index,row] of lines) {
       if (index===-1) continue;
