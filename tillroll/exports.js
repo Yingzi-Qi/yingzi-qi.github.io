@@ -48,6 +48,12 @@ function exportData(receipts) {
       const {flags,messages} = reviewForLine(r,i);
       const photo = r.review?.photo?.[i] ?? {};
       const order = r.orders?.[i] ?? {};
+      const imported=r.origin==='achung';
+      const originalNote=imported ? r.sourceNotes?.[i] : undefined;
+      const orderIssue=orderNeedsReview(order) ? order.reason || order.status : '';
+      const note=typeof originalNote==='string'
+        ? [...new Set([originalNote,orderIssue].filter(Boolean))].join('; ')
+        : messages.join('; ');
       const ref=r.reference || {};
       const suggested=ref.requiresReview ? ref.suggestion?.value : '';
       const alternatives=suggested ? [...new Set(ref.candidates.map(c=>c.value))].filter(v=>v!==suggested).join(' / ') : '';
@@ -55,14 +61,21 @@ function exportData(receipts) {
         receipt:r.record || r.data, line, photo, order, meta:r,
         reference:suggested ? {...ref,reason:[ref.reason,ref.suggestion.reason].filter(Boolean).join(' ')} : ref,
         proposal:{suggested,alternatives},
-        review:{message:messages.join('; ')}
+        review:{message:note}
       };
       rows.push(columns.map(([,key,,source='receipt',type]) => {
         let value = sources[source]?.[key] ?? '';
         const numeric = type && value !== '' && Number.isFinite(Number(value));
         value = numeric ? Number(value) : String(value);
         const field = source === 'line' ? prefix+key : key;
-        const flagged = flags.some(f=>f.field===field) || ((source==='review'||source==='proposal') && value!=='')
+        const fieldFlags=flags.filter(f=>f.field===field);
+        if (imported && fieldFlags.length && (source==='receipt' || source==='line')) {
+          const style=fieldFlags.some(f=>f.severity==='fix') ? 8 : 6;
+          return {value,numeric,style:type==='money' ? style+1 : style};
+        }
+        if (imported && source==='review' && value && !orderIssue) return {value,numeric,style:2};
+        const flagged = fieldFlags.length || (source==='review' && value!=='' && (!imported || orderIssue))
+          || (source==='proposal' && value!=='')
           || (source==='photo' && ['status','reason'].includes(key) && photo.status === 'Needs review')
           || (source==='order' && ['status','reason'].includes(key) && orderNeedsReview(order));
         return {value,numeric,style:flagged ? (type==='money' ? 5 : 4) : type==='money' ? 3 : 0};
@@ -93,17 +106,17 @@ function cellXml(row,col,{value,numeric,style}) {
 }
 const styles = XML + `<styleSheet xmlns="${MAIN}">
   <fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><color rgb="FFFFFFFF"/><sz val="11"/><name val="Calibri"/></font></fonts>
-  <fills count="4"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF1E4946"/><bgColor indexed="64"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFFEDC0"/><bgColor indexed="64"/></patternFill></fill></fills>
+  <fills count="6"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>${['FF1E4946','FFFFEDC0','FFFDE68A','FFFECDD3'].map(rgb=>'<fill><patternFill patternType="solid"><fgColor rgb="'+rgb+'"/><bgColor indexed="64"/></patternFill></fill>').join('')}</fills>
   <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
   <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-  <cellXfs count="6"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="4" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/><xf numFmtId="0" fontId="0" fillId="3" borderId="0" xfId="0" applyFill="1" applyAlignment="1"><alignment wrapText="1" vertical="center"/></xf><xf numFmtId="4" fontId="0" fillId="3" borderId="0" xfId="0" applyNumberFormat="1" applyFill="1"/></cellXfs>
+  <cellXfs count="10"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment wrapText="1" vertical="center"/></xf><xf numFmtId="4" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>${[3,4,5].map(fill=>'<xf numFmtId="0" fontId="0" fillId="'+fill+'" borderId="0" xfId="0" applyFill="1" applyAlignment="1"><alignment wrapText="1" vertical="center"/></xf><xf numFmtId="4" fontId="0" fillId="'+fill+'" borderId="0" xfId="0" applyNumberFormat="1" applyFill="1"/>').join('')}</cellXfs>
   <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`;
 export async function buildXlsxBlob(receipts) {
   const {columns,rows} = exportData(receipts);
   const range = 'A1:'+colName(columns.length)+(rows.length+1);
   const header = columns.map((c,i)=>cellXml(1,i+1,{value:c[0],style:1})).join('');
   const contents = rows.map((row,i)=>{
-    const wraps = Math.max(1,...row.map((c,j)=>c.style===4 ? Math.ceil(String(c.value).length/(columns[j][2]*.85)) : 1));
+    const wraps = Math.max(1,...row.map((c,j)=>[2,4,6,8].includes(c.style) ? Math.ceil(String(c.value).length/(columns[j][2]*.85)) : 1));
     return '<row r="'+(i+2)+'" ht="'+Math.min(180,Math.max(19,wraps*16))+'" customHeight="1">'+row.map((c,j)=>cellXml(i+2,j+1,c)).join('')+'</row>';
   }).join('');
   const worksheet = XML + `<worksheet xmlns="${MAIN}"><dimension ref="${range}"/><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" state="frozen" topLeftCell="A2" activePane="bottomLeft"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="17"/><cols>${columns.map((c,i)=>'<col min="'+(i+1)+'" max="'+(i+1)+'" width="'+c[2]+'" customWidth="1"/>').join('')}</cols><sheetData><row r="1" ht="24" customHeight="1">${header}</row>${contents}</sheetData><autoFilter ref="${range}"/></worksheet>`;
@@ -226,7 +239,7 @@ function cellValue(cell,strings,formats,isId) {
   }
   return raw;
 }
-async function readOrderXlsx(file) {
+async function openWorkbook(file) {
   const zip=await JSZip.loadAsync(await file.arrayBuffer());
   const main='xl/workbook.xml';
   const book=await xmlPart(zip,main), rels=await xmlPart(zip,'xl/_rels/workbook.xml.rels');
@@ -234,25 +247,40 @@ async function readOrderXlsx(file) {
   const part=type=>relations.find(r=>r.getAttribute('Type')?.endsWith('/'+type));
   const shared=part('sharedStrings');
   const strings=shared ? descendants(await xmlPart(zip,relativePart(main,shared.getAttribute('Target'))),'si').map(zipText):[];
-  const style=part('styles'),formats=[];
+  const style=part('styles'),formats=[],reviewStyles=[];
   if (style) {
     const xml=await xmlPart(zip,relativePart(main,style.getAttribute('Target')));
     const custom=new Map(descendants(xml,'numFmt').map(n=>[n.getAttribute('numFmtId'),n.getAttribute('formatCode')]));
+    const fills=children(descendants(xml,'fills')[0],'fill').map(fill=>{
+      const pattern=child(fill,'patternFill');
+      if (pattern?.getAttribute('patternType')!=='solid') return null;
+      const rgb=child(pattern,'fgColor')?.getAttribute('rgb')?.slice(-6).toUpperCase();
+      return {'FDE68A':'check','FECDD3':'fix'}[rgb]??null;
+    });
     const builtin={'0':'General','1':'0','49':'@'};
     for (const xf of children(descendants(xml,'cellXfs')[0],'xf')) {
       const id=xf.getAttribute('numFmtId')??'0';
       formats.push(custom.get(id)??builtin[id]??'other');
+      reviewStyles.push(xf.getAttribute('applyFill')==='0' ? null : fills[Number(xf.getAttribute('fillId'))]);
     }
   }
   const sheets=descendants(book,'sheet');
+  const date1904=['true','1'].includes(descendants(book,'workbookPr')[0]?.getAttribute('date1904'));
+  const sheetRows=async sheet=>{
+    const rid=sheet.getAttributeNS(REL,'id')??sheet.getAttribute('r:id');
+    const rel=relations.find(r=>r.getAttribute('Id')===rid);
+    if (!rel || !rel.getAttribute('Type')?.endsWith('/worksheet')) return [];
+    const xml=await xmlPart(zip,relativePart(main,rel.getAttribute('Target')));
+    return children(descendants(xml,'sheetData')[0],'row');
+  };
+  return {sheets,strings,formats,reviewStyles,date1904,sheetRows};
+}
+async function readOrderXlsx(file) {
+  const {sheets,strings,formats,sheetRows}=await openWorkbook(file);
   const preferred=sheets.filter(s=>/^orders$/i.test(s.getAttribute('name')??''));
   const candidates=[];
   for (const sheet of preferred.length ? preferred : sheets) {
-    const rid=sheet.getAttributeNS(REL,'id')??sheet.getAttribute('r:id');
-    const rel=relations.find(r=>r.getAttribute('Id')===rid);
-    if (!rel || !rel.getAttribute('Type')?.endsWith('/worksheet')) continue;
-    const xml=await xmlPart(zip,relativePart(main,rel.getAttribute('Target')));
-    const rows=children(descendants(xml,'sheetData')[0],'row');
+    const rows=await sheetRows(sheet);
     if (!rows.length) continue;
     const raw=(row,schema)=>{
       const cells=[];
@@ -282,4 +310,127 @@ export async function readOrderFile(file) {
   if (!records.length) throw new Error('The order list contains no item rows.');
   validateOrderPatterns(records);
   return records;
+}
+
+// The original "Line items" sheet has 19 columns. Its two identifiers and its
+// SKU are independent text fields, even when they consist entirely of digits.
+const achungColumns=receiptColumns.slice(0,receiptColumns.findIndex(c=>c[0]==='File')+1).filter(c=>c[1]!=='itemId');
+const nativeReferences=new Set(['orderNumber','orderId','sku','card']);
+function nativeValue(cell,column,book) {
+  const key=column[1], value=cellValue(cell,book.strings,book.formats,nativeReferences.has(key));
+  if (value==='') return null;
+  if (column[4]) {
+    const n=Number(value);
+    if (!Number.isFinite(n)) throw new Error('Invalid number in receipt cell '+cell.getAttribute('r')+'.');
+    return n;
+  }
+  if ((key==='date'||key==='time') && (cell.getAttribute('t')??'n')==='n') {
+    // Achung writes these as strings. Excel can convert them to serials on save.
+    const serial=Number(value);
+    if (!Number.isFinite(serial) || serial<0) throw new Error('Invalid Excel date or time in '+cell.getAttribute('r')+'.');
+    if (key==='time') {
+      const seconds=Math.round((serial%1)*86400)%86400;
+      return [Math.floor(seconds/3600),Math.floor(seconds/60)%60,...(seconds%60?[seconds%60]:[])].map(n=>String(n).padStart(2,'0')).join(':');
+    }
+    const day=Math.floor(serial);
+    if (!book.date1904 && day===60) throw new Error('Invalid calendar date in receipt cell '+cell.getAttribute('r')+'.');
+    const epoch=Date.UTC(book.date1904?1904:1899,book.date1904?0:11,book.date1904?1:31);
+    const date=new Date(epoch+(day-(!book.date1904&&day>60?1:0))*86400000);
+    if (!Number.isFinite(date.getTime())) throw new Error('Invalid Excel date in '+cell.getAttribute('r')+'.');
+    return date.toISOString().slice(0,10);
+  }
+  return value;
+}
+
+const noteClues={
+  orderNumber:/order[- ]number/i, orderId:/order[- ]id/i, merchant:/merchant|source of purchase/i,
+  date:/\bdate\b/i, total:/\breceipt total\b|lines add up|\btotal is missing\b/i,
+  item:/item name|description|repeated row/i, amount:/line (?:total|amount)|[×]|quantity multiplied/i,
+  brand:/\bbrand\b/i
+};
+function nativeFlags(rows) {
+  const flags=[];
+  function add(field,message,severity) {
+    if (!flags.some(f=>f.field===field && f.message===message && f.severity===severity))
+      flags.push({field,message,severity,escalate:false});
+  }
+  const perRow=rows.map(row=>row.note ? row.note.split('; ') : []);
+  rows.forEach(({marks},i)=>{
+    const messages=perRow[i], bound=new Set();
+    for (const mark of marks) {
+      const receiptField=!mark.field.startsWith('items.');
+      // Receipt-level flags repeat on each line in the original export. Never
+      // attach a line-specific note to every item on a multi-item receipt.
+      const eligible=receiptField ? messages.filter(m=>perRow.every(notes=>notes.includes(m))) : messages;
+      const value=String(mark.value??'').toLowerCase();
+      const matches=marks.length===1 ? eligible : eligible.filter(m=>
+        (value.length>=4 && m.toLowerCase().includes(value)) || noteClues[mark.key]?.test(m));
+      for (const message of matches) {
+        add(mark.field,message,mark.severity);
+        bound.add(message);
+      }
+      if (!matches.length) add(mark.field,'Achung marked '+mark.title+' for review.',mark.severity);
+    }
+    // Some original notes (e.g. image quality) have no matching coloured cell.
+    for (const message of messages) if (!bound.has(message))
+      add('items.'+i+'.review',message,'check');
+  });
+  return flags;
+}
+
+export async function readAchungWorkbook(file) {
+  if (file?.name && !/\.xlsx$/i.test(file.name)) throw new Error('Choose an Achung Excel (.xlsx) receipt workbook.');
+  const book=await openWorkbook(file);
+  const sheet=book.sheets.find(s=>s.getAttribute('name')?.toLowerCase()==='line items');
+  if (!sheet) throw new Error('Choose an Achung Excel export with a Line items worksheet.');
+  const [head,...rows]=await book.sheetRows(sheet);
+  if (!head || !children(head,'c').length) throw new Error('The Line items worksheet is empty.');
+  const schema=new Map(), seen=new Set();
+  for (const cell of children(head,'c')) {
+    const title=cellValue(cell,book.strings,book.formats,false).trim().toLowerCase();
+    if (['photo check','photo check reason','order id on photo','reference finding','other possible references'].includes(title))
+      throw new Error('This is a Tillroll workbook. Choose the original Excel file exported by Achung.');
+    const column=achungColumns.find(c=>c[0].toLowerCase()===title);
+    if (!column) continue;
+    if (seen.has(column)) throw new Error('Repeated header in receipt workbook: '+column[0]+'.');
+    seen.add(column);
+    schema.set(columnIndex(cell)??schema.size,column);
+  }
+  if (seen.size!==achungColumns.length) throw new Error('Choose the Excel file exported by Achung. Missing '+achungColumns.filter(c=>!seen.has(c)).map(c=>c[0]).join(', ')+'.');
+  const groups=new Map();
+  for (const row of rows) {
+    const values={}, cells=new Map();
+    let next=0;
+    for (const cell of children(row,'c')) {
+      const i=columnIndex(cell)??next; next=i+1;
+      const column=schema.get(i);
+      if (!column) continue;
+      values[column[1]]=nativeValue(cell,column,book);
+      cells.set(column[1],cell);
+    }
+    if (!Object.values(values).some(v=>v!==null)) continue;
+    const filename=values.filename;
+    if (!filename) throw new Error('Missing receipt filename in workbook row '+row.getAttribute('r')+'.');
+    const data={}, item={}, marks=[];
+    for (const column of achungColumns) {
+      const [,key,,scope='receipt']=column;
+      if (scope==='receipt') data[key]=values[key]??null;
+      if (scope==='line') item[key]=values[key]??null;
+    }
+    // Distinct purchases from photos with the same filename remain distinct.
+    const signature=JSON.stringify([filename,data]);
+    if (!groups.has(signature)) groups.set(signature,{filename,data:{...data,items:[]},rows:[]});
+    const group=groups.get(signature), index=group.rows.length;
+    group.data.items.push(item);
+    for (const [title,key,,scope='receipt'] of achungColumns) {
+      const cell=cells.get(key), severity=cell && book.reviewStyles[Number(cell.getAttribute('s')??0)];
+      if (severity && (scope==='receipt' || scope==='line'))
+        marks.push({title,key,field:scope==='line'?'items.'+index+'.'+key:key,value:values[key],severity});
+    }
+    group.rows.push({note:values.message??'',marks});
+  }
+  if (!groups.size) throw new Error('The receipt workbook contains no receipt rows.');
+  return Array.from(groups.values(),({filename,data,rows})=>({
+    filename,data,flags:nativeFlags(rows),sourceNotes:rows.map(row=>row.note)
+  }));
 }

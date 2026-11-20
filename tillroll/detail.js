@@ -33,7 +33,7 @@ function flagLabel(path) {
   if (path === 'verification') return 'Photo recheck';
   const parts = path.split('.');
   if (parts[0] === 'items') {
-    const label = itemFields.find(([key]) => key === parts[2])?.[1] || 'Photo check';
+    const label = parts[2]==='review' ? 'Workbook note' : itemFields.find(([key]) => key === parts[2])?.[1] || 'Photo check';
     return 'Line ' + (Number(parts[1]) + 1) + ' · ' + label;
   }
   return receiptFields.find(([key]) => key === path)?.[1] || path;
@@ -207,6 +207,11 @@ function changesSinceFirst(r) {
 }
 
 function showReading(panel, r) {
+  if (r.origin==='achung') {
+    const source=r.workbookName ? 'Achung Excel · '+r.workbookName : 'Achung Excel';
+    panel.append(element('p',source,'hint'),element('p','The receipt fields and review flags came from this workbook.','hint'));
+    return;
+  }
   const reasons = [...(r.reasons || []), ...(r.notes || [])];
   const elapsed = Number(r.elapsed);
   const sub = [r.method, Number.isFinite(elapsed) && elapsed > 0 ? elapsed.toFixed(1)+' s' : ''].filter(Boolean).join(' · ');
@@ -223,11 +228,13 @@ function showReading(panel, r) {
 }
 
 function showProof(panel, r) {
-  const block = section('Photo check');
+  const imported=r.origin==='achung';
+  if (imported && !r.orders?.length) return;
+  const block = section(imported ? 'Order comparison' : 'Photo check');
   const items=r.data.items || [];
   const rows=items.length ? items : r.orders?.length ? [null] : [];
   rows.forEach((item,i) => {
-    const receipt = r.review.photo?.[i], order = r.orders?.[i];
+    const receipt = imported ? null : r.review.photo?.[i], order = r.orders?.[i];
     const line = element('div',undefined,'proof');
     const label = item ? 'Line '+(i+1)+(item.item ? ' · '+item.item : '') : 'Receipt';
     line.append(element('h3',label));
@@ -262,7 +269,8 @@ function showFlags(panel, r, act, callbacks) {
     const list = element('ul',undefined,'issue-list');
     for (const flag of flags) {
       const li = element('li');
-      li.append(element('strong',flagLabel(flag.field)+' · '),document.createTextNode(flag.message));
+      const severity=r.origin==='achung' && flag.severity==='fix' ? 'Fix · ' : '';
+      li.append(element('strong',severity+flagLabel(flag.field)+' · '),document.createTextNode(flag.message));
       if (flag.severity === 'check' && flag.field!=='receipt' && callbacks.onAcknowledge) {
         const accept = button('Mark checked',()=>act('onAcknowledge',flag),'quiet');
         accept.setAttribute('aria-label','Mark checked: '+flagLabel(flag.field));
@@ -280,7 +288,7 @@ function showFlags(panel, r, act, callbacks) {
 
 function showEditor(panel, r, act, focusPath) {
   const form = element('form');
-  const box = disclosure('Edit extracted fields',!!focusPath);
+  const box = disclosure(r.origin==='achung' ? 'Edit imported fields' : 'Edit extracted fields',!!focusPath);
   let dirty = false;
   const fields = new Map();
   const addFields = (fieldsForPart, source, path, parent) => {
@@ -316,8 +324,8 @@ function showEditor(panel, r, act, focusPath) {
     if (!dirty) { if (removeIndex===null) act('onAddLine'); else act('onRemoveLine',removeIndex); return; }
     const next=collect();
     if (!next) return;
-    if(removeIndex===null) next.items.push(blankItem()); else next.items.splice(removeIndex,1);
-    act('onSave',next);
+    if(removeIndex===null) next.items.push(blankItem());
+    act('onSave',next,removeIndex);
   };
   addFields(receiptFields,r.data,'',form);
   (r.data.items || []).forEach((item,i)=>{
@@ -369,7 +377,7 @@ export function showDetail(r, callbacks={}, focusPath='') {
     heading.append(element('small',['Receipt total',r.data.currency,amount].filter(Boolean).join(' ')));
   }
   const panel=element('div',undefined,'review-panel');
-  if (r.state==='done') showReference(pictureLink,panel,r.reference,
+  if (r.state==='done' && r.origin!=='achung') showReference(pictureLink,panel,r.reference,
     callbacks.onConfirmReference && ((candidate,kind)=>act('onConfirmReference',candidate,kind)));
   if (r.demo?.note) panel.append(element('p',r.demo.note,'hint'));
   if (r.duplicateOf || r.exactOf) {
@@ -391,7 +399,9 @@ export function showDetail(r, callbacks={}, focusPath='') {
   } else if(!r.exactOf) {
     panel.append(element('p',r.state==='second'?'Second reading in progress…':r.state==='queued'?'Waiting for a reader…':'Reading receipt…','hint'));
   }
-  body.append(picture,panel);dialog.replaceChildren(title,body);
+  if (picture.childElementCount || r.origin!=='achung') body.append(picture);
+  else panel.style.gridColumn='1 / -1';
+  body.append(panel);dialog.replaceChildren(title,body);
   dialog.onclick=e=>{if(e.target===dialog){const b=dialog.getBoundingClientRect();if(e.clientX<b.left||e.clientX>b.right||e.clientY<b.top||e.clientY>b.bottom)close();}};
   if(!dialog.open) dialog.showModal();
   if(focused) {focused.focus();focused.select?.();}

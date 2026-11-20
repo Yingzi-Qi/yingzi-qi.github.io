@@ -1,7 +1,7 @@
 import {inspectReference,combineReferenceReadings} from './reference.js?v=6';
 import {readPhoto,secondReadPhoto,extractLocal,extractAI,reconcileReadings,photoFieldConflicts} from './extract.js?v=6';
 import {checkReceipt,samePurchase,reviewForLine} from './checks.js?v=6';
-import {exportExcel,exportCSV,readOrderFile} from './exports.js?v=6';
+import {exportExcel,exportCSV,readOrderFile,readAchungWorkbook} from './exports.js?v=7';
 import {loadSamples} from './samples.js?v=6';
 import {compareOrder,orderNeedsReview} from './orders.js?v=6';
 const $ = s=>document.querySelector(s);
@@ -25,6 +25,12 @@ const isReview = r=>r.state==='error' || (!r.duplicateOf && r.data && (r.review.
 function note(message){const n=$('#notice');clearTimeout(noticeTimer);n.hidden=!message;n.textContent=message;if(message)noticeTimer=setTimeout(()=>{n.hidden=true;},6500);}
 function evaluate(r){
   if(!r.data)return;
+  if(r.origin==='achung'){
+    r.record=r.duplicateRecord=r.data;
+    r.review={flags:r.nativeFlags,photo:[],repeats:[]};
+    r.orders=orderList?compareOrder(r.record,orderList):null;
+    return;
+  }
   const ocr=r.ocr||emptyOCR();
   r.reference=inspectReference(r.data,ocr,orderList);
   if(r.otherOcr)r.reference=combineReferenceReadings(r.reference,inspectReference(r.data,r.otherOcr,orderList));
@@ -62,7 +68,8 @@ function duplicates(){
   for(const r of batch){
     if(r.exactOf){r.duplicateOf=r.exactOf;continue;}
     r.duplicateOf=null;if(r.state!=='done')continue;
-    const match=canonical.find(s=>samePurchase(s.duplicateRecord,r.duplicateRecord));
+    // Achung already chose which receipts to include in its workbook.
+    const match=canonical.find(s=>!(r.origin==='achung' && s.importGroup===r.importGroup) && samePurchase(s.duplicateRecord,r.duplicateRecord));
     if(match && !r.keepBoth) r.duplicateOf=match.id;
     else canonical.push(r);
   }
@@ -146,11 +153,12 @@ function referenceCell(r) {
     return `<button class="cell reference-cell marked" data-id="${r.id}" title="${escape(title)}" aria-label="${escape(title)}">${escape(suggestion.value)}<small>Suggested · needs checking</small></button>`;
   }
   const labels=referenceLabels;
-  const kind=r.reference?.basis==='user-confirmed' ? r.reference.kind : Object.keys(labels).find(key=>record[key]);
+  const marked=Object.keys(labels).find(key=>r.review.flags.some(f=>f.field===key && f.severity!=='info'));
+  const kind=r.reference?.basis==='user-confirmed' ? r.reference.kind : marked || Object.keys(labels).find(key=>record[key]);
   const value=kind?record[kind]:'';
   const label=kind && r.reference?.kind===kind && r.reference?.value===value ? r.reference.label||labels[kind] : labels[kind];
-  const title=value ? 'Inspect '+label+' '+value+' on the receipt' : 'Inspect the receipt for a reference';
-  return `<button class="cell reference-cell" data-id="${r.id}" title="${escape(title)}" aria-label="${escape(title)}">${escape(value||'—')}${value?`<small>${escape(label)}</small>`:''}</button>`;
+  const title=r.origin==='achung'?'View imported '+(label||'reference')+' '+(value||''):value ? 'Inspect '+label+' '+value+' on the receipt' : 'Inspect the receipt for a reference';
+  return `<button class="cell reference-cell${marked?' marked':''}" data-id="${r.id}" title="${escape(title)}" aria-label="${escape(title)}">${escape(value||'—')}${value?`<small>${escape(label)}</small>`:''}</button>`;
 }
 function rowHTML(r){
   const first=`<button class="receipt-no" data-id="${r.id}" aria-label="Open receipt ${r.id}">#${r.id}</button>`;
@@ -161,7 +169,8 @@ function rowHTML(r){
     if(filter==='review'&&!messages.length || filter==='photo'&&r.review.photo[i]?.status!=='Needs review')return '';
     const reviewBadge=messages.length
       ? `<button class="status warn review-reason" data-id="${r.id}" title="${escape(messages.join(' '))}" aria-label="${escape('Needs review. '+messages.join(' '))}">Needs review</button>`
-      : badge('Checked','','The automated receipt checks raised no issues for this line.');
+      : r.origin==='achung' ? badge('No flag','','No open warning for this imported line.')
+        : badge('Checked','','The automated receipt checks raised no issues for this line.');
     const prop=k=>cell(r,`items.${i}.${k}`,it[k]);return `<tr><td>${first}</td><td>${cell(r,'merchant',d.merchant)}</td><td>${referenceCell(r)}</td><td>${prop('brand')}</td><td>${prop('item')}${it.itemId ? `<button class="item-identifier" data-id="${r.id}" data-path="items.${i}.itemId">Item ID · ${escape(it.itemId)}</button>` : ''}</td><td class="qty">${prop('qty')}</td><td class="money">${cell(r,`items.${i}.amount`,it.amount==null?null:Number(it.amount).toLocaleString('en-GB',{minimumFractionDigits:2,maximumFractionDigits:2}))}</td><td>${r.duplicateOf?badge('Duplicate of #'+r.duplicateOf,'muted'):photoBadge(r.review.photo[i])}</td><td>${r.orders?badge(r.orders[i]?.status||'Needs review',orderNeedsReview(r.orders[i])?'warn':r.orders[i]?.status==='Not compared'?'muted':''):cell(r,'payment',d.payment)}</td><td>${r.duplicateOf?'—':reviewBadge}</td><td>${escape(r.method)}</td></tr>`;}).join('');
 }
 const sampleLabels={photos:'25 real receipt photos',demo:'25 demo receipts'};
@@ -177,19 +186,50 @@ function render(){
   if(!more.hidden){more.dataset.next=sets.has('photos')?'demo':'photos';more.textContent='Add '+sampleLabels[more.dataset.next];more.disabled=loadingSamples;}
   const done=active(), work=batch.some(notDone),nRows=done.reduce((n,r)=>n+Math.max(1,r.data.items.length),0);
   const dollars=batch.reduce((n,r)=>n+Number(r.firstData?.cost||0)+(r.previous?Number(r.data?.cost||0):0),0);
-  $('#summary').innerHTML=`<span><b>${batch.length}</b> receipt${batch.length===1?'':'s'}</span><span><b>${nRows}</b> export row${nRows===1?'':'s'}</span><span><b>${batch.filter(isReview).length}</b> to review</span>${work?'<span>Processing…</span>':`<span>${((Math.max(finishedTime||Date.now(),startTime)-startTime)/1000).toFixed(1)} s</span>`}${dollars?`<span>Est. model cost $${dollars.toFixed(4)}</span>`:''}${orderList?`<span>Order list · ${escape(orderFilename)}</span>`:''}`;
+  const timing=work?'<span>Processing…</span>':startTime?`<span>${((Math.max(finishedTime||Date.now(),startTime)-startTime)/1000).toFixed(1)} s</span>`:'';
+  $('#summary').innerHTML=`<span><b>${batch.length}</b> receipt${batch.length===1?'':'s'}</span><span><b>${nRows}</b> export row${nRows===1?'':'s'}</span><span><b>${batch.filter(isReview).length}</b> to review</span>${timing}${dollars?`<span>Est. model cost $${dollars.toFixed(4)}</span>`:''}${orderList?`<span>Order list · ${escape(orderFilename)}</span>`:''}`;
   $('#filters').innerHTML=Object.entries(filterTitles).map(([k,t])=>`<button data-filter="${k}" aria-pressed="${filter===k}">${t} <span class="num">${batch.filter(r=>filt(r,k)).length}</span></button>`).join('');
   const q=$('#search').value.trim().toLowerCase(), shown=batch.filter(r=>filt(r,filter)&&(!q||textOf(r).includes(q)));
   $('#table').innerHTML=shown.length?`<table aria-label="Receipt line items"><thead><tr>${['Receipt','Source','Reference','Brand','Item','Qty','Amount','Photo check',orderList?'Order check':'Payment','Review','Read by'].map(s=>`<th scope="col">${s}</th>`).join('')}</tr></thead><tbody>${shown.map(rowHTML).join('')}</tbody></table>`:'<p class="empty">No receipts match this view.</p>';
   $('#excel').disabled=$('#csv').disabled=!done.length||work;$('#startover').disabled=work;$('#clear-orders').hidden=!orderList;
 }
+function resolveImportFlags(r, resolved){
+  if(r.origin!=='achung' || !resolved.length)return;
+  for(const f of resolved){
+    const line=/^items\.(\d+)\./.exec(f.field);
+    if(line)r.sourceNotes[Number(line[1])]=undefined;
+    else r.sourceNotes.fill(undefined);
+  }
+  r.nativeFlags=r.nativeFlags.filter(f=>!resolved.includes(f));
+}
+function removeReceiptLine(r,i){
+  if(!Number.isInteger(i)||!r.data?.items[i])return;
+  r.data.items.splice(i,1);
+  if(r.origin==='achung')r.sourceNotes.splice(i,1);
+  for(const key of ['readingConflicts','nativeFlags']){
+    if(!r[key])continue;
+    r[key]=r[key].flatMap(f=>{
+      if(f.field==='items')return [];
+      const match=/^items\.(\d+)\.(.+)$/.exec(f.field);
+      if(!match || Number(match[1])<i)return [f];
+      if(Number(match[1])===i)return [];
+      return [{...f,field:`items.${Number(match[1])-1}.${match[2]}`}];
+    });
+  }
+}
 async function openDetail(id,path=''){
   const r=batch.find(x=>x.id===Number(id));if(!r)return;
-  const {showDetail}=await import('./detail.js?v=6');
+  const {showDetail}=await import('./detail.js?v=7');
   const refresh=()=>{duplicates();render();};
   const rerender=(focus='')=>{refresh();openDetail(r.id,focus).catch(e=>note(e.message));};
   showDetail({...r,data:r.record||r.data},{
-    onSave(data){
+    onSave(data,removeIndex=null){
+      if(r.origin==='achung'){
+        resolveImportFlags(r,r.nativeFlags.filter(f=>{
+          const after=get(data,f.field);
+          return after!=null && String(after).trim()!=='' && after!==get(r.record,f.field);
+        }));
+      }
       if(data.date!==r.record.date)delete data.dateIssue;
       r.readingConflicts=(r.readingConflicts||[]).filter(f=>JSON.stringify(get(data,f.field))===JSON.stringify(get(r.record,f.field)));
       if(data.merchant!==r.data.merchant || (r.confirmedReference && data[r.confirmedReference.kind]!==r.record[r.confirmedReference.kind]))r.confirmedReference=null;
@@ -197,7 +237,7 @@ async function openDetail(id,path=''){
         if(data[key]===r.record[key])data[key]=r.data[key];
         else (r.editedReferences??=new Set()).add(key);
       }
-      r.data=normalData(data);r.ack.clear();evaluate(r);refresh();note('Changes saved. Checks updated.');
+      r.data=normalData(data);removeReceiptLine(r,removeIndex);r.ack.clear();evaluate(r);refresh();note('Changes saved. Checks updated.');
     },
     onConfirmReference(candidate,kind){
       if(!Object.hasOwn(referenceLabels,kind) || !r.reference.requiresReview)return;
@@ -206,18 +246,15 @@ async function openDetail(id,path=''){
       r.confirmedReference={candidate:listed,kind,values:r.reference.candidates.map(c=>c.value)};
       evaluate(r);rerender();note('Reference confirmed.');
     },
-    onAcknowledge(f){if(f.severity==='check'&&!f.field.endsWith('.photo'))r.ack.add(f.field+'|'+f.message);evaluate(r);rerender();},
+    onAcknowledge(f){if(f.severity==='check'&&!f.field.endsWith('.photo')){
+      if(r.origin==='achung')resolveImportFlags(r,[f]);
+      else r.ack.add(f.field+'|'+f.message);
+    }evaluate(r);rerender();},
     onKeepBoth(){if(!r.exactOf)r.keepBoth=true;rerender();},
     onRemove(){if(r.exactOf||r.duplicateOf){batch=batch.filter(x=>x!==r);URL.revokeObjectURL(r.url);if(hashOwners.get(r.hash)===r.id)hashOwners.set(r.hash,r.duplicateOf);for(const other of batch)if(other.exactOf===r.id)other.exactOf=r.duplicateOf;if($('#receipt-dialog').open)$('#receipt-dialog').close();refresh();}},
     onRetry(){if(r.state!=='error')return;r.notes=[];r.state='queued';r.readerSettings={mode,key:apiKey};finishedTime=0;queue.push(r);$('#receipt-dialog').close();pump();},
     onRemoveLine(i){
-      if(!Number.isInteger(i)||!r.data?.items[i])return;
-      r.data.items.splice(i,1);
-      r.readingConflicts=(r.readingConflicts||[]).filter(f=>f.field!=='items'&&!f.field.startsWith('items.'+i+'.')).map(f=>{
-        const parts=f.field.split('.');
-        if(parts[0]==='items' && Number(parts[1])>i){parts[1]=String(Number(parts[1])-1);return {...f,field:parts.join('.')};}
-        return f;
-      });
+      removeReceiptLine(r,i);
       r.ack.clear();evaluate(r);rerender();
     },
     onAddLine(){r.data.items.push(blankItem());evaluate(r);rerender(`items.${r.data.items.length-1}.item`);},
@@ -249,6 +286,38 @@ $('#search').oninput=render;
 $('#table').onclick=e=>{const b=e.target.closest('[data-id]');if(b)openDetail(b.dataset.id,b.dataset.path).catch(err=>note(err.message));};
 $('#excel').onclick=async()=>{try{await exportExcel(active());}catch(e){note('Excel export failed. '+e.message);}};
 $('#csv').onclick=()=>{try{exportCSV(active());}catch(e){note('CSV export failed. '+e.message);}};
+let importingWorkbook=false;
+const achungDialog=$('#achung-dialog');
+for(const button of document.querySelectorAll('[data-action="achung"]')){
+  button.onclick=()=>{$('#achung-error').textContent='';achungDialog.showModal();};
+}
+$('#pick-achung').onclick=()=>$('#achung-input').click();
+$('#achung-input').onchange=async e=>{
+  const file=e.target.files[0],currentGeneration=generation;
+  e.target.value='';
+  if(!file || importingWorkbook)return;
+  $('#achung-error').textContent='';
+  importingWorkbook=true;
+  $('#pick-achung').disabled=true;
+  try{
+    const records=await readAchungWorkbook(file);
+    if(generation!==currentGeneration || !achungDialog.open)return;
+    const existing=new Set(batch.map(r=>r.filename));
+    const collision=records.find(record=>existing.has(record.filename));
+    if(collision)throw new Error(collision.filename+' is already in this batch. Start a new batch to import this workbook separately.');
+    const group=Symbol();
+    const imported=records.map(entry=>{
+      const r={id:++seq,filename:entry.filename,workbookName:file.name,importGroup:group,
+        data:normalData(entry.data),nativeFlags:entry.flags,sourceNotes:entry.sourceNotes,
+        state:'done',origin:'achung',method:'Achung Excel',ack:new Set(),notes:[],reasons:[]};
+      evaluate(r);
+      return r;
+    });
+    batch=batch.concat(imported);filter='all';$('#search').value='';duplicates();render();
+    achungDialog.close();note(`Imported ${imported.length} receipts from Achung.`);
+  }catch(err){$('#achung-error').textContent=err.message || 'The workbook could not be imported.';}
+  finally{importingWorkbook=false;$('#pick-achung').disabled=false;}
+};
 $('#landing-orders').onclick=$('#orders').onclick=()=>{$('#order-error').textContent='';$('#orders-dialog').showModal();};
 $('#pick-orders').onclick=()=>$('#orders-input').click();
 $('#orders-input').onchange=async e=>{const file=e.target.files[0];e.target.value='';if(!file)return;try{const rows=await readOrderFile(file);orderFilename=file.name;orderList=rows;batch.forEach(evaluate);duplicates();render();$('#orders-dialog').close();note(`${rows.length} order lines loaded.`);}catch(err){$('#order-error').textContent=err.message;}};
