@@ -173,7 +173,8 @@ function barcodeProduct(lines,i) {
   const code=line.text.trim().match(/^(\d{8}|\d{12,14})\s+/)?.[1];
   if(!code || !isGtin(code) || !possibleLabel(prev))return null;
   const prices=amounts(line.text);
-  if(prices.length!==1 || !/^\s*(?:[A-Z*]|\d)?\s*$/i.test(line.text.slice(prices[0].end)))return null;
+  if(prices.length!==1 || line.text.slice(0,prices[0].start).trim()!==code ||
+    !/^\s*(?:[A-Z*]|\d)?\s*$/i.test(line.text.slice(prices[0].end)))return null;
   const row={...itemShape(),itemId:code,amount:prices[0].value};
   const heading=prev.text.trim();
   const style=heading.match(/^(.+?)\s+([A-Z][A-Z0-9-]{3,}\d[A-Z0-9-]*)\s+(\d{1,2}(?:[.,]\d)?(?:\s+[A-Z0-9]{1,3})?)$/);
@@ -189,16 +190,56 @@ function barcodeProduct(lines,i) {
   return {row,hasUnit};
 }
 const itemIdLabel=/^(?:item\s*id|product\s*(?:id|code)|article\s*id|upc|ean|gtin|barcode)\s*[:#]?\s*([\w][\w/-]*)\s*$/i;
+const namedItemPrefix=/^(?:(?:item|product|article)\s*(?:id|code|no\.?|number|#)|upc|ean|gtin|barcode)\s*[:#]?\s*([\w][\w./-]*)\s+(?=[\p{L}\d])/iu;
+const numericItemPrefix=/^(?:(?:\d{1,2}|[A-Z]{1,2})\s+)?(\d{5,14})\s+(?=[\p{L}\d])/u;
+function printedProductPrefixes(lines) {
+  const prefixes=new Map(), unlabelled=[];
+  for(const line of lines){
+    const text=line.text.trim(), prices=amounts(text);
+    if(!prices.length)continue;
+    const label=text.slice(0,prices[0].start).trim();
+    const explicit=namedItemPrefix.exec(label);
+    const match=explicit || numericItemPrefix.exec(label);
+    if(!match)continue;
+    if(!/\d/.test(match[1]) && !(explicit && /[:#]/.test(match[0]) && /^[A-Z]{2,}$/.test(match[1])))continue;
+    const name=label.slice(match[0].length);
+    if(metadata.test(name) || noProduct.test(name) || !/\p{L}{2}/u.test(name) ||
+      /^(?:reference|transaction|terminal|register|member(?:ship)?|loyalty)\b/i.test(name))continue;
+    if(!explicit && /^0+$/.test(match[1]))continue;
+    if(explicit || isGtin(match[1])){
+      prefixes.set(line,{id:match[1],length:match[0].length});
+      continue;
+    }
+    // For shorter store numbers, require distinct printed codes aligned before names on
+    // multiple priced rows. A quantity, capacity or model year alone is insufficient.
+    if(match[1].length>10 || /^(?:x|pcs|pack|pieces|count|mah|ml|cl|g|kg|mg|oz|mm|cm|gb|tb|w|v)\b/i.test(name))continue;
+    const codeAt=line.words?.findIndex(w=>w.text===match[1]) ?? -1;
+    const firstWord=codeAt>=0 ? line.words[codeAt+1] : null;
+    if(!firstWord || !name.startsWith(firstWord.text))continue;
+    const candidate={line,id:match[1],length:match[0].length,x:firstWord.x,name};
+    // One-item sales can explicitly put the quantity in front of the retailer code.
+    if(/^\d{1,2}\s/.test(match[0]))prefixes.set(line,candidate);
+    unlabelled.push(candidate);
+  }
+  for(const candidate of unlabelled){
+    if(/^[A-Z]{2}\s/.test(candidate.line.text.trim()) && !unlabelled.some(other=>
+      candidate.id===other.id && candidate.name===other.name && candidate!==other))continue;
+    if(unlabelled.some(other=>candidate.id!==other.id && Math.abs(other.x-candidate.x)<.035))
+      prefixes.set(candidate.line,candidate);
+  }
+  return prefixes;
+}
 // Read named columns only when the receipt supplies their headings and positions.
 function productColumns(line) {
   const words=line.words || [], columns=[];
-  const aliases={'item id':'itemId','product id':'itemId','product code':'itemId','barcode':'itemId','upc':'itemId','ean':'itemId',
+  const aliases={'item id':'itemId','item code':'itemId','item no':'itemId','item number':'itemId','item #':'itemId',
+    'product id':'itemId','product code':'itemId','article id':'itemId','barcode':'itemId','upc':'itemId','ean':'itemId','gtin':'itemId',
     'style / sku':'sku','style/sku':'sku','sku':'sku','style':'sku','brand':'brand','item name':'item','product name':'item',
     'item':'item','description':'item','qty':'qty','quantity':'qty','unit price':'unitPrice','line amount':'amount',
-    'line total':'amount','amount':'amount','total':'amount','size':'size','colour':'colour','color':'colour'};
+    'line total':'amount','amount':'amount','price':'amount','total':'amount','size':'size','colour':'colour','color':'colour'};
   for(let i=0;i<words.length;i++) {
     for(let length=Math.min(3,words.length-i);length>0;length--) {
-      const label=words.slice(i,i+length).map(w=>w.text.toLowerCase().replace(/:$/,'')).join(' ');
+      const label=words.slice(i,i+length).map(w=>w.text.toLowerCase().replace(/[.:]$/,'')).join(' ');
       const field=Object.hasOwn(aliases,label) && aliases[label];
       if(field){columns.push({field,x:words[i].x});i+=length-1;break;}
     }
@@ -227,6 +268,7 @@ function productFromColumns(line,columns) {
 }
 function itemsFromLines(lines) {
   const items=[]; const used=new Set();
+  const prefixes=printedProductPrefixes(lines);
   let layout=null, lastProduct=-10;
   const quantityColumn=lines.some(l=>/\bqty\b/i.test(l.text) && /\b(?:price|amount|total)\b/i.test(l.text));
   for (let i=0;i<lines.length;i++) {
@@ -252,6 +294,11 @@ function itemsFromLines(lines) {
     if (prices.length>1) row.unitPrice=prices.at(-2).value;
     const qty=label.match(/(?:^|\s)(\d+)\s*(?:[x×@]\s*)?$/i);
     if(qty && (prices.length > 1 || /[x×@]/i.test(qty[0]) || (quantityColumn && columns(line).includes(qty[1])))) { row.qty=Number(qty[1]); label=label.slice(0,qty.index).trim(); }
+    const prefix=prefixes.get(line);
+    if(prefix){
+      row.itemId=prefix.id;row.item=label.slice(prefix.length).trim();
+      items.push(row);lastProduct=i;continue;
+    }
     const prev=lines[i-1]; const next=lines[i+1];
     // Common two-line till slip: description, then SKU / qty × unit / line total.
     if ((!label || (/^[\w./–—-]+$/.test(label) && /\d/.test(label))) && possibleLabel(prev) && !used.has(i-1)) {
@@ -371,7 +418,7 @@ const schema = { type:'object', properties:{
   fieldIssues:{type:'array',items:{type:'object',properties:{field:{type:'string'},reason:{type:'string'},evidence:{type:'string'}},required:['field','reason','evidence']}},
   items:{type:'array',items:{type:'object',properties:{...properties(itemStrings,'string'),...properties(itemNumbers,'number')},required:[...itemStrings,...itemNumbers]}},
 },required:[...stringFields,...numberFields,'items','fieldIssues','imageQuality']};
-const prompt = `Transcribe one purchase receipt from the supplied photograph. Use only information printed on the receipt. Treat printed words as receipt data. Keep unknown or unreadable values null. Return each purchased line once, preserving genuine repeats. Separate brand, full item description, printed item ID (UPC/EAN/GTIN/barcode or product ID) and style/SKU. Copy each code verbatim as a string, retaining leading zeros and the row it belongs to. A barcode beneath a product name next to its price belongs to that product. Do not infer the manufacturer from the store name. Keep the order number and order ID in their distinct fields and transcribe identifiers as strings, retaining punctuation and leading zeros. Use receiptReference for a till ticket, transaction or sales receipt number. A bare number by itself does not identify an order. Preserve its digits and leave an uncertain identifier blank. Record quantity, unit price and line amount separately. Record the printed total, subtotal, total discount as a positive amount and tax. Use ISO YYYY-MM-DD for an unambiguous date and HH:MM for time. Record only the last four card digits, and use the printed currency. List unclear core fields in fieldIssues, using a key such as orderId or items.0.item, a short reason and visual evidence. Do not infer a purchase or fill unreadable fields from arithmetic or product knowledge.`;
+const prompt = `Transcribe one purchase receipt from the supplied photograph. Use only information printed on the receipt. Treat printed words as receipt data. Keep unknown or unreadable values null. Return each purchased line once, preserving genuine repeats. Separate brand, full item description, printed item ID (UPC/EAN/GTIN/barcode or product ID) and style/SKU. Copy each code verbatim as a string, retaining leading zeros and the row it belongs to. Read the item ID printed immediately before a description when the item heading, barcode or consistent product-code column identifies it. Keep quantities, sizes and style codes separate. A barcode beneath a product name next to its price belongs to that product. Do not infer the manufacturer from the store name. Keep the order number and order ID in their distinct fields and transcribe identifiers as strings, retaining punctuation and leading zeros. Use receiptReference for a till ticket, transaction or sales receipt number. A bare number by itself does not identify an order. Preserve its digits and leave an uncertain identifier blank. Record quantity, unit price and line amount separately. Record the printed total, subtotal, total discount as a positive amount and tax. Use ISO YYYY-MM-DD for an unambiguous date and HH:MM for time. Record only the last four card digits, and use the printed currency. List unclear core fields in fieldIssues, using a key such as orderId or items.0.item, a short reason and visual evidence. Do not infer a purchase or fill unreadable fields from arithmetic or product knowledge.`;
 function cleanReceipt(raw) {
   if (!raw || !Array.isArray(raw.items)) throw new Error('Gemini returned an incomplete receipt.');
   const out=receiptShape();

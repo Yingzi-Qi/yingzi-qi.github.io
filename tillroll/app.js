@@ -1,8 +1,8 @@
 import {oldestPurchaseFirst,purchaseDateText} from './receipt-date-display.js?v=8';
 import {inspectReference,combineReferenceReadings} from './reference.js?v=6';
-import {readPhoto,secondReadPhoto,extractLocal,extractAI,reconcileReadings,photoFieldConflicts} from './extract.js?v=8';
+import {readPhoto,secondReadPhoto,extractLocal,extractAI,reconcileReadings,photoFieldConflicts} from './extract.js?v=9';
 import {checkReceipt,samePurchase,reviewForLine} from './checks.js?v=6';
-import {exportExcel,exportCSV,readOrderFile,readAchungWorkbook} from './exports.js?v=7';
+import {exportExcel,exportCSV,readOrderFile,readAchungWorkbook} from './exports.js?v=9';
 import {loadSamples} from './samples.js?v=6';
 import {compareOrder,orderNeedsReview} from './orders.js?v=6';
 const $ = s=>document.querySelector(s);
@@ -148,20 +148,13 @@ function cell(r,path,txt,title,extraClass=''){
   const warning=r.review.flags.some(f=>f.field===path && f.severity!=='info');
   return `<button class="cell ${extraClass} ${warning?'marked':''}" data-id="${r.id}" data-path="${escape(path)}" title="${escape(title??txt??'Edit')}">${escape(txt??'')||'—'}</button>`;
 }
-function referenceCell(r) {
-  const record=r.record||r.data, entries=[];
-  for(const kind of ['orderNumber','orderId','receiptReference']){
-    const value=record[kind];
-    if(!value)continue;
-    const label=r.reference?.kind===kind && r.reference.value===value ? r.reference.label || referenceLabels[kind] : referenceLabels[kind];
-    const marked=r.review.flags.some(f=>f.field===kind && f.severity!=='info');
-    entries.push(`<button class="cell reference-cell${marked?' marked':''}" data-id="${r.id}" title="${escape(label+' '+value)}"><small>${escape(label)}</small>${escape(value)}</button>`);
+function orderNumberCell(r){
+  const value=(r.record || r.data).orderNumber;
+  const proposal=r.reference?.suggestion;
+  if(!value && !r.editedReferences?.has('orderNumber') && r.reference?.requiresReview && proposal?.kind==='orderNumber'){
+    return `<button class="cell marked proposed-order" data-id="${r.id}" title="Check this suggested order number against the photo">${escape(proposal.value)}<small>Suggested · check</small></button>`;
   }
-  const suggestion=r.reference?.suggestion;
-  if(r.reference?.requiresReview && suggestion){
-    entries.push(`<button class="cell reference-cell marked" data-id="${r.id}" aria-label="${escape('Check suggested reference '+suggestion.value)}"><small>Suggested · needs checking</small>${escape(suggestion.value)}</button>`);
-  }
-  return entries.join('') || `<button class="cell reference-cell" data-id="${r.id}" title="View receipt references" aria-label="View receipt references">—</button>`;
+  return cell(r,'orderNumber',value,'Edit order number');
 }
 function receiptStatus(r){
   if(r.duplicateOf)return badge('Duplicate of #'+r.duplicateOf,'muted');
@@ -180,13 +173,13 @@ const amountFormat=new Intl.NumberFormat('en-GB',{minimumFractionDigits:2,maximu
 function itemRow(r,item,i,shared=''){
   const field='items.'+i+'.';
   const price=item.amount==null ? '' : [r.data.currency,amountFormat.format(item.amount)].filter(Boolean).join(' ');
-  return `<tr>${shared}<td>${cell(r,field+'brand',item.brand,'Edit brand')}</td><td>${cell(r,field+'item',item.item,'Edit item')}</td><td class="money">${cell(r,field+'amount',price,'Line amount including quantity')}</td></tr>`;
+  return `<tr>${shared}<td>${cell(r,field+'brand',item.brand,'Edit brand')}</td><td class="item-id">${cell(r,field+'itemId',item.itemId,'Edit item ID')}</td><td>${cell(r,field+'item',item.item,'Edit item')}</td><td class="money">${cell(r,field+'amount',price,'Line amount including quantity')}</td></tr>`;
 }
 function rowHTML(r){
   const open=`<button class="receipt-no" data-id="${r.id}" aria-label="Open receipt ${r.id}">#${r.id}</button>`;
   if(r.state!=='done'){
     const status=r.exactOf?`Same file as #${r.exactOf}`:r.state==='error'?'Could not read photo':r.state==='second'?'Second reading…':r.state==='checking'?'Checking photo…':r.state==='queued'?'Waiting…':'Reading…';
-    return `<tbody><tr><th scope="rowgroup">${open}</th><td colspan="6">${badge(status,r.state==='error'?'bad':'muted')} ${escape(r.filename)}</td></tr></tbody>`;
+    return `<tbody><tr><th scope="rowgroup">${open}</th><td colspan="7">${badge(status,r.state==='error'?'bad':'muted')} ${escape(r.filename)}</td></tr></tbody>`;
   }
   const d=r.data,items=d.items.length?d.items:[blankItem()];
   const visible=[];
@@ -201,8 +194,8 @@ function rowHTML(r){
   const time=d.time?cell(r,'time',d.time,'Purchase time','purchase-time'):'';
   const shared=`<th scope="rowgroup" ${span}><div class="receipt-controls">${open}${receiptStatus(r)}</div></th>
     <td ${span} class="purchase-date">${date}${time}</td><td ${span}>${cell(r,'merchant',d.merchant,'Edit shop')}</td>
-    <td ${span} class="references">${referenceCell(r)}</td>`;
-  if(!d.items.length)return `<tbody aria-label="Receipt ${r.id}"><tr>${shared}<td colspan="3" class="no-items">No items read</td></tr></tbody>`;
+    <td ${span} class="order-number"><span class="mobile-order-label" aria-hidden="true">Order number</span>${orderNumberCell(r)}</td>`;
+  if(!d.items.length)return `<tbody aria-label="Receipt ${r.id}"><tr>${shared}<td colspan="4" class="no-items">No items read</td></tr></tbody>`;
   return `<tbody aria-label="Receipt ${r.id}">${visible.map(({item,index},position)=>itemRow(r,item,index,position===0?shared:'')).join('')}</tbody>`;
 }
 const sampleLabels={photos:'25 real receipt photos',demo:'25 demo receipts'};
@@ -222,7 +215,7 @@ function render(){
   $('#summary').innerHTML=`<span><b>${batch.length}</b> receipt${batch.length===1?'':'s'}</span><span><b>${nRows}</b> export row${nRows===1?'':'s'}</span><span><b>${batch.filter(isReview).length}</b> to review</span>${timing}${dollars?`<span>Est. model cost $${dollars.toFixed(4)}</span>`:''}${orderList?`<span>Order list · ${escape(orderFilename)}</span>`:''}`;
   $('#filters').innerHTML=Object.entries(filterTitles).map(([k,t])=>`<button data-filter="${k}" aria-pressed="${filter===k}">${t} <span class="num">${batch.filter(r=>filt(r,k)).length}</span></button>`).join('');
   const q=$('#search').value.trim().toLowerCase(), shown=batch.filter(r=>filt(r,filter)&&(!q||textOf(r).includes(q))).sort(oldestPurchaseFirst);
-  const headers=['Receipt','Purchase date','Shop','Order reference','Brand','Item','Price'].map(title=>
+  const headers=['Receipt','Purchase date','Shop','Order number','Brand','Item ID','Item','Price'].map(title=>
     title==='Purchase date' ? '<th scope="col" aria-sort="ascending" title="Oldest purchase first">Purchase date <span aria-hidden="true">↑</span></th>' : `<th scope="col">${title}</th>`);
   $('#table').innerHTML=shown.length?`<table class="receipt-lines" aria-label="Receipt line items"><thead><tr>${headers.join('')}</tr></thead>${shown.map(rowHTML).join('')}</table>`:'<p class="empty">No receipts match this view.</p>';
   $('#excel').disabled=$('#csv').disabled=!done.length||work;$('#startover').disabled=work;$('#clear-orders').hidden=!orderList;

@@ -13,7 +13,7 @@ const WORKBOOK_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheet
 const receiptColumns = [
   ['Source','merchant',22], ['Date','date',13], ['Time','time',9],
   ['Order Number','orderNumber',22], ['Order ID','orderId',23],
-  ['Brand','brand',20,'line'], ['Item','item',33,'line'], ['Item ID','itemId',24,'line'], ['Style / SKU','sku',20,'line'],
+  ['Brand','brand',20,'line'], ['Item ID','itemId',24,'line'], ['Item','item',33,'line'], ['Style / SKU','sku',20,'line'],
   ['Colour','colour',16,'line'], ['Size','size',12,'line'], ['Qty','qty',8,'line','number'],
   ['Unit Price','unitPrice',14,'line','money'], ['Amount','amount',14,'line','money'],
   ['Currency','currency',12], ['Receipt Total','total',16,'receipt','money'],
