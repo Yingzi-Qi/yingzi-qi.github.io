@@ -28,3 +28,7 @@ td button.reference-cell{height:auto;text-align:left}button.reference-cell small
 .reference-choices .hint{margin:4px 0 8px}
 .reference-actions{display:flex;align-items:flex-end;flex-wrap:wrap;gap:8px 12px}
 .reference-actions .form-field{margin:0}
+
+.landing-tools{display:flex;flex-wrap:wrap;align-items:center;gap:.4rem 1rem;margin-top:1rem}
+.landing-tools a{color:var(--green);font-size:.9rem;text-underline-offset:.2em}
+td button.item-identifier{display:block;min-height:1.5rem;height:auto;margin:0 .3rem .25rem;padding:.1rem .2rem;color:var(--muted);border:0;background:transparent;font-size:.8rem;white-space:normal;text-align:left}

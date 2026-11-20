@@ -1,17 +1,13 @@
-import {orderNeedsReview} from './orders.js?v=5';
-import {inspectReference} from './reference.js?v=5';
+import {orderNeedsReview} from './orders.js?v=6';
+import {referenceFormat} from './retail-rules.js?v=6';
+import {validCalendarDate} from './purchase-date.js?v=6';
+import {inspectReference} from './reference.js?v=6';
 // Geometry is normalized to the upright photo, with the origin at its top left.
 const PHOTO_CONFIDENCE = 0.8;
 const ID_LABEL = /^order\s+i\.?d\.?\s*[:#]?$/i;
 const INLINE_ID = /^order\s+i\.?d\.?(?:\s*[:#]\s*|\s+)(\S+)$/i;
 const PRICE = /^(?:[£€$]\s*)?\d[\d,]*\.\d{2}$/;
 const TRAILING_PRICE = /\s+(?:[£€$]\s*|(?:GBP|EUR|USD)\s+)\d[\d,]*\.\d{2}$/i;
-const retailFormats = [
-  ['harrods', /^HRD\d{8}$/], ['selfridges', /^SLF-\d{9}$/],
-  ['harveynichols', /^HN\d{7}$/], ['liberty', /^LIB\d{7}$/],
-  ['fortnum', /^FM-\d{8}$/], ['flannels', /^FL\d{9}$/],
-  ['netaporter', /^\d{4}-\d{6}-\d{4}$/], ['bicester', /^BV\d{8}$/],
-];
 const text = value => String(value ?? '').trim();
 const name = value => text(value).toLowerCase().replace(/\s+/g, ' ');
 const identifier = value => name(value).replace(/[^a-z0-9]/g, '');
@@ -161,6 +157,82 @@ function labelledProductLines(lines) {
   return pairs;
 }
 
+const nonProductLine=/^\s*(?:sub\s*total|total|payment|visa|amex|master\s*card|cash\b|change\b|tender|loyalty|rewards?|member(?:ship)?|order\b|receipt\s*(?:no|number|id)|transaction\s*(?:no|number|id)|reference\b|tel(?:ephone)?\b|phone\b|authorization|auth\s+code|card\b|date\b|time\b|terminal\b|register\b|cashier\b)/i;
+const productCodeLabel=/\b(sku|style(?:\s*(?:\/\s*sku|code|no\.?|number|id))?|(?:(?:item|product|article)\s*(?:id|code|no\.?|number))|upc|ean|gtin|barcode)\b\s*[:#=]?\s*/ig;
+const codeKind=label=>/^(sku|style)/i.test(label)?'sku':'itemId';
+
+function codeObservations(lines, groups) {
+  // Only assign an identifier to a named product when that product has a unique position on the photo.
+  const owners=new Map();
+  for (const {positions,itemHits,match} of groups.values()) {
+    if (positions.length!==1) continue;
+    const anchors=itemHits.length===positions.length ? itemHits.map(hit=>hit.line)
+      : match?.hits.length===positions.length ? match.hits.map(hit=>lines[hit.rows.at(-1)]) : [];
+    anchors.forEach((line,i)=>{
+      const previous=owners.get(line);
+      owners.set(line,previous===undefined?positions[i]:null);
+    });
+  }
+  const byValue=new Map(), byProduct=new Map();
+  for (const [i,line] of lines.entries()) {
+    if (nonProductLine.test(line.text)) continue;
+    const labels=[...line.text.matchAll(productCodeLabel)];
+    let owner=owners.get(line);
+    const detailRow=labels.length || /^\s*[\w/-]*\d[\w/-]*\s+(?:[$£€]|\d+[.,]\d{2}(?:\s|$)|\d+\s*[x×@])/i.test(line.text);
+    if (owner===undefined && detailRow && i>0) {
+      let start=i-1;
+      // Two labelled detail rows can follow one product name (e.g. Style, then UPC).
+      if (labels.length && !owners.has(lines[start]) && start>0 && [...lines[start].text.matchAll(productCodeLabel)].length) start--;
+      const anchor=lines[start];
+      if (line.y-anchor.y-anchor.h<=Math.min(.095,3.2*Math.max(line.h,anchor.h))) owner=owners.get(anchor);
+    }
+    if (owner===undefined && !labels.length) continue;
+    let index=0;
+    for (const word of line.words) {
+      const offset=line.text.indexOf(word.text,index);
+      if (offset<0) continue;
+      index=offset+word.text.length;
+      // Also accept a label and value joined by a colon in the same OCR word.
+      for (const token of word.text.matchAll(/[A-Za-z0-9][A-Za-z0-9_/.–—-]*/g)) {
+        if (word.confidence<PHOTO_CONFIDENCE) continue;
+        const value=token[0].replace(/\.$/,'');
+        const point=offset+token.index;
+        const label=labels.find(l=>l.index+l[0].length===point);
+        if (value.length<2 || (!label && (!/\d/.test(value) || /^(?:\d+[.,]\d{2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})$/.test(value)))) continue;
+        if (!/\d/.test(value) && !(label && /[:#=]/.test(label[0]) && /^[A-Z]+$/.test(value))) continue;
+        const key=name(value), kind=label?codeKind(label[1]):null;
+        const observation={owner,kind,value,text:line.text};
+        const entries=byValue.get(key) || [];
+        entries.push(observation);
+        byValue.set(key,entries);
+        if (kind && Number.isInteger(owner)) {
+          const id=owner+'|'+kind, known=byProduct.get(id) || [];
+          known.push(observation);byProduct.set(id,known);
+        }
+      }
+    }
+  }
+  return {byValue,byProduct};
+}
+
+function verifyProductCode(observations, item, field, index) {
+  const value=name(item[field]);
+  if (!value) return {};
+  const label=field==='sku'?'SKU':'Item ID';
+  const hits=(observations.byValue.get(value)||[]).filter(hit=>!hit.kind || hit.kind===field);
+  const own=hits.find(hit=>hit.owner===index);
+  if (own) return {found:true,evidence:own.text};
+  const labelled=observations.byProduct.get(index+'|'+field) || [];
+  if (labelled.length && labelled.every(hit=>name(hit.value)!==value)) {
+    return {issue:label+' on this product line differs from the extracted '+text(item[field])+'.',evidence:labelled[0].text};
+  }
+  if (hits.length && hits.every(hit=>Number.isInteger(hit.owner))) {
+    return {issue:label+' '+text(item[field])+' is printed with a different item on this receipt.',evidence:hits[0].text};
+  }
+  const unlinked=hits.find(hit=>hit.kind===field);
+  return unlinked ? {unlinked:true,evidence:unlinked.text} : {};
+}
+
 function verifyPhoto(data, ocr, independent, reference) {
   const lines = visualLines(ocr), ids = printedIds(lines).filter(id=>!reference.reviewedValues?.some(v=>name(v)===name(id.id)));
   const labelled = labelledProductLines(lines);
@@ -198,6 +270,7 @@ function verifyPhoto(data, ocr, independent, reference) {
     }
     groups.get(key).positions.push(i);
   }
+  const codes=codeObservations(lines,groups);
   const result = Array(items.length);
   for (const {positions, match, conflict, itemHits} of groups.values()) {
     const enough = match?.hits.length === positions.length;
@@ -213,9 +286,9 @@ function verifyPhoto(data, ocr, independent, reference) {
         else issueList.push('The product line is unclear.');
       }
       const itemHit = itemHits.length === positions.length ? itemHits[index] : null;
-      const sku = name(items[i].sku);
-      const skuLine = !itemHit && sku.length >= 4 && /\d/.test(sku) && lines.find(line =>
-        line.words.some(w=>w.confidence>=PHOTO_CONFIDENCE && name(w.text)===sku));
+      const itemId=verifyProductCode(codes,items[i],'itemId',i);
+      const sku=verifyProductCode(codes,items[i],'sku',i);
+      for (const code of [itemId,sku]) if (code.issue) issueList.push(code.issue);
       let status, reason;
       if (issueList.length) {
         status = 'Needs review'; reason = issueList.join(' ');
@@ -223,29 +296,37 @@ function verifyPhoto(data, ocr, independent, reference) {
         status = independent ? 'Confirmed on photo' : 'Text agrees';
         reason = 'The located order ID and the paired brand and item agree with the receipt reading.';
       } else {
-        status = paired ? 'Brand and item found' : itemHit ? 'Item found' : skuLine ? 'SKU found' : 'Not verified';
-        const evidence = paired ? 'The brand and item appear together.' : itemHit ? 'The item wording appears on the receipt.' : skuLine ? 'The printed SKU agrees. The item wording could not be confirmed.' : 'The item could not be independently identified in the photo text.';
+        status = paired ? 'Brand and item found' : itemHit ? 'Item found' : itemId.found || itemId.unlinked ? 'Item ID found' : sku.found || sku.unlinked ? 'SKU found' : 'Not verified';
+        const evidence = paired ? 'The brand and item appear together.' : itemHit ? 'The item wording appears on the receipt.' : itemId.found || sku.found ? 'The product code agrees with the printed product line.' : itemId.unlinked || sku.unlinked ? 'The labelled product code is present. Its link to this item could not be established.' : 'The item could not be independently identified in the photo text.';
         reason = evidence + (expectsId ? ' The located order ID agrees.' : ' No order ID was established for comparison.');
       }
+      for (const [field,label,code] of [['itemId','Item ID',itemId],['sku','SKU',sku]]) {
+        if (!text(items[i][field]) || code.issue) continue;
+        if (code.found) reason+=' '+label+' agrees on the product line.';
+        else if (code.unlinked) reason+=' A labelled '+label+' was found without a unique product pairing.';
+        else reason+=' '+label+' could not be confirmed on the product line.';
+      }
       result[i] = {
-        status, reason, idEvidence,
-        brandEvidence:conflict?.line.text || hit?.brand || match?.brandEvidence || '', itemEvidence:conflict?.line.text || hit?.item || itemHit?.line.text || skuLine?.text || match?.itemEvidence || '',
+        status, reason, idEvidence, skuEvidence:sku.evidence||'', itemIdEvidence:itemId.evidence||'',
+        brandEvidence:conflict?.line.text || hit?.brand || match?.brandEvidence || '', itemEvidence:conflict?.line.text || hit?.item || itemHit?.line.text || match?.itemEvidence || '',
       };
     }
   }
   return result;
 }
 
-function inspectDate(value, now, flag) {
-  if (!text(value)) return flag('date', 'Purchase date is missing.', 'fix');
-  const parsed = new Date(text(value) + 'T00:00:00Z');
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || !Number.isFinite(+parsed) || parsed.toISOString().slice(0,10) !== value)
-    return flag('date', 'Purchase date is invalid.', 'fix');
-  const today = new Date(now);
-  if (+parsed > +today + 86400000) flag('date','Purchase date is in the future. Check the day and month.', 'fix');
-  const fiveYearsAgo = new Date(today);
-  fiveYearsAgo.setUTCFullYear(today.getUTCFullYear() - 5);
-  if (parsed < fiveYearsAgo) flag('date','Purchase date is more than five years ago.', 'check');
+function inspectDate(value, issue, now, flag) {
+  if (issue) flag('date',issue,value ? 'check' : 'fix');
+  if (!text(value)) {
+    if (!issue) flag('date','Purchase date is missing.','fix');
+    return;
+  }
+  if (!validCalendarDate(value)) return flag('date','Purchase date is invalid.','fix');
+  const today=new Date(now).toISOString().slice(0,10);
+  if (value>today) flag('date','Purchase date is in the future. Check the day and month.','fix');
+  let anniversary=String(Number(today.slice(0,4))-5).padStart(4,'0')+today.slice(4);
+  if (!validCalendarDate(anniversary)) anniversary=anniversary.slice(0,8)+'28';
+  if (value<anniversary) flag('date','Purchase date is more than five years ago.','check');
 }
 
 function includedLineDiscount(item) {
@@ -297,7 +378,7 @@ function ocrChecks(data, ocr, format, add, confirmed) {
   for (const key of ['orderNumber','orderId']) {
     const value = text(data[key]), normalized = identifier(value);
     if (normalized.length < 5) continue;
-    const validFormat = key === 'orderNumber' && format?.test(value);
+    const validFormat = key === 'orderNumber' && format?.source==='demo' && format.test(value);
     if (identifier(content).includes(normalized)) confirmed.push(key);
     else if (foldGlyphs(content).includes(foldGlyphs(value))) {
       if (validFormat) confirmed.push(key);
@@ -326,7 +407,7 @@ function printedOrderNumbers(ocr) {
   return printedNumbers;
 }
 
-export function checkReceipt(data, ocr, previous = null, {independentPhoto = false, today = new Date(), reference = inspectReference(data,ocr)} = {}) {
+export function checkReceipt(data, ocr, previous = null, {independentPhoto = false, today = new Date(), orders = null, demoFormats = false, reference = inspectReference(data,ocr)} = {}) {
   const items = data.items || [], flags = [], confirmedFields = [];
   const repeats = Array(items.length).fill(null);
   const add = (field, message, severity, escalate = severity !== 'info') => {
@@ -336,9 +417,16 @@ export function checkReceipt(data, ocr, previous = null, {independentPhoto = fal
   if (!items.length) add('receipt','No line items were read.', 'fix');
   if (!text(data.merchant)) add('merchant','Retailer is missing.', 'fix');
   if (number(data.total) === null) add('total','Receipt total is missing or unreadable.', 'fix');
-  inspectDate(data.date, today, add);
-  const retailer = identifier(data.merchant);
-  const format = retailFormats.find(([key]) => retailer.includes(key))?.[1];
+  inspectDate(data.date, data.dateIssue, today, add);
+  const format=referenceFormat(data.merchant,'orderNumber',orders,demoFormats);
+  const idFormat=referenceFormat(data.merchant,'orderId',orders,demoFormats);
+  for (const [key,label,rule] of [['orderNumber','Order number',format],['orderId','Order ID',idFormat]]) {
+    const value=text(data[key]);
+    if (!rule || !value) continue;
+    const matches=rule.test(value);
+    const description=rule.source+' format for '+text(data.merchant)+' ('+rule.description+').';
+    add(key,label+(matches?' matches the ':' does not match the ')+description,matches?'info':'check');
+  }
   const printedNumbers = printedOrderNumbers(ocr);
   if(reference.status==='found' && data[reference.kind] && name(data[reference.kind])!==name(reference.value)) {
     add(reference.kind,reference.label+' differs from the value on the photo ('+reference.value+').','check');
@@ -359,8 +447,7 @@ export function checkReceipt(data, ocr, previous = null, {independentPhoto = fal
     return !(format?.test(orderNumber) && !format.test(value) && glyphs(value) === glyphs(orderNumber));
   })) {
     add('orderNumber','The labelled order number on the photo differs from the record.', 'check');
-  } else if (format && !format.test(orderNumber)) add('orderNumber','The order number differs from this retailer’s expected format.', 'check');
-  else if (!format) add('orderNumber','This retailer has no configured order-number format.', 'info');
+  } else if (!format) add('orderNumber','This retailer has no configured order-number format.', 'info');
 
   items.forEach((item,i) => {
     const path = 'items.'+i+'.';

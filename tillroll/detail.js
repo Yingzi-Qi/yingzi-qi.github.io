@@ -1,4 +1,4 @@
-import {orderNeedsReview} from './orders.js?v=4';
+import {orderNeedsReview} from './orders.js?v=6';
 // Receipt data and OCR are untrusted strings. Only write them through DOM text/value APIs.
 function element(tag, content, className) {
   const node = document.createElement(tag);
@@ -22,13 +22,15 @@ const receiptFields = [
   ['payment', 'Payment method'], ['card', 'Card ending'],
 ];
 const itemFields = [
-  ['brand','Brand'], ['item','Item'], ['sku','Style / SKU'], ['colour','Colour'],
+  ['brand','Brand'], ['item','Item'], ['itemId','Item ID / barcode'], ['sku','Style / SKU'], ['colour','Colour'],
   ['size','Size'], ['qty','Quantity','number'], ['unitPrice','Unit price','number'], ['amount','Line amount','number'],
 ];
 const blankItem = () => Object.fromEntries(itemFields.map(([key,,type]) => [key, type === 'number' ? null : '']));
 
 function flagLabel(path) {
   if (path === 'receipt') return 'Receipt';
+  if (path === 'items') return 'Line items';
+  if (path === 'verification') return 'Photo recheck';
   const parts = path.split('.');
   if (parts[0] === 'items') {
     const label = itemFields.find(([key]) => key === parts[2])?.[1] || 'Photo check';
@@ -222,28 +224,36 @@ function showReading(panel, r) {
 
 function showProof(panel, r) {
   const block = section('Photo check');
-  (r.data.items || []).forEach((item,i) => {
+  const items=r.data.items || [];
+  const rows=items.length ? items : r.orders?.length ? [null] : [];
+  rows.forEach((item,i) => {
     const receipt = r.review.photo?.[i], order = r.orders?.[i];
     const line = element('div',undefined,'proof');
-    const label = 'Line '+(i+1)+(item.item ? ' · '+item.item : '');
+    const label = item ? 'Line '+(i+1)+(item.item ? ' · '+item.item : '') : 'Receipt';
     line.append(element('h3',label));
+    if (item?.itemId || item?.sku) {
+      const codes=[item.itemId && 'Item ID '+item.itemId,item.sku && 'Style / SKU '+item.sku];
+      line.append(element('p',codes.filter(Boolean).join(' · '),'hint'));
+    }
     if (receipt) {
       const summary = element('p');
       summary.append(element('span',receipt.status, 'status'+(receipt.status==='Needs review'?' warn':receipt.status==='Not verified'?' muted':'')),document.createTextNode(' '+receipt.reason));
       line.append(summary);
-      const evidence = [...new Set([receipt.idEvidence, receipt.brandEvidence, receipt.itemEvidence].filter(Boolean))];
+      const evidence = [...new Set([receipt.idEvidence, receipt.brandEvidence, receipt.itemEvidence,receipt.itemIdEvidence,receipt.skuEvidence].filter(Boolean))];
       if (evidence.length) line.append(element('blockquote',evidence.join('\n')));
     }
     if (order) {
       const orderDetail = disclosure('Order record · '+order.status,orderNeedsReview(order));
       orderDetail.append(element('p',order.reason,'hint'));
-      const expected = [order.order_brand,order.order_item,order.order_sku,String(order.order_qty ?? '').trim() ? 'Qty '+order.order_qty : ''].filter(Boolean);
+      const expected=[order.order_brand,order.order_item,order.order_item_id && 'Item ID '+order.order_item_id,order.order_sku && 'Style / SKU '+order.order_sku,
+        order.order_qty && 'Qty '+order.order_qty,order.order_amount && 'Line amount '+order.order_amount,
+        order.order_total && 'Purchase total '+order.order_total,order.order_currency].filter(Boolean);
       if (expected.length) orderDetail.append(element('blockquote',expected.join(' · ')));
       line.append(orderDetail);
     }
     block.append(line);
   });
-  if (r.data.items?.length) panel.append(block);
+  if (rows.length) panel.append(block);
 }
 
 function showFlags(panel, r, act, callbacks) {

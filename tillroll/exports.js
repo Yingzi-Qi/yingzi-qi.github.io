@@ -1,5 +1,6 @@
-import {orderNeedsReview} from './orders.js?v=5';
-import {reviewForLine} from './checks.js?v=5';
+import {orderNeedsReview} from './orders.js?v=6';
+import {reviewForLine} from './checks.js?v=6';
+import {validateOrderPatterns} from './retail-rules.js?v=6';
 import * as zipPackage from './export-vendor/jszip.min.js';
 
 const JSZip = zipPackage.default ?? globalThis.JSZip;
@@ -12,7 +13,7 @@ const WORKBOOK_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheet
 const receiptColumns = [
   ['Source','merchant',22], ['Date','date',13], ['Time','time',9],
   ['Order Number','orderNumber',22], ['Order ID','orderId',23],
-  ['Brand','brand',20,'line'], ['Item','item',33,'line'], ['Style / SKU','sku',20,'line'],
+  ['Brand','brand',20,'line'], ['Item','item',33,'line'], ['Item ID','itemId',24,'line'], ['Style / SKU','sku',20,'line'],
   ['Colour','colour',16,'line'], ['Size','size',12,'line'], ['Qty','qty',8,'line','number'],
   ['Unit Price','unitPrice',14,'line','money'], ['Amount','amount',14,'line','money'],
   ['Currency','currency',12], ['Receipt Total','total',16,'receipt','money'],
@@ -20,16 +21,18 @@ const receiptColumns = [
   ['Needs Checking','message',48,'review'], ['File','filename',28,'meta'],
   ['Photo check','status',22,'photo'], ['Photo check reason','reason',52,'photo'],
   ['Order ID on photo','idEvidence',30,'photo'], ['Brand on photo','brandEvidence',29,'photo'],
-  ['Item on photo','itemEvidence',38,'photo'],
+  ['Item on photo','itemEvidence',38,'photo'], ['Item ID on photo','itemIdEvidence',30,'photo'], ['Style / SKU on photo','skuEvidence',30,'photo'],
   ['Receipt reference','receiptReference',24], ['Located reference','value',24,'reference'],
   ['Reference type','label',22,'reference'], ['Reference evidence','evidence',46,'reference'],
   ['Reference finding','reason',52,'reference'], ['Suggested reference','suggested',24,'proposal'],
   ['Other possible references','alternatives',32,'proposal']
 ];
 const orderColumns = [
-  ['Order check','status',24,'order'], ['Order check detail','reason',52,'order'],
+  ['Order check','status',24,'order'], ['Order check detail','reason',52,'order'], ['Possible order reference','order_candidate',24,'order'],
   ['Order record brand','order_brand',24,'order'], ['Order record item','order_item',32,'order'],
-  ['Order record SKU','order_sku',22,'order'], ['Order record qty','order_qty',16,'order','number']
+  ['Order record item ID','order_item_id',24,'order'], ['Order record SKU','order_sku',22,'order'], ['Order record qty','order_qty',16,'order','number'],
+  ['Order record line amount','order_amount',24,'order','money'], ['Order record purchase total','order_total',26,'order','money'],
+  ['Order record currency','order_currency',22,'order']
 ];
 const esc = value => String(value ?? '').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]/g,'')
   .replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
@@ -124,21 +127,29 @@ export function exportCSV(receipts) { download(buildCsvBlob(receipts),'csv'); }
 export async function exportExcel(receipts) { download(await buildXlsxBlob(receipts),'xlsx'); }
 
 const aliases = {
-  retailer:['retailer','source','merchant','store'], order_id:['orderid','orderidentifier'],
+  retailer:['retailer','source','merchant','store','mall','issuer'], order_id:['orderid','orderidentifier'],
   order_number:['ordernumber','orderno','order#'], brand:['brand','brandname'],
   item:['item','itemname','itemdescription','product','productname','description'],
-  sku:['sku','stylesku','style','productcode'], qty:['qty','quantity']
+  item_id:['itemid','productid','barcode','upc','upca','ean','ean8','ean13','gtin','gtin8','gtin12','gtin13','gtin14'],
+  sku:['sku','stylesku','style','productcode','itemcode'], qty:['qty','quantity'],
+  amount:['amount','lineamount','linetotal','itemamount','extendedamount'],
+  total:['purchasetotal','purchaseamount','receipttotal','ordertotal','totalpaid','amountpaid'],
+  currency:['currency','currencycode'], order_id_pattern:['orderidpattern','orderidformat'],
+  order_number_pattern:['ordernumberpattern','ordernumberformat']
 };
 const keys = new Map(Object.entries(aliases).flatMap(([key,names])=>names.map(name=>[name,key])));
 function orderSchema(headers) {
   const schema=new Map(), duplicates=[];
-  headers.forEach((text,i)=>{
-    const key=keys.get(String(text??'').toLowerCase().replace(/[^a-z0-9#]/g,''));
+  const fields=headers.map(value=>String(value??'').toLowerCase().replace(/[^a-z0-9#]/g,''));
+  const hasRetailer=fields.some(header=>['retailer','source','merchant','store'].includes(header));
+  fields.forEach((header,i)=>{
+    if (hasRetailer && ['mall','issuer'].includes(header)) return;
+    const key=keys.get(header);
     if (!key) return;
     if (schema.has(key)) duplicates.push(key);
     schema.set(key,i);
   });
-  if (!(schema.has('order_id')||schema.has('order_number')) || !(schema.has('item')||schema.has('sku'))) return null;
+  if (!(schema.has('order_id')||schema.has('order_number')) || !(schema.has('item')||schema.has('sku')||schema.has('item_id'))) return null;
   if (duplicates.length) throw new Error('Multiple order-list columns refer to '+duplicates.join(', ')+'.');
   return schema;
 }
@@ -208,7 +219,7 @@ function cellValue(cell,strings,formats,isId) {
   if (type==='inlineStr') return zipText(child(cell,'is'));
   if (type==='s') return strings[Number(raw)]??'';
   if (type==='n' && isId && raw!=='') {
-    if (!/^\d{1,15}$/.test(raw)) throw new Error('Store order IDs and SKUs as text in cell '+cell.getAttribute('r')+'.');
+    if (!/^\d{1,15}$/.test(raw)) throw new Error('Store identifiers as text in cell '+cell.getAttribute('r')+'.');
     const format = formats[Number(cell.getAttribute('s')||0)]??'General';
     if (/^0+$/.test(format)) return raw.padStart(format.length,'0');
     if (!['General','@'].includes(format)) throw new Error('Store the displayed identifier as text in cell '+cell.getAttribute('r')+'.');
@@ -249,7 +260,7 @@ async function readOrderXlsx(file) {
         const index=columnIndex(cell)??cells.length;
         if (index>16383) throw new Error('Invalid Excel column in the order list.');
         if (schema && ![...schema.values()].includes(index)) continue;
-        const isId=schema && ['order_id','order_number','sku'].some(k=>schema.get(k)===index);
+        const isId=schema && ['order_id','order_number','sku','item_id'].some(k=>schema.get(k)===index);
         cells[index]=cellValue(cell,strings,formats,isId);
       }
       return cells;
@@ -267,7 +278,8 @@ export async function readOrderFile(file) {
     records=schema ? orderRows(rows,schema) : null;
   } else if (/\.xlsx$/i.test(file.name)) records=await readOrderXlsx(file);
   else throw new Error('Choose an Excel (.xlsx) or CSV order list.');
-  if (records===null) throw new Error('Order list needs Order ID or Order Number and Item or SKU headers. Include Retailer and Brand for verification.');
+  if (records===null) throw new Error('Order list needs Order ID or Order Number and an Item, Item ID or SKU header. Include Retailer and Brand for verification.');
   if (!records.length) throw new Error('The order list contains no item rows.');
+  validateOrderPatterns(records);
   return records;
 }

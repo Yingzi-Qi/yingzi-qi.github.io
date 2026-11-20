@@ -1,34 +1,34 @@
-Retailer,Order ID,Order Number,Brand,Item,SKU,Qty
-Harrods,00052001,HRD00002601,Aster Studio,Linen tote,AS-028,1
-Harrods,00052001,HRD00002601,Field Fold,Pocket notebook,FF-008,1
-Selfridges,00052002,SLF-000002602,Field Fold,Pocket notebook,FF-008,1
-Selfridges,00052002,SLF-000002602,Morrow,Card holder,MR-202,1
-Liberty London,00052003,LIB0002603,North Loom,Wool scarf,NL-103,1
-Liberty London,00052003,LIB0002603,Morrow,Card holder,MR-202,2
-Harvey Nichols,00052004,HN0002604,Vale Works,Tea mug,VW-047,2
-Harvey Nichols,00052004,HN0002604,Sable Row,Cotton tee,SR-019,1
-Flannels,00052005,FL000002605,Morrow,Card holder,MR-202,1
-NET-A-PORTER,00052006,2606-093222-4421,Vale Works,Tea mug,VW-047,1
-NET-A-PORTER,00052006,2606-093222-4421,Vale Works,Tea mug,VW-047,1
-Fortnum & Mason,00052007,FM-00002607,Sable Row,Cotton tee,SR-019,1
-Fortnum & Mason,00052007,FM-00002607,Ochre Press,Sketch pad,OP-044,2
-Bicester Village,00052008,BV00002608,Alder Goods,Canvas pouch,AG-030,2
-Harrods,00052009,HRD00002609,Hearth,Cedar candle,HE-040,1
-Selfridges,00052010,SLF-000002610,Ochre Press,Sketch pad,OP-044,1
-Selfridges,00052010,SLF-000002610,North Loom,Wool scarf,NL-103,1
-Liberty London,00052011,LIB0002611,Aster Studio,Linen tote,AS-028,1
-Flannels,00052013,FL000002613,North Loom,Wool scarf,NL-103,1
-Flannels,00052013,FL000002613,North Loom,Stone vase,JC-600,1
-NET-A-PORTER,00052014,2614-093222-4421,Vale Works,OP-044,VW-047,1
-Fortnum & Mason,00052015,FM-00002615,Morrow,Card holder,MR-202,1
-Bicester Village,00052016,BV00002616,June Clay,Stone vase,JC-600,2
-Bicester Village,00052016,BV00002616,Hearth,Cedar candle,HE-040,1
-Harrods,00052017,HRD00002617,Sable Row,Cotton tee,SR-019,1
-Selfridges,00052018,SLF-000002618,Alder Goods,Canvas pouch,AG-030,1
-Liberty London,00052019,LIB0002619,Hearth,Cedar candle,HE-040,1
-Liberty London,00052019,LIB0002619,Field Fold,Pocket notebook,FF-008,2
-Harvey Nichols,00052020,HN0002620,Ochre Press,Sketch pad,OP-044,2
-Flannels,00052021,FL000002621,Aster Studio,Linen tote,AS-028,1
-NET-A-PORTER,00052022,2622-093222-4421,Field Fold,Pocket notebook,FF-008,1
-NET-A-PORTER,00052022,2622-093222-4421,Morrow,Card holder,MR-202,1
-Fortnum & Mason,00052023,FM-00002623,North Loom,Wool scarf,NL-103,1
+Retailer,Order ID,Order Number,Brand,Item,SKU,Qty,Line amount,Purchase total,Currency,Order ID pattern
+Harrods,00052001,HRD00002601,Aster Studio,Linen tote,AS-028,1,34.00,41.00,GBP,########
+Harrods,00052001,HRD00002601,Field Fold,Pocket notebook,FF-008,1,7.00,41.00,GBP,########
+Selfridges,00052002,SLF-000002602,Field Fold,Pocket notebook,FF-008,1,7.00,46.00,GBP,########
+Selfridges,00052002,SLF-000002602,Morrow,Card holder,MR-202,1,39.00,46.00,GBP,########
+Liberty London,00052003,LIB0002603,North Loom,Wool scarf,NL-103,1,48.00,126.00,GBP,########
+Liberty London,00052003,LIB0002603,Morrow,Card holder,MR-202,2,78.00,126.00,GBP,########
+Harvey Nichols,00052004,HN0002604,Vale Works,Tea mug,VW-047,2,32.00,60.00,GBP,########
+Harvey Nichols,00052004,HN0002604,Sable Row,Cotton tee,SR-019,1,28.00,60.00,GBP,########
+Flannels,00052005,FL000002605,Morrow,Card holder,MR-202,1,39.00,35.00,GBP,########
+NET-A-PORTER,00052006,2606-093222-4421,Vale Works,Tea mug,VW-047,1,16.00,32.00,GBP,########
+NET-A-PORTER,00052006,2606-093222-4421,Vale Works,Tea mug,VW-047,1,16.00,32.00,GBP,########
+Fortnum & Mason,00052007,FM-00002607,Sable Row,Cotton tee,SR-019,1,28.00,52.00,GBP,########
+Fortnum & Mason,00052007,FM-00002607,Ochre Press,Sketch pad,OP-044,2,24.00,52.00,GBP,########
+Bicester Village,00052008,BV00002608,Alder Goods,Canvas pouch,AG-030,2,42.00,42.00,GBP,########
+Harrods,00052009,HRD00002609,Hearth,Cedar candle,HE-040,1,18.00,18.00,GBP,########
+Selfridges,00052010,SLF-000002610,Ochre Press,Sketch pad,OP-044,1,12.00,72.00,GBP,########
+Selfridges,00052010,SLF-000002610,North Loom,Wool scarf,NL-103,1,48.00,72.00,GBP,########
+Liberty London,00052011,LIB0002611,Aster Studio,Linen tote,AS-028,1,34.00,34.00,GBP,########
+Flannels,00052013,FL000002613,North Loom,Wool scarf,NL-103,1,48.00,72.00,GBP,########
+Flannels,00052013,FL000002613,North Loom,Stone vase,JC-600,1,24.00,72.00,GBP,########
+NET-A-PORTER,00052014,2614-093222-4421,Vale Works,OP-044,VW-047,1,16.00,16.00,GBP,########
+Fortnum & Mason,00052015,FM-00002615,Morrow,Card holder,MR-202,1,39.00,39.00,GBP,########
+Bicester Village,00052016,BV00002616,June Clay,Stone vase,JC-600,2,48.00,66.00,GBP,########
+Bicester Village,00052016,BV00002616,Hearth,Cedar candle,HE-040,1,18.00,66.00,GBP,########
+Harrods,00052017,HRD00002617,Sable Row,Cotton tee,SR-019,1,28.00,28.00,GBP,########
+Selfridges,00052018,SLF-000002618,Alder Goods,Canvas pouch,AG-030,1,21.00,21.00,GBP,########
+Liberty London,00052019,LIB0002619,Hearth,Cedar candle,HE-040,1,18.00,32.00,GBP,########
+Liberty London,00052019,LIB0002619,Field Fold,Pocket notebook,FF-008,2,14.00,32.00,GBP,########
+Harvey Nichols,00052020,HN0002620,Ochre Press,Sketch pad,OP-044,2,24.00,24.00,GBP,########
+Flannels,00052021,FL000002621,Aster Studio,Linen tote,AS-028,1,34.00,34.00,GBP,########
+NET-A-PORTER,00052022,2622-093222-4421,Field Fold,Pocket notebook,FF-008,1,7.00,46.00,GBP,########
+NET-A-PORTER,00052022,2622-093222-4421,Morrow,Card holder,MR-202,1,39.00,46.00,GBP,########
+Fortnum & Mason,00052023,FM-00002623,North Loom,Wool scarf,NL-103,1,48.00,48.00,GBP,########

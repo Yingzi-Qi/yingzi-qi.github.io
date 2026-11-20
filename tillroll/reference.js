@@ -152,7 +152,7 @@ function independentRefs(data,orders) {
 
 function additionalCandidates(data,lines,labelled,orders) {
   const entries=independentRefs(data,orders), out=[];
-  const sku=new Set((data?.items||[]).map(i=>fold(i.sku)).filter(Boolean));
+  const productCodes=new Set((data?.items||[]).flatMap(i=>[fold(i.sku),fold(i.itemId)]).filter(Boolean));
   const shop=retailer(data?.merchant);
   const dateLines=[], headerLines=[];
   lines.forEach((line,i)=>{
@@ -166,7 +166,7 @@ function additionalCandidates(data,lines,labelled,orders) {
   const headerLimit=firstProduct<0 ? Math.min(12,Math.max(5,Math.ceil(lines.length*.55))) : firstProduct;
   const lastTotal=lines.findLastIndex(l=>totalLine.test(l.text));
   const matches=c=>{
-    if (sku.has(fold(c.value))) return;
+    if (productCodes.has(fold(c.value))) return;
     for (const [kind,records] of entries.get(fold(c.value)) || []) {
       // A labelled order number and a labelled order ID have distinct meanings.
       if (c.basis==='label' && c.kind!=='receiptReference' && c.kind!==kind) continue;
@@ -210,13 +210,13 @@ function additionalCandidates(data,lines,labelled,orders) {
     }
     if (!referenceRow || !tokens.length) continue;
     for (const {value,start} of tokens) {
-      if (sku.has(fold(value)) || stockOrAccount.test(value) || barcodeOrCard(value)) continue;
+      if (productCodes.has(fold(value)) || stockOrAccount.test(value) || barcodeOrCard(value)) continue;
       if (shop.includes('ekosport') && /^mag[0-9oil]{5,}$/i.test(value)) continue;
       // A bare phone number in the address block has no order semantics.
       if (/^\d{10,11}$/.test(value) && address.test(previous)) continue;
       const besideReference=tokens.length>1 || [previous,next].some(text=>{
         const other=clean(text).match(standaloneToken)?.[1];
-        return other && identifier(other) && plausibleBare(other) && !barcodeOrCard(other) && !stockOrAccount.test(other) && !sku.has(fold(other));
+        return other && identifier(other) && plausibleBare(other) && !barcodeOrCard(other) && !stockOrAccount.test(other) && !productCodes.has(fold(other));
       });
       const prefixed=orderPrefix.test(value);
       const c={kind:prefixed?'orderNumber':'receiptReference',label:prefixed?'Order number':'Possible receipt reference',
