@@ -254,7 +254,9 @@ function itemRow(r,item,i,shared=''){
   return `<tr>${shared}<td>${cell(r,field+'brand',item.brand,'Edit brand')}</td><td class="item-id">${productCodeCell(r,item,field)}</td><td>${cell(r,field+'item',item.item,'Edit item')}${status}</td><td class="money">${cell(r,field+'amount',price,'Line amount including quantity')}</td></tr>`;
 }
 function rowHTML(r){
-  const open=`<button class="receipt-no" data-id="${r.id}" aria-label="Open receipt ${r.id}">#${r.id}</button>`;
+  const preview=r.url ? `<img src="${escape(r.url)}" alt="" width="48" height="60" loading="lazy" decoding="async">` : '';
+  const label=`Open receipt ${r.id}`;
+  const open=`<button class="receipt-no" data-id="${r.id}" aria-label="${label}" title="${label}${preview?' with its original photo':''}">${preview}<span>#${r.id}</span></button>`;
   if(r.state!=='done'){
     const status=r.exactOf?`Same file as #${r.exactOf}`:r.state==='error'?'Could not read photo':r.state==='second'?'Second reading…':r.state==='checking'?'Checking photo…':r.state==='queued'?'Waiting…':'Reading…';
     return `<tbody><tr><th scope="rowgroup">${open}</th><td colspan="7">${badge(status,r.state==='error'?'bad':'muted')} ${escape(r.filename)}</td></tr></tbody>`;
@@ -415,32 +417,42 @@ $('#import-photos-input').onchange=async e=>{
   for (const file of files) counts.set(key(file.name),(counts.get(key(file.name)) || 0)+1);
   verifyingPhotos=true;
   render();
-  let completed=0, unmatched=0, failed=0, recovered=0, review=0;
+  let attached=0, unmatched=0, failed=0, recovered=0, review=0, invalid=0;
   try {
     for (const file of files) {
       const targets=batch.filter(r=>r.origin==='achung' && key(r.filename)===key(file.name));
       if (targets.length!==1 || counts.get(key(file.name))!==1) { unmatched++; continue; }
       const r=targets[0];
+      const url=URL.createObjectURL(file);
+      const image=new Image();
+      image.src=url;
+      try { await image.decode(); }
+      catch { URL.revokeObjectURL(url); invalid++; continue; }
+      if (!batch.includes(r)) { URL.revokeObjectURL(url); continue; }
+      const previous=r.url;
+      r.url=url;
+      r.itemIdReadings=[];
+      evaluate(r);
+      render();
+      if (previous) URL.revokeObjectURL(previous);
+      attached++;
       const passes=await Promise.allSettled([readPhoto(file),secondReadPhoto(file)]);
-      const readings=passes.filter(p=>p.status==='fulfilled' && p.value.text).map(p=>p.value);
-      if (!readings.length) { failed++; continue; }
       if (!batch.includes(r)) continue;
-      r.itemIdReadings=readings;
-      if (r.url) URL.revokeObjectURL(r.url);
-      r.url=URL.createObjectURL(file);
+      r.itemIdReadings=passes.filter(p=>p.status==='fulfilled' && p.value.text?.trim()).map(p=>p.value);
+      if (!r.itemIdReadings.length) { failed++; continue; }
       const missingBefore=r.data.items.filter(item=>!item.itemId).length;
       evaluate(r,true);
       recovered+=missingBefore-r.data.items.filter(item=>!item.itemId).length;
       review+=r.review.photo.filter(line=>line.status==='Needs review').length;
-      completed++;
     }
   } catch (err) { note('Could not check the original photos. '+err.message); return; }
   finally { verifyingPhotos=false; duplicates(); render(); }
-  const summary=[completed+' original photo'+(completed===1?'':'s')+' checked.'];
-  if (completed) summary.push(recovered+' item ID'+(recovered===1?'':'s')+' added.');
+  const summary=[attached+' original photo'+(attached===1?'':'s')+' attached.'];
+  if (recovered) summary.push(recovered+' item ID'+(recovered===1?'':'s')+' added.');
   if (review) summary.push(review+' item ID'+(review===1?' needs':'s need')+' review.');
   if (unmatched) summary.push(unmatched+' could not be linked. Use one original photo with the workbook filename for each receipt.');
-  if (failed) summary.push(failed+' could not be read. Try a clearer photo.');
+  if (failed) summary.push('No readable text in '+failed+' attached photo'+(failed===1?'':'s')+'.');
+  if (invalid) summary.push(invalid+' image'+(invalid===1?' could':'s could')+' not be opened. Try a JPEG or PNG.');
   note(summary.join(' '));
 };
 const achungDialog=$('#achung-dialog');

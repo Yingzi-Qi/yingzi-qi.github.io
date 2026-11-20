@@ -39,6 +39,9 @@ button.review-reason{min-height:28px;border-color:transparent;font-weight:500}bu
 .receipt-lines tbody td,.receipt-lines tbody th{vertical-align:top}
 .receipt-lines tbody+tbody tr:first-child>*{border-top:1px solid #b8c8bc}
 .receipt-lines .receipt-controls{display:flex;align-items:flex-start;flex-direction:column;gap:.35rem}
+.receipt-lines .receipt-no:has(img){padding:3px 7px 3px 3px;gap:.4rem}
+.receipt-no img{display:block;width:3rem;height:3.75rem;object-fit:contain;background:#eff2ed;border-radius:4px}
+.photo-frame::after{content:'Open full size';position:absolute;right:.35rem;bottom:.35rem;padding:.2rem .45rem;border-radius:4px;background:#fff;color:var(--green);box-shadow:0 1px 4px #0003;font-size:.8rem;pointer-events:none}
 .receipt-lines .purchase-date button{display:block;text-align:left}
 .receipt-lines .purchase-time{color:var(--muted);font-variant-numeric:tabular-nums}
 .receipt-lines .item-id,.receipt-lines .order-number{font-variant-numeric:tabular-nums}
