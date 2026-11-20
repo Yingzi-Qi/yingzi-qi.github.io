@@ -10,29 +10,32 @@ const PACKAGE = 'http://schemas.openxmlformats.org/package/2006/relationships';
 const XML = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
 const WORKBOOK_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
+const excelColumnWidth = 28;
+const excelRowHeight = 32;
+
 const receiptColumns = [
-  ['Source','merchant',22], ['Date','date',13], ['Time','time',9],
-  ['Order Number','orderNumber',22], ['Order ID','orderId',23],
-  ['Brand','brand',20,'line'], ['Item ID','itemId',24,'line'], ['Item','item',33,'line'], ['Style / SKU','sku',20,'line'],
-  ['Colour','colour',16,'line'], ['Size','size',12,'line'], ['Qty','qty',8,'line','number'],
-  ['Unit Price','unitPrice',14,'line','money'], ['Amount','amount',14,'line','money'],
-  ['Currency','currency',12], ['Receipt Total','total',16,'receipt','money'],
-  ['Payment Type','payment',18], ['Card','card',9],
-  ['Needs Checking','message',48,'review'], ['File','filename',28,'meta'],
-  ['Photo check','status',22,'photo'], ['Photo check reason','reason',52,'photo'],
-  ['Order ID on photo','idEvidence',30,'photo'], ['Brand on photo','brandEvidence',29,'photo'],
-  ['Item on photo','itemEvidence',38,'photo'], ['Item ID on photo','itemIdEvidence',30,'photo'], ['Style / SKU on photo','skuEvidence',30,'photo'],
-  ['Receipt reference','receiptReference',24], ['Located reference','value',24,'reference'],
-  ['Reference type','label',22,'reference'], ['Reference evidence','evidence',46,'reference'],
-  ['Reference finding','reason',52,'reference'], ['Suggested reference','suggested',24,'proposal'],
-  ['Other possible references','alternatives',32,'proposal']
+  ['Source','merchant'], ['Date','date'], ['Time','time'],
+  ['Order Number','orderNumber'], ['Order ID','orderId'],
+  ['Brand','brand','line'], ['Item ID','itemId','line'], ['Item','item','line'], ['Style / SKU','sku','line'],
+  ['Colour','colour','line'], ['Size','size','line'], ['Qty','qty','line','number'],
+  ['Unit Price','unitPrice','line','money'], ['Amount','amount','line','money'],
+  ['Currency','currency'], ['Receipt Total','total','receipt','money'],
+  ['Payment Type','payment'], ['Card','card'],
+  ['Needs Checking','message','review'], ['File','filename','meta'],
+  ['Photo check','status','photo'], ['Photo check reason','reason','photo'],
+  ['Order ID on photo','idEvidence','photo'], ['Brand on photo','brandEvidence','photo'],
+  ['Item on photo','itemEvidence','photo'], ['Item ID on photo','itemIdEvidence','photo'], ['Style / SKU on photo','skuEvidence','photo'],
+  ['Receipt reference','receiptReference'], ['Located reference','value','reference'],
+  ['Reference type','label','reference'], ['Reference evidence','evidence','reference'],
+  ['Reference finding','reason','reference'], ['Suggested reference','suggested','proposal'],
+  ['Other possible references','alternatives','proposal']
 ];
 const orderColumns = [
-  ['Order check','status',24,'order'], ['Order check detail','reason',52,'order'], ['Possible order reference','order_candidate',24,'order'],
-  ['Order record brand','order_brand',24,'order'], ['Order record item','order_item',32,'order'],
-  ['Order record item ID','order_item_id',24,'order'], ['Order record SKU','order_sku',22,'order'], ['Order record qty','order_qty',16,'order','number'],
-  ['Order record line amount','order_amount',24,'order','money'], ['Order record purchase total','order_total',26,'order','money'],
-  ['Order record currency','order_currency',22,'order']
+  ['Order check','status','order'], ['Order check detail','reason','order'], ['Possible order reference','order_candidate','order'],
+  ['Order record brand','order_brand','order'], ['Order record item','order_item','order'],
+  ['Order record item ID','order_item_id','order'], ['Order record SKU','order_sku','order'], ['Order record qty','order_qty','order','number'],
+  ['Order record line amount','order_amount','order','money'], ['Order record purchase total','order_total','order','money'],
+  ['Order record currency','order_currency','order']
 ];
 const esc = value => String(value ?? '').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]/g,'')
   .replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
@@ -63,7 +66,7 @@ function exportData(receipts) {
         proposal:{suggested,alternatives},
         review:{message:note}
       };
-      rows.push(columns.map(([,key,,source='receipt',type]) => {
+      rows.push(columns.map(([,key,source='receipt',type]) => {
         let value = sources[source]?.[key] ?? '';
         const numeric = type && value !== '' && Number.isFinite(Number(value));
         value = numeric ? Number(value) : String(value);
@@ -109,17 +112,24 @@ const styles = XML + `<styleSheet xmlns="${MAIN}">
   <fills count="6"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>${['FF1E4946','FFFFEDC0','FFFDE68A','FFFECDD3'].map(rgb=>'<fill><patternFill patternType="solid"><fgColor rgb="'+rgb+'"/><bgColor indexed="64"/></patternFill></fill>').join('')}</fills>
   <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
   <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-  <cellXfs count="10"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment wrapText="1" vertical="center"/></xf><xf numFmtId="4" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>${[3,4,5].map(fill=>'<xf numFmtId="0" fontId="0" fillId="'+fill+'" borderId="0" xfId="0" applyFill="1" applyAlignment="1"><alignment wrapText="1" vertical="center"/></xf><xf numFmtId="4" fontId="0" fillId="'+fill+'" borderId="0" xfId="0" applyNumberFormat="1" applyFill="1"/>').join('')}</cellXfs>
+  <cellXfs count="10">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf>
+    <xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment wrapText="1" vertical="center"/></xf>
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf>
+    <xf numFmtId="4" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyAlignment="1"><alignment vertical="top"/></xf>
+    ${[3,4,5].map(fill=>'<xf numFmtId="0" fontId="0" fillId="'+fill+'" borderId="0" xfId="0" applyFill="1" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf><xf numFmtId="4" fontId="0" fillId="'+fill+'" borderId="0" xfId="0" applyNumberFormat="1" applyFill="1" applyAlignment="1"><alignment vertical="top"/></xf>').join('')}
+  </cellXfs>
   <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`;
 export async function buildXlsxBlob(receipts) {
   const {columns,rows} = exportData(receipts);
   const range = 'A1:'+colName(columns.length)+(rows.length+1);
-  const header = columns.map((c,i)=>cellXml(1,i+1,{value:c[0],style:1})).join('');
-  const contents = rows.map((row,i)=>{
-    const wraps = Math.max(1,...row.map((c,j)=>[2,4,6,8].includes(c.style) ? Math.ceil(String(c.value).length/(columns[j][2]*.85)) : 1));
-    return '<row r="'+(i+2)+'" ht="'+Math.min(180,Math.max(19,wraps*16))+'" customHeight="1">'+row.map((c,j)=>cellXml(i+2,j+1,c)).join('')+'</row>';
-  }).join('');
-  const worksheet = XML + `<worksheet xmlns="${MAIN}"><dimension ref="${range}"/><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" state="frozen" topLeftCell="A2" activePane="bottomLeft"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="17"/><cols>${columns.map((c,i)=>'<col min="'+(i+1)+'" max="'+(i+1)+'" width="'+c[2]+'" customWidth="1"/>').join('')}</cols><sheetData><row r="1" ht="24" customHeight="1">${header}</row>${contents}</sheetData><autoFilter ref="${range}"/></worksheet>`;
+  const rowXml = (number, cells) =>
+    `<row r="${number}" ht="${excelRowHeight}" customHeight="1">${cells.map((cell,i)=>cellXml(number,i+1,cell)).join('')}</row>`;
+  const header = rowXml(1, columns.map(([title])=>({value:title,style:1})));
+  const contents = rows.map((row,i)=>rowXml(i+2,row)).join('');
+  const widths = columns.map((_,i)=>
+    `<col min="${i+1}" max="${i+1}" width="${excelColumnWidth}" customWidth="1"/>`).join('');
+  const worksheet = XML + `<worksheet xmlns="${MAIN}"><dimension ref="${range}"/><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" state="frozen" topLeftCell="A2" activePane="bottomLeft"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="${excelRowHeight}" defaultColWidth="${excelColumnWidth}"/><cols>${widths}</cols><sheetData>${header}${contents}</sheetData><autoFilter ref="${range}"/></worksheet>`;
   const zip = new JSZip();
   zip.file('[Content_Types].xml',XML+`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`);
   zip.file('_rels/.rels',XML+`<Relationships xmlns="${PACKAGE}"><Relationship Id="rId1" Type="${REL}/officeDocument" Target="xl/workbook.xml"/></Relationships>`);
@@ -319,7 +329,7 @@ const nativeReferences=new Set(['orderNumber','orderId','sku','card']);
 function nativeValue(cell,column,book) {
   const key=column[1], value=cellValue(cell,book.strings,book.formats,nativeReferences.has(key));
   if (value==='') return null;
-  if (column[4]) {
+  if (column[3]) {
     const n=Number(value);
     if (!Number.isFinite(n)) throw new Error('Invalid number in receipt cell '+cell.getAttribute('r')+'.');
     return n;
@@ -413,7 +423,7 @@ export async function readAchungWorkbook(file) {
     if (!filename) throw new Error('Missing receipt filename in workbook row '+row.getAttribute('r')+'.');
     const data={}, item={}, marks=[];
     for (const column of achungColumns) {
-      const [,key,,scope='receipt']=column;
+      const [,key,scope='receipt']=column;
       if (scope==='receipt') data[key]=values[key]??null;
       if (scope==='line') item[key]=values[key]??null;
     }
@@ -422,7 +432,7 @@ export async function readAchungWorkbook(file) {
     if (!groups.has(signature)) groups.set(signature,{filename,data:{...data,items:[]},rows:[]});
     const group=groups.get(signature), index=group.rows.length;
     group.data.items.push(item);
-    for (const [title,key,,scope='receipt'] of achungColumns) {
+    for (const [title,key,scope='receipt'] of achungColumns) {
       const cell=cells.get(key), severity=cell && book.reviewStyles[Number(cell.getAttribute('s')??0)];
       if (severity && (scope==='receipt' || scope==='line'))
         marks.push({title,key,field:scope==='line'?'items.'+index+'.'+key:key,value:values[key],severity});

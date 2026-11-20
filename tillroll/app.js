@@ -2,7 +2,7 @@ import {oldestPurchaseFirst,purchaseDateText} from './receipt-date-display.js?v=
 import {inspectReference,combineReferenceReadings} from './reference.js?v=6';
 import {readPhoto,secondReadPhoto,extractLocal,extractAI,reconcileReadings,photoFieldConflicts} from './extract.js?v=9';
 import {checkReceipt,samePurchase,reviewForLine} from './checks.js?v=6';
-import {exportExcel,exportCSV,readOrderFile,readAchungWorkbook} from './exports.js?v=9';
+import {exportExcel,exportCSV,readOrderFile,readAchungWorkbook} from './exports.js?v=uniform1';
 import {loadSamples} from './samples.js?v=6';
 import {compareOrder,orderNeedsReview} from './orders.js?v=6';
 const $ = s=>document.querySelector(s);
