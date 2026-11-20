@@ -1,4 +1,4 @@
-import {inspectReference} from './reference.js?v=4';
+import {inspectReference} from './reference.js?v=5';
 // OCR assets resolve on this site. Receipt images remain in the tab unless the
 // caller explicitly starts the optional Gemini reader using a supplied API key.
 const asset = name => new URL(`./ocr/${name}`, import.meta.url).href;

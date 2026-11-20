@@ -15,3 +15,16 @@ button.review-reason{min-height:28px;border-color:transparent;font-weight:500}bu
 @media(max-width:800px){.photo-frame{--photo-height:255px}}
 
 td button.reference-cell{height:auto;text-align:left}button.reference-cell small{display:block;color:var(--muted);font-size:.74rem}
+
+.receipt-dialog .reference-choices{margin:5px 0 0;min-width:0}
+.reference-choices .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap;margin:-1px;padding:0}
+.reference-choice{display:flex;align-items:flex-start;gap:10px;padding:8px 2px;cursor:pointer;overflow-wrap:anywhere}
+.reference-choice input{flex:none;margin:5px 0 0;accent-color:var(--green)}
+.reference-choice-text{display:grid;gap:2px;min-width:0}
+.reference-choice .reference-value{margin:0;font-size:1.12rem;font-variant-numeric:tabular-nums}
+.reference-context,.reference-evidence{font-size:.84rem;line-height:1.4;color:var(--muted)}
+.reference-evidence{font-family:ui-monospace,monospace}
+.reference-alternatives summary{overflow-wrap:anywhere}
+.reference-choices .hint{margin:4px 0 8px}
+.reference-actions{display:flex;align-items:flex-end;flex-wrap:wrap;gap:8px 12px}
+.reference-actions .form-field{margin:0}

@@ -75,28 +75,110 @@ function sharedReferenceLocation(candidates) {
   return {x:left,y:top,w:width,h:height};
 }
 
-function showReference(pictureLink, panel, reference) {
+const referenceTypes = {orderId:'Order ID', orderNumber:'Order number', receiptReference:'Receipt reference'};
+
+function photoPosition(box) {
+  if (!box) return '';
+  const col=Math.min(2,Math.floor(3*(box.x+box.w/2))), row=Math.min(2,Math.floor(3*(box.y+box.h/2)));
+  return [['Top left','Top centre','Top right'],['Centre left','Centre','Centre right'],['Bottom left','Bottom centre','Bottom right']][row][col];
+}
+
+function markReference(pictureLink, box, tentative) {
+  if (!pictureLink) return;
+  pictureLink.querySelector('.reference-marker')?.remove();
+  if (!box) return;
+  const marker=element('span',undefined,'reference-marker'+(tentative?' tentative':''));
+  marker.setAttribute('aria-hidden','true');
+  marker.style.left=box.x*100+'%';marker.style.top=box.y*100+'%';
+  marker.style.width=box.w*100+'%';marker.style.height=box.h*100+'%';
+  pictureLink.append(marker);
+}
+
+function showSuggestion(pictureLink, panel, reference, onConfirm) {
+  const suggested=reference.suggestion;
+  const block=section('Suggested reference');
+  const choices=element('fieldset',undefined,'reference-choices');
+  choices.append(element('legend','Choose a reference','sr-only'));
+  const kind=element('select');
+  for (const [key,label] of Object.entries(referenceTypes)) {
+    const option=element('option',label);
+    option.value=key;
+    kind.append(option);
+  }
+  let selected=suggested;
+  let alternativesSummary;
+  let alternativesTitle;
+  function select(candidate) {
+    selected=candidate;
+    kind.value=candidate.basis==='position' ? 'orderId' : Object.hasOwn(referenceTypes,candidate.kind) ? candidate.kind : 'receiptReference';
+    if (alternativesSummary) alternativesSummary.textContent=alternativesTitle+(candidate===suggested?'':' · Selected '+candidate.value);
+    markReference(pictureLink,referenceBox(candidate.box),true);
+  }
+  const seen=new Set();
+  const candidates=[suggested,...(reference.candidates || [])].filter(candidate=>{
+    const key=JSON.stringify([candidate?.kind,String(candidate?.value ?? '').trim().toLowerCase()]);
+    if (!candidate?.value || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  function choice(candidate, preferred) {
+    const label=element('label',undefined,'reference-choice');
+    const radio=element('input');
+    radio.type='radio';radio.name='reference-choice';radio.value=candidate.value;radio.checked=preferred;
+    radio.addEventListener('change',()=>{if (radio.checked) select(candidate);});
+    const content=element('span',undefined,'reference-choice-text');
+    const type=(candidate.label || referenceTypes[candidate.kind] || 'Receipt reference').replace(/^possible\s+/i,'');
+    const tentative=candidate.basis==='position' ? 'Unlabelled reference' : 'Possible '+type[0].toLowerCase()+type.slice(1);
+    const position=photoPosition(referenceBox(candidate.box));
+    content.append(element('strong',candidate.value,'reference-value'),element('span',[tentative,position].filter(Boolean).join(' · '),'reference-context'));
+    if (candidate.evidence) content.append(element('span','Photo text · '+candidate.evidence,'reference-evidence'));
+    label.append(radio,content);
+    return label;
+  }
+  choices.append(choice(suggested,true));
+  const differingReadings=new Set(candidates.map(candidate=>candidate.value)).size>1 && sharedReferenceLocation(candidates);
+  const explanation=[suggested.reason, differingReadings
+    ? 'The readings disagree on the characters at the same place on the photo.' : reference.reason];
+  for (const line of new Set(explanation.filter(Boolean))) choices.append(element('p',line,'hint'));
+  if (candidates.length>1) {
+    alternativesTitle='Other possible references ('+(candidates.length-1)+')';
+    const alternatives=disclosure(alternativesTitle);
+    alternatives.className='reference-alternatives';
+    alternativesSummary=alternatives.querySelector('summary');
+    for (const candidate of candidates.slice(1)) alternatives.append(choice(candidate,false));
+    choices.append(alternatives);
+  }
+  block.append(choices);
+  if (onConfirm) {
+    const actions=element('div',undefined,'reference-actions');
+    const field=element('label','Save as','form-field');
+    field.append(kind);
+    actions.append(field,button('Confirm reference',()=>onConfirm(selected,kind.value),'primary'));
+    block.append(actions);
+  }
+  select(suggested);
+  panel.append(block);
+}
+
+function showReference(pictureLink, panel, reference, onConfirm) {
   if (!reference) return;
+  if (reference.requiresReview && reference.suggestion?.value) {
+    showSuggestion(pictureLink,panel,reference,onConfirm);
+    return;
+  }
   const found=reference.status==='found';
   const candidate=found ? reference : reference.status==='ambiguous' && reference.candidates?.length===1 ? reference.candidates[0] : null;
   const shared=reference.status==='ambiguous' ? sharedReferenceLocation(reference.candidates) : null;
   const box=shared || referenceBox(candidate?.box);
   const block=section('Reference on photo');
   if (shared || (candidate?.value && (found || box))) {
-    const labels={orderId:'Order ID',orderNumber:'Order number',receiptReference:'Receipt reference'};
-    const label=found ? candidate.label || labels[candidate.kind] || 'Receipt reference' : 'Possible reference';
+    const label=found ? candidate.label || referenceTypes[candidate.kind] || 'Receipt reference' : 'Possible reference';
     const text=shared ? 'Reference location · digits unclear' : label+' · '+candidate.value;
     const value=element('p',text,'reference-value');
     block.append(value);
     if (box && pictureLink) {
-      const marker=element('span',undefined,'reference-marker'+(found?'':' tentative'));
-      marker.setAttribute('aria-hidden','true');
-      marker.style.left=box.x*100+'%';marker.style.top=box.y*100+'%';
-      marker.style.width=box.w*100+'%';marker.style.height=box.h*100+'%';
-      pictureLink.append(marker);
-      const col=Math.min(2,Math.floor(3*(box.x+box.w/2))), row=Math.min(2,Math.floor(3*(box.y+box.h/2)));
-      const positions=[['Top left','Top centre','Top right'],['Centre left','Centre','Centre right'],['Bottom left','Bottom centre','Bottom right']];
-      value.append(document.createTextNode(' · '+positions[row][col]));
+      markReference(pictureLink,box,!found);
+      value.append(document.createTextNode(' · '+photoPosition(box)));
     }
   }
   let reason=shared ? 'The readings point to the same place and disagree on the characters.' : reference.reason;
@@ -277,7 +359,8 @@ export function showDetail(r, callbacks={}, focusPath='') {
     heading.append(element('small',['Receipt total',r.data.currency,amount].filter(Boolean).join(' ')));
   }
   const panel=element('div',undefined,'review-panel');
-  if (r.state==='done') showReference(pictureLink,panel,r.reference);
+  if (r.state==='done') showReference(pictureLink,panel,r.reference,
+    callbacks.onConfirmReference && ((candidate,kind)=>act('onConfirmReference',candidate,kind)));
   if (r.demo?.note) panel.append(element('p',r.demo.note,'hint'));
   if (r.duplicateOf || r.exactOf) {
     const id=r.exactOf || r.duplicateOf;

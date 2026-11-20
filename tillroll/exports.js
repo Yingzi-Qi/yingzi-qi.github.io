@@ -1,5 +1,5 @@
-import {orderNeedsReview} from './orders.js?v=4';
-import {reviewForLine} from './checks.js?v=4';
+import {orderNeedsReview} from './orders.js?v=5';
+import {reviewForLine} from './checks.js?v=5';
 import * as zipPackage from './export-vendor/jszip.min.js';
 
 const JSZip = zipPackage.default ?? globalThis.JSZip;
@@ -23,7 +23,8 @@ const receiptColumns = [
   ['Item on photo','itemEvidence',38,'photo'],
   ['Receipt reference','receiptReference',24], ['Located reference','value',24,'reference'],
   ['Reference type','label',22,'reference'], ['Reference evidence','evidence',46,'reference'],
-  ['Reference finding','reason',52,'reference']
+  ['Reference finding','reason',52,'reference'], ['Suggested reference','suggested',24,'proposal'],
+  ['Other possible references','alternatives',32,'proposal']
 ];
 const orderColumns = [
   ['Order check','status',24,'order'], ['Order check detail','reason',52,'order'],
@@ -44,8 +45,13 @@ function exportData(receipts) {
       const {flags,messages} = reviewForLine(r,i);
       const photo = r.review?.photo?.[i] ?? {};
       const order = r.orders?.[i] ?? {};
+      const ref=r.reference || {};
+      const suggested=ref.requiresReview ? ref.suggestion?.value : '';
+      const alternatives=suggested ? [...new Set(ref.candidates.map(c=>c.value))].filter(v=>v!==suggested).join(' / ') : '';
       const sources = {
-        receipt:r.record || r.data, line, photo, order, meta:r, reference:r.reference || {},
+        receipt:r.record || r.data, line, photo, order, meta:r,
+        reference:suggested ? {...ref,reason:[ref.reason,ref.suggestion.reason].filter(Boolean).join(' ')} : ref,
+        proposal:{suggested,alternatives},
         review:{message:messages.join('; ')}
       };
       rows.push(columns.map(([,key,,source='receipt',type]) => {
@@ -53,7 +59,7 @@ function exportData(receipts) {
         const numeric = type && value !== '' && Number.isFinite(Number(value));
         value = numeric ? Number(value) : String(value);
         const field = source === 'line' ? prefix+key : key;
-        const flagged = flags.some(f=>f.field===field) || (source==='review' && value!=='')
+        const flagged = flags.some(f=>f.field===field) || ((source==='review'||source==='proposal') && value!=='')
           || (source==='photo' && ['status','reason'].includes(key) && photo.status === 'Needs review')
           || (source==='order' && ['status','reason'].includes(key) && orderNeedsReview(order));
         return {value,numeric,style:flagged ? (type==='money' ? 5 : 4) : type==='money' ? 3 : 0};

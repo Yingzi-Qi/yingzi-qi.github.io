@@ -1,9 +1,9 @@
-import {inspectReference,combineReferenceReadings} from './reference.js?v=4';
-import {readPhoto,secondReadPhoto,extractLocal,extractAI} from './extract.js?v=4';
-import {checkReceipt,samePurchase,reviewForLine} from './checks.js?v=4';
-import {exportExcel,exportCSV,readOrderFile} from './exports.js?v=4';
-import {loadSamples} from './samples.js?v=4';
-import {compareOrder,orderNeedsReview} from './orders.js?v=4';
+import {inspectReference,combineReferenceReadings} from './reference.js?v=5';
+import {readPhoto,secondReadPhoto,extractLocal,extractAI} from './extract.js?v=5';
+import {checkReceipt,samePurchase,reviewForLine} from './checks.js?v=5';
+import {exportExcel,exportCSV,readOrderFile} from './exports.js?v=5';
+import {loadSamples} from './samples.js?v=5';
+import {compareOrder,orderNeedsReview} from './orders.js?v=5';
 const $ = s=>document.querySelector(s);
 const escape = v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const paths={settings:'<path d="M4 7h5m4 0h7M4 17h9m4 0h3"/><circle cx="11" cy="7" r="2"/><circle cx="15" cy="17" r="2"/>',upload:'<path d="M12 15V3m-5 5 5-5 5 5M4 14v5a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5"/>',plus:'<path d="M12 5v14M5 12h14"/>',download:'<path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/>',search:'<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>',link:'<path d="m10 14 4-4m-4-3 2-2a5 5 0 0 1 7 7l-2 2m-3 3-2 2a5 5 0 0 1-7-7l2-2"/>',play:'<path d="m8 5 10 7-10 7z"/>'};
@@ -13,6 +13,8 @@ let mode='local',apiKey='',noticeTimer,startTime=0,finishedTime=0;
 const queue=[], hashOwners=new Map();
 const emptyOCR=()=>({text:'',confidence:0,lines:[]});
 const blankItem=()=>({brand:'',item:'',sku:'',colour:'',size:'',qty:null,unitPrice:null,amount:null});
+const referenceLabels={orderId:'Order ID',orderNumber:'Order number',receiptReference:'Receipt reference'};
+const sameReference=(a,b)=>String(a??'').trim().toLowerCase()===String(b??'').trim().toLowerCase();
 const get=(obj,key)=>key.split('.').reduce((v,k)=>v?.[k],obj);
 function set(obj,key,value){const keys=key.split('.'); const end=keys.pop(); let cur=obj;for(const k of keys)cur=cur[k];cur[end]=value;}
 const normalData=data=>({...data,items:Array.isArray(data?.items)?data.items.map(x=>({...blankItem(),...x})):[]});
@@ -26,8 +28,21 @@ function evaluate(r){
   const ocr=r.ocr||emptyOCR();
   r.reference=inspectReference(r.data,ocr,orderList);
   if(r.otherOcr)r.reference=combineReferenceReadings(r.reference,inspectReference(r.data,r.otherOcr,orderList));
-  const ref=r.reference;
   r.record={...r.data};
+  const choice=r.confirmedReference;
+  const competing=choice?.values || (r.reference.suggestion ? r.reference.candidates.map(c=>c.value) : []);
+  for(const key of Object.keys(referenceLabels)){
+    if(!r.editedReferences?.has(key) && competing.some(value=>sameReference(value,r.data[key]))) r.record[key]=null;
+  }
+  if(choice){
+    r.reference={...choice.candidate,kind:choice.kind,label:referenceLabels[choice.kind],status:'found',
+      basis:'user-confirmed',reason:'You confirmed this number on the receipt.',reasonCode:null,
+      requiresReview:false,suggestion:null,candidates:[],reviewedValues:choice.values};
+    r.record[choice.kind]=choice.candidate.value;
+  }
+  const ref=r.reference;
+  // Duplicate detection can use printed or manually accepted IDs, independently of an imported list.
+  r.duplicateRecord={...r.record};
   if(ref.status==='found' && !r.record[ref.kind] && !r.editedReferences?.has(ref.kind))
     r.record[ref.kind]=ref.value;
   r.review=checkReceipt(r.record,ocr,r.previous||null,{...confidenceOptions(r),reference:ref});
@@ -40,7 +55,7 @@ function duplicates(){
   for(const r of batch){
     if(r.exactOf){r.duplicateOf=r.exactOf;continue;}
     r.duplicateOf=null;if(r.state!=='done')continue;
-    const match=canonical.find(s=>samePurchase(s.data,r.data));
+    const match=canonical.find(s=>samePurchase(s.duplicateRecord,r.duplicateRecord));
     if(match && !r.keepBoth) r.duplicateOf=match.id;
     else canonical.push(r);
   }
@@ -65,7 +80,7 @@ async function run(r){
     const owner=hashOwners.get(r.hash);
     if(owner && owner!==r.id){r.exactOf=owner;r.duplicateOf=owner;r.state='duplicate';return;}
     hashOwners.set(r.hash,r.id);
-    if(r.demo){r.data=normalData(structuredClone(r.demo.data));r.ocr=r.demo.ocr;r.otherOcr=r.demo.referenceOcr;r.origin='sample';r.method=r.demo.set==='photos'?'Photo sample':'Demo';}
+    if(r.demo){r.data=normalData(structuredClone(r.demo.data));r.ocr=r.demo.ocr;r.otherOcr=r.demo.referenceOcr;r.origin='sample';r.method='Saved reading';}
     else{
       const modelEnabled=chosenMode==='ai'&&!!chosenKey;
       const [ocrRead,aiRead]=await Promise.allSettled([readPhoto(r.file),modelEnabled?extractAI(r.file,chosenKey,1,[]):Promise.resolve(null)]);if(!current())return;
@@ -93,14 +108,19 @@ async function run(r){
 }
 const filt = (r,f)=>f==='all'||(f==='review'&&isReview(r))||(f==='photo'&&!r.duplicateOf&&r.review.photo.some(p=>p.status==='Needs review'))||(f==='dupes'&&!!r.duplicateOf)||(f==='second'&&r.second);
 const filterTitles={all:'All',review:'Needs review',photo:'Photo flags',dupes:'Duplicates',second:'Second pass'};
-const textOf=r=>[r.filename,r.data?.merchant,r.record?.orderNumber,r.record?.orderId,r.record?.receiptReference,r.reference?.value,...r.review.photo.map(x=>x.idEvidence),...(r.data?.items||[]).flatMap(i=>[i.brand,i.item,i.sku])].join(' ').toLowerCase();
+const textOf=r=>[r.filename,r.data?.merchant,r.record?.orderNumber,r.record?.orderId,r.record?.receiptReference,r.reference?.value,...(r.reference?.candidates||[]).map(c=>c.value),...r.review.photo.map(x=>x.idEvidence),...(r.data?.items||[]).flatMap(i=>[i.brand,i.item,i.sku])].join(' ').toLowerCase();
 function badge(label,style='',reason=''){return `<span class="status ${style}" title="${escape(reason)}">${escape(label)}</span>`;}
 function photoBadge(photo){if(!photo)return '—';return badge(photo.status,photo.status==='Needs review'?'warn':photo.status==='Not verified'?'muted':'',photo.reason);}
 function cell(r,path,txt){const warning=r.review.flags.some(f=>f.field===path&&f.severity!=='info');return `<button class="cell ${warning?'marked':''}" data-id="${r.id}" data-path="${escape(path)}" title="${escape(txt??'Edit')}">${escape(txt??'')||'—'}</button>`;}
 function referenceCell(r) {
   const record=r.record||r.data;
-  const labels={orderId:'Order ID',orderNumber:'Order number',receiptReference:'Receipt reference'};
-  const kind=Object.keys(labels).find(key=>record[key]);
+  const suggestion=r.reference?.suggestion;
+  if(r.reference?.requiresReview && suggestion){
+    const title='Check suggested reference '+suggestion.value;
+    return `<button class="cell reference-cell marked" data-id="${r.id}" title="${escape(title)}" aria-label="${escape(title)}">${escape(suggestion.value)}<small>Suggested · needs checking</small></button>`;
+  }
+  const labels=referenceLabels;
+  const kind=r.reference?.basis==='user-confirmed' ? r.reference.kind : Object.keys(labels).find(key=>record[key]);
   const value=kind?record[kind]:'';
   const label=kind && r.reference?.kind===kind && r.reference?.value===value ? r.reference.label||labels[kind] : labels[kind];
   const title=value ? 'Inspect '+label+' '+value+' on the receipt' : 'Inspect the receipt for a reference';
@@ -136,16 +156,24 @@ function render(){
 }
 async function openDetail(id,path=''){
   const r=batch.find(x=>x.id===Number(id));if(!r)return;
-  const {showDetail}=await import('./detail.js?v=4');
+  const {showDetail}=await import('./detail.js?v=5');
   const refresh=()=>{duplicates();render();};
   const rerender=(focus='')=>{refresh();openDetail(r.id,focus).catch(e=>note(e.message));};
   showDetail({...r,data:r.record||r.data},{
     onSave(data){
-      for(const key of ['orderId','orderNumber','receiptReference']){
+      if(data.merchant!==r.data.merchant || (r.confirmedReference && data[r.confirmedReference.kind]!==r.record[r.confirmedReference.kind]))r.confirmedReference=null;
+      for(const key of Object.keys(referenceLabels)){
         if(data[key]===r.record[key])data[key]=r.data[key];
         else (r.editedReferences??=new Set()).add(key);
       }
       r.data=normalData(data);r.ack.clear();evaluate(r);refresh();note('Changes saved. Checks updated.');
+    },
+    onConfirmReference(candidate,kind){
+      if(!Object.hasOwn(referenceLabels,kind) || !r.reference.requiresReview)return;
+      const listed=r.reference.candidates.find(c=>c.value===candidate.value && c.kind===candidate.kind);
+      if(!listed)return;
+      r.confirmedReference={candidate:listed,kind,values:r.reference.candidates.map(c=>c.value)};
+      evaluate(r);rerender();note('Reference confirmed.');
     },
     onAcknowledge(f){if(f.severity==='check'&&!f.field.endsWith('.photo'))r.ack.add(f.field+'|'+f.message);evaluate(r);rerender();},
     onKeepBoth(){if(!r.exactOf)r.keepBoth=true;rerender();},

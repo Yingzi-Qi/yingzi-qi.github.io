@@ -1,5 +1,5 @@
-import {orderNeedsReview} from './orders.js?v=4';
-import {inspectReference} from './reference.js?v=4';
+import {orderNeedsReview} from './orders.js?v=5';
+import {inspectReference} from './reference.js?v=5';
 // Geometry is normalized to the upright photo, with the origin at its top left.
 const PHOTO_CONFIDENCE = 0.8;
 const ID_LABEL = /^order\s+i\.?d\.?\s*[:#]?$/i;
@@ -162,7 +162,7 @@ function labelledProductLines(lines) {
 }
 
 function verifyPhoto(data, ocr, independent, reference) {
-  const lines = visualLines(ocr), ids = printedIds(lines);
+  const lines = visualLines(ocr), ids = printedIds(lines).filter(id=>!reference.reviewedValues?.some(v=>name(v)===name(id.id)));
   const labelled = labelledProductLines(lines);
   const locatedId = reference.status==='found' && reference.kind==='orderId';
   if(locatedId && !ids.some(id=>id.id===reference.value))
@@ -174,7 +174,7 @@ function verifyPhoto(data, ocr, independent, reference) {
   if (!orderId && ids.length) idIssue = 'The photo has a labelled order ID that is missing from the extracted record.';
   else if (orderId && !ids.length) idIssue = 'The extracted order ID could not be located on the photo.';
   else if (ids.some(entry => entry.id !== orderId)) idIssue = 'The printed order ID differs or the photo shows conflicting IDs.';
-  else if (ids.length && Math.max(...ids.map(id => id.confidence)) < PHOTO_CONFIDENCE) idIssue = 'The printed ID is unclear.';
+  else if (ids.length && reference.basis!=='user-confirmed' && Math.max(...ids.map(id => id.confidence)) < PHOTO_CONFIDENCE) idIssue = 'The printed ID is unclear.';
 
   const products = productLines(lines);
   const groups = new Map(), owners = new Map();
@@ -207,7 +207,7 @@ function verifyPhoto(data, ocr, independent, reference) {
       const hit = match?.hits[index] || match?.hits[0];
       const paired = enough && !collides && hit?.confidence >= PHOTO_CONFIDENCE;
       if (conflict) issueList.push('The labelled brand or item on the photo differs from the extracted product.');
-      else if (expectsId && reference.basis!=='order-list' && match && !paired) {
+      else if (expectsId && !['order-list','user-confirmed'].includes(reference.basis) && match && !paired) {
         if (!match.hits.length) issueList.push('The full item and brand could not be paired on the printed line.');
         else if (!enough || collides) issueList.push('Repeated or overlapping product lines could not be paired uniquely.');
         else issueList.push('The product line is unclear.');
@@ -342,10 +342,13 @@ export function checkReceipt(data, ocr, previous = null, {independentPhoto = fal
   const printedNumbers = printedOrderNumbers(ocr);
   if(reference.status==='found' && data[reference.kind] && name(data[reference.kind])!==name(reference.value)) {
     add(reference.kind,reference.label+' differs from the value on the photo ('+reference.value+').','check');
+  } else if(reference.requiresReview && reference.suggestion) {
+    add('receipt','Check the suggested reference '+reference.suggestion.value+' against the other possible numbers.','check');
   } else if(reference.reasonCode==='conflict') {
     add('receipt',reference.reason,'check');
   }
   const orderNumber = text(data.orderNumber);
+  for(const value of printedNumbers)if(reference.reviewedValues?.some(v=>name(v)===name(value)))printedNumbers.delete(value);
   if (!orderNumber) {
     if (printedNumbers.size) add('orderNumber','A labelled order number is visible on the photo but is missing from the record.', 'fix');
     else if (!text(data.orderId)) add('orderNumber',text(data.receiptReference) ? 'A receipt reference is available. Order-list matching requires a shared order reference.' : 'No confirmed order reference is available for matching.', 'info');
@@ -373,12 +376,14 @@ export function checkReceipt(data, ocr, previous = null, {independentPhoto = fal
   for (const issue of Array.isArray(data.fieldIssues) ? data.fieldIssues : []) {
     const field = text(issue?.field);
     if (!/^(merchant|orderId|orderNumber|date|total|items\.\d+\.(item|amount))$/.test(field) || issue.reason === 'missing_on_receipt') continue;
-    if (!flags.some(f => f.field === field && f.severity !== 'info'))
+    if (!(reference.basis==='user-confirmed' && reference.kind===field) && !flags.some(f => f.field === field && f.severity !== 'info'))
       add(field,'Hard to read' + (issue.evidence ? '. '+text(issue.evidence) : '.') , 'check');
   }
   if (name(data.imageQuality) === 'poor' && !flags.some(f => f.escalate)) add('receipt','Image quality is poor.', 'check');
-  ocrChecks(data, ocr, format, add, confirmedFields);
+  const ocrData=reference.basis==='user-confirmed' ? {...data,[reference.kind]:null} : data;
+  ocrChecks(ocrData, ocr, format, add, confirmedFields);
   for (const key of ['orderNumber','orderId']) {
+    if(reference.basis==='user-confirmed' && reference.kind===key)continue;
     if (text(previous?.[key]) && text(data[key]) && text(previous[key]) !== text(data[key]))
       add(key,'The two readings disagree. First reading: '+text(previous[key])+'.', 'check', false);
   }
