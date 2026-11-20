@@ -1,6 +1,6 @@
 import {inspectReference} from './reference.js?v=6';
 import {isGtin} from './product-code.js?v=6';
-import {readPurchaseDate} from './purchase-date.js?v=6';
+import {readPurchaseDate} from './purchase-date.js?v=8';
 import {comparePhotoFields,mergeReadings} from './reading-comparison.js?v=6';
 // OCR assets resolve on this site. Receipt images remain in the tab unless the
 // caller explicitly starts the optional Gemini reader using a supplied API key.

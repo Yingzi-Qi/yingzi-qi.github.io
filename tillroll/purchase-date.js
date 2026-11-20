@@ -7,6 +7,10 @@ const months = [
 const monthNumber=new Map(months.flatMap((terms,i)=>terms.split(' ').map(s=>[s,i+1])));
 const words=[...monthNumber.keys()].sort((a,b)=>b.length-a.length).join('|');
 const namedDate=new RegExp('\\b(?:(\\d{1,2})[ .-]+('+words+')[., -]+((?:19|20)\\d{2})|('+words+')[ .-]+(\\d{1,2})(?:st|nd|rd|th)?[., -]+((?:19|20)\\d{2}))\\b','gi');
+const weekdayNames=['sun sunday dim dimanche so sonntag','mon monday lun lundi mo montag','tue tuesday mar mardi di dienstag','wed wednesday mer mercredi mi mittwoch','thu thursday jeu jeudi do donnerstag','fri friday ven vendredi fr freitag','sat saturday sam samedi sa samstag'];
+const weekdays=new Map(weekdayNames.flatMap((names,day)=>names.split(' ').map(name=>[name,day])));
+// Some tills print weekday, month, day, time, then year. OCR can join the clock digits.
+const tillTimestamp=new RegExp('\\b('+[...weekdays.keys()].join('|')+')\\.?\\s+('+words+')\\.?\\s+(\\d{1,2})\\s+(?:\\d{1,2}:\\d{2}(?::\\d{2})?|\\d{5,8})\\s+((?:19|20)\\d{2})\\b','gi');
 const digitsDate=/(?<![\p{L}\d_/-])(?:(\d{4})([-/.])(\d{1,2})\2(\d{1,2})|(\d{1,2})([-/.])(\d{1,2})\6((?:19|20)\d{2}|\d{2}))(?![\p{L}\d_/-])/gu;
 const pad=value=>String(value).padStart(2,'0');
 
@@ -49,12 +53,17 @@ export function readPurchaseDate(text) {
   const lines=String(text ?? '').normalize('NFD').replace(/\p{M}+/gu,'').split(/\r?\n/);
   const candidates=[];
   for (const [i,line] of lines.entries()) {
-    const add=(match,values)=>{
+    const add=(match,values,issue=null)=>{
       const prior=lines[i-1]?.trim() || '';
       const separateLabel=match.index===line.search(/\S/) && /(?:\bdate|\bdatum|\bexpiry|\bby|\buntil)\s*[:#-]?$/i.test(prior);
       const score=separateLabel ? contextScore(prior+' '+line,prior.length+1+match.index) : contextScore(line,match.index);
-      if (score) candidates.push({score,printed:match[0],values});
+      if (score) candidates.push({score,printed:match[0],values,issue});
     };
+    for (const m of line.matchAll(tillTimestamp)) {
+      const values=possibleDates(m[4],m[3],monthNumber.get(m[2].toLowerCase()));
+      const disagree=values.length && new Date(values[0]+'T00:00:00Z').getUTCDay()!==weekdays.get(m[1].toLowerCase());
+      add(m,disagree?[]:values,disagree?'The printed weekday and calendar date disagree ('+m[0]+').':null);
+    }
     for (const m of line.matchAll(namedDate)) {
       const month=monthNumber.get((m[2]||m[4]).toLowerCase());
       add(m,possibleDates(m[3]||m[6],m[1]||m[5],month));
@@ -68,6 +77,8 @@ export function readPurchaseDate(text) {
   if (!candidates.length) return {date:null,issue:null};
   const highest=Math.max(...candidates.map(c=>c.score));
   const chosen=candidates.filter(c=>c.score===highest);
+  const issue=chosen.find(c=>c.issue)?.issue;
+  if (issue) return {date:null,issue};
   const printed=[...new Set(chosen.map(c=>c.printed))].slice(0,4).join(' / ');
   if (chosen.some(c=>!c.values.length)) return {date:null,issue:'Invalid calendar date on the receipt ('+printed+').'};
   const possible=chosen[0].values.filter(v=>chosen.every(c=>c.values.includes(v)));

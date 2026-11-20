@@ -34,3 +34,34 @@ td button.reference-cell{height:auto;text-align:left}button.reference-cell small
 td button.item-identifier{display:block;min-height:1.5rem;height:auto;margin:0 .3rem .25rem;padding:.1rem .2rem;color:var(--muted);border:0;background:transparent;font-size:.8rem;white-space:normal;text-align:left}
 
 .bottom-actions .actions{flex-wrap:wrap}
+
+.receipt-lines thead th{background:#edf1eb}
+.receipt-lines tbody th{position:static;z-index:auto;background:transparent}
+.receipt-lines tbody td,.receipt-lines tbody th{vertical-align:top}
+.receipt-lines tbody+tbody tr:first-child>*{border-top:1px solid #b8c8bc}
+.receipt-lines .receipt-controls{display:flex;align-items:flex-start;flex-direction:column;gap:.35rem}
+.receipt-lines .purchase-date button,.receipt-lines .references button{display:block;text-align:left}
+.receipt-lines .purchase-time{color:var(--muted);font-variant-numeric:tabular-nums}
+.receipt-lines .references button+button{margin-top:.35rem}
+.receipt-lines td button.cell{max-width:24ch;white-space:normal;overflow-wrap:anywhere;text-align:left}
+.receipt-lines td.money,.receipt-lines thead th:last-child{text-align:right}
+.receipt-lines td.money button{white-space:nowrap}
+.receipt-lines tbody:last-child tr:last-child td,.receipt-lines tbody:last-child [rowspan]{border-bottom:0}
+@media(max-width:640px){
+  .receipt-lines,.receipt-lines thead,.receipt-lines tbody{display:block}
+  .receipt-lines thead{position:sticky;top:0;z-index:2}
+  .receipt-lines tr{display:grid;grid-template-columns:minmax(0,.9fr) minmax(0,1.45fr) minmax(5rem,auto)}
+  .receipt-lines thead th:nth-child(-n+4){position:absolute;width:1px;height:1px;padding:0;overflow:hidden;clip-path:inset(50%)}
+  .receipt-lines th,.receipt-lines td{min-width:0;padding:.5rem}
+  .receipt-lines tbody tr:first-child>*[rowspan],.receipt-lines tbody tr:first-child>th{background:#f4f7f2;border-bottom:0}
+  .receipt-lines tbody th[scope=rowgroup]{grid-column:1}
+  .receipt-lines .purchase-date{grid-column:2 / -1;text-align:right}
+  .receipt-lines .purchase-date button{display:inline-block;margin-left:.3rem}
+  .receipt-lines .purchase-date+td{grid-column:1 / -1;padding-top:0;padding-bottom:.15rem}
+  .receipt-lines .references{grid-column:1 / -1;padding-top:0}
+  .receipt-lines .references button,.receipt-lines .references button+button{display:inline-block;margin:0 .5rem 0 0}
+  .receipt-lines tbody+tbody tr:first-child>td:not(.purchase-date){border-top:0}
+  .receipt-lines td button.cell{max-width:100%}
+  .receipt-lines td[colspan]{grid-column:2 / -1;white-space:normal}
+  .receipt-lines td.no-items{grid-column:1 / -1}
+}

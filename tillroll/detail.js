@@ -1,3 +1,4 @@
+import {purchaseDateText} from './receipt-date-display.js?v=8';
 import {orderNeedsReview} from './orders.js?v=6';
 // Receipt data and OCR are untrusted strings. Only write them through DOM text/value APIs.
 function element(tag, content, className) {
@@ -296,6 +297,7 @@ function showEditor(panel, r, act, focusPath) {
     for (const [key,label,type='text'] of fieldsForPart) {
       const holder = element('label',label,'form-field'), input = element('input');
       input.type=type;
+      if(key==='date')input.placeholder='YYYY-MM-DD';
       if(type==='number') input.step='any';
       input.value=source[key] ?? '';
       input.autocomplete='off';
@@ -354,6 +356,7 @@ export function showDetail(r, callbacks={}, focusPath='') {
   const heading=element('div'), h=element('h2','Receipt '+r.id+(r.data?.merchant?' · '+r.data.merchant:''));
   h.id='receipt-detail-title';dialog.setAttribute('aria-labelledby',h.id);
   heading.append(h,element('small',r.filename));
+  if(r.data)heading.append(element('small',['Purchase date · '+purchaseDateText(r.data),r.data.time].filter(Boolean).join(' · ')));
   const exit=button('×',close,'icon close');exit.setAttribute('aria-label','Close receipt');title.append(heading,exit);
   const body=element('div',undefined,'detail-grid'), picture=element('div',undefined,'picture');
   let pictureLink;
