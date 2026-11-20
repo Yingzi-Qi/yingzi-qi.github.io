@@ -1,7 +1,7 @@
 // The source photographs serve live scans. Saved data are used only in saved sample mode.
 export async function loadSamples(set = 'demo') {
   const base = new URL(set === 'photos' ? './real-samples/' : './samples/', import.meta.url);
-  const response = await fetch(new URL(set==='photos' ? 'index.json?v=6' : 'index.json',base));
+  const response = await fetch(new URL(set==='photos' ? 'index.json?v=productcodes3' : 'index.json',base));
   if (!response.ok) throw new Error('The sample receipt set could not be loaded.');
   const manifest = await response.json();
   const images = new Map();

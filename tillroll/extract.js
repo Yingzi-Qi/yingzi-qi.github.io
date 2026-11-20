@@ -1,5 +1,5 @@
 import {inspectReference} from './reference.js?v=6';
-import {isGtin,isPrintedItemNumber,parsePrintedItemId} from './product-code.js?v=itemid2';
+import {isGtin,isPrintedItemNumber,parsePrintedItemId,printedBarcodeDetail,barcodesBelowNames} from './product-code.js?v=productcodes3';
 import {readPurchaseDate} from './purchase-date.js?v=8';
 import {comparePhotoFields,mergeReadings} from './reading-comparison.js?v=6';
 // OCR assets resolve on this site. Receipt images remain in the tab unless the
@@ -168,14 +168,18 @@ function details(row, text) {
   row.sku = parts.shift()?.trim() || null;
   for(const part of parts) { if(/^size\b/i.test(part)) row.size = part.replace(/^size\s*:?\s*/i,''); else if (!row.colour) row.colour = part; }
 }
-function barcodeProduct(lines,i) {
+function barcodeProduct(lines,i,belowNames) {
   const line=lines[i], prev=lines[i-1], next=lines[i+1];
-  const code=line.text.trim().match(/^(\d{4,14})\s+/)?.[1];
+  const detail=printedBarcodeDetail(line);
+  const code=detail?.id || line.text.trim().match(/^(\d{4,14})\s+/)?.[1];
   if(!isPrintedItemNumber(code) || !possibleLabel(prev) || !neighbouringRows(prev,line))return null;
   const prices=amounts(line.text);
-  if(prices.length!==1 || line.text.slice(0,prices[0].start).trim()!==code ||
-    !/^\s*(?:[A-Z*]|\d)?\s*$/i.test(line.text.slice(prices[0].end)))return null;
-  const row={...itemShape(),itemId:code,amount:prices[0].value};
+  const head=prices.length && line.text.slice(0,prices[0].start).trim();
+  const quantity=detail && head && head.startsWith(code+' ') && head.slice(code.length).trim().match(/^\d{1,3}$/);
+  const simple=prices.length===1 && (head===code || quantity) &&
+    /^\s*(?:(?:EUR|USD|GBP|CAD|[€£$])\s*)?(?:[A-Z*]|\d)?\s*$/i.test(line.text.slice(prices[0].end));
+  if (!simple && !(detail && belowNames.has(i) && !prices.length && clearCode(line,code))) return null;
+  const row={...itemShape(),itemId:code,qty:quantity ? Number(quantity[0]) : null,amount:simple ? prices[0].value : null};
   const heading=prev.text.trim();
   const style=heading.match(/^(.+?)\s+([A-Z][A-Z0-9-]{3,}\d[A-Z0-9-]*)\s+(\d{1,2}(?:[.,]\d)?(?:\s+[A-Z0-9]{1,3})?)$/);
   if(style) {
@@ -183,10 +187,10 @@ function barcodeProduct(lines,i) {
     const word=prev.words?.find(w=>w.text===row.sku);
     if(word)row.readConfidence={sku:word.confidence};
   } else Object.assign(row,splitProduct(prev,heading));
-  const quantity=next?.text.trim().match(/^(\d+)\s*[@×x]\s*/i);
+  const unitQuantity=next?.text.trim().match(/^(\d+)\s*[@×x]\s*/i);
   const unit=next && amounts(next.text);
-  const hasUnit=Boolean(quantity && unit?.length===1 && !next.text.slice(unit[0].end).trim());
-  if(hasUnit){row.qty=Number(quantity[1]);row.unitPrice=unit[0].value;}
+  const hasUnit=Boolean(unitQuantity && unit?.length===1 && !next.text.slice(unit[0].end).trim());
+  if(hasUnit){row.qty=Number(unitQuantity[1]);row.unitPrice=unit[0].value;}
   return {row,hasUnit};
 }
 const itemIdLabel=/^(?:item\s*id|product\s*(?:id|code)|article\s*id|upc|ean|gtin|barcode)\s*[:#]?\s*([\w][\w/-]*)\s*$/i;
@@ -270,7 +274,7 @@ function embeddedModelNumber(item,parsed,sku) {
 }
 function itemsFromLines(lines, trace) {
   const items=[]; const used=new Set(), inlineSuffixes=new Map();
-  const prefixes=printedProductPrefixes(lines);
+  const prefixes=printedProductPrefixes(lines), belowNames=barcodesBelowNames(lines);
   let layout=null, lastHeader=-1, lastProduct=-10;
   function record(row,priceLine,nameLine=priceLine,unitLine=priceLine,header=-1) {
     items.push(row);
@@ -283,7 +287,7 @@ function itemsFromLines(lines, trace) {
     const header=productColumns(line);
     if(header){layout=header;lastHeader=i;lastProduct=-10;continue;}
     if(metadata.test(tidyLine(text))){layout=null;lastProduct=-10;continue;}
-    const barcode=barcodeProduct(lines,i);
+    const barcode=barcodeProduct(lines,i,belowNames);
     if(barcode){record(barcode.row,i,i-1,barcode.hasUnit?i+1:i);lastProduct=i;if(barcode.hasUnit)used.add(i+1);continue;}
     const printedId=text.match(itemIdLabel)?.[1];
     if(printedId){
@@ -361,7 +365,7 @@ function neighbouringRows(first,second) {
   const gap=second.y-first.y-first.h;
   return gap>=-Math.max(first.h,second.h) && gap<=Math.min(.06,2.2*Math.max(first.h,second.h));
 }
-const productWords=value=>String(value??'').normalize('NFKC').toLowerCase()
+const productWords=value=>String(value??'').normalize('NFKD').replace(/\p{M}/gu,'').toLowerCase()
   .replace(/[^\p{L}\p{N}]+/gu,' ').trim();
 const codeHeading=/^\s*(?:(?:order|receipt|transaction|ticket|card|style|sku)(?:\s+(?:id|no\.?|number|code))?|member(?:ship)?|barcode|upc|ean|item\s*id)\s*[:#]?\s*$/i;
 function productLabel(text) {
@@ -380,36 +384,61 @@ function clearCode(line,id) {
 }
 // Fill from the photo only when the printed name anchors one purchased line.
 // Ambiguous owners or competing numbers are left for verification and review.
-export function recoverPhotoItemIds(data,ocr) {
+export function recoverPhotoItemIds(data,ocr,corroborateTranscription=true) {
   const items=data?.items, lines=ocr?.lines;
   if(!items?.length || !lines?.length)return data;
-  const prefixes=printedProductPrefixes(lines);
+  const prefixes=printedProductPrefixes(lines), belowNames=barcodesBelowNames(lines);
   const names=items.map(row=>productWords(parsePrintedItemId(row.item)?.item ?? row.item));
+  let layout=null;
   const rows=lines.map(line=>{
     const text=line.text.trim(), label=productLabel(text);
+    if(metadata.test(tidyLine(text)))layout=null;
+    const header=productColumns(line);
+    if(header)layout=header;
+    const typed=layout && !header ? productFromColumns(line,layout) : null;
     const words=' '+productWords(label)+' ';
     const owners=metadata.test(tidyLine(text)) || noProduct.test(text) ? []
       : names.flatMap((name,i)=>name && words.includes(' '+name+' ') ? [i] : []);
-    return {line,label,owners};
+    return {line,label,owners,typed};
   });
+  const hints=items.map(row=>[row.itemId,row.sku,parsePrintedItemId(row.item)?.itemId].filter(Boolean));
   const codes=items.map(()=>new Set());
-  const add=(index,line,id)=>{if(clearCode(line,id))codes[index].add(id);};
-  for(const [i,{line,label,owners}] of rows.entries()){
-    if(owners.length===1){
+  const repeated=new Map();
+  const add=(owners,line,id)=>{
+    if(!id || !owners.length)return;
+    const hinted=owners.filter(index=>hints[index].includes(id));
+    // An exact existing transcription and a matching OCR token corroborate
+    // each other, including a slightly uncertain digit on an otherwise legible row.
+    const matches=hinted.length ? hinted : owners;
+    const supported=clearCode(line,id) || corroborateTranscription && hinted.length && line.words?.some(w=>w.text===id && w.confidence>=.65);
+    if(!supported)return;
+    if(matches.length===1){codes[matches[0]].add(id);return;}
+    // Identical purchases can share an ID. Each occurrence needs its own printed
+    // line. Distinct candidate codes must never be exchanged between tied names.
+    const key=matches.join(',');
+    if(!repeated.has(key))repeated.set(key,{matches,observations:[]});
+    repeated.get(key).observations.push(id);
+  };
+  for(const [i,{line,label,owners,typed}] of rows.entries()){
+    if(owners.length){
       const inline=parsePrintedItemId(label);
-      const code=inline?.itemId ?? prefixes.get(line)?.id;
-      const row=items[owners[0]];
-      if(code && !embeddedModelNumber(row.item,inline,row.sku))add(owners[0],line,code);
+      const code=typed ? typed.itemId || parsePrintedItemId(typed.item)?.itemId : inline?.itemId ?? prefixes.get(line)?.id;
+      if(code)add(owners.filter(index=>!embeddedModelNumber(items[index].item,inline,items[index].sku)),line,code);
       continue;
     }
-    if(owners.length || !isPrintedItemNumber(label) || codeHeading.test(lines[i-1]?.text??''))continue;
+    if(codeHeading.test(lines[i-1]?.text??''))continue;
+    const detail=printedBarcodeDetail(line);
+    const id=detail?.id ?? (isPrintedItemNumber(label) ? label : null);
+    if(!id)continue;
     const before=rows[i-1], after=rows[i+1];
     const previous=before && neighbouringRows(before.line,line) ? before.owners : [];
     const next=after && neighbouringRows(line,after.line) ? after.owners : [];
-    // A number sharing a line with its price follows the product it prices.
-    // A bare number between two different items has no unique owner.
-    const linked=amounts(line.text).length ? previous : [...new Set([...previous,...next])];
-    if(linked.length===1)add(linked[0],line,label);
+    const linked=amounts(line.text).length || detail?.hasQuantityOrPrice || belowNames.has(i) ? previous : [...new Set([...previous,...next])];
+    add(linked,line,id);
+  }
+  for(const {matches,observations} of repeated.values()){
+    if(observations.length===matches.length && new Set(observations).size===1)
+      for(const index of matches) codes[index].add(observations[0]);
   }
   let changed=false;
   const recovered=items.map((row,i)=>{
@@ -429,7 +458,7 @@ export function recoverPhotoItemIds(data,ocr) {
 export function readPrintedProductRows(ocr) {
   const trace=[];
   const items=itemsFromLines(ocr.lines,trace);
-  const recovered=recoverPhotoItemIds({items},ocr).items;
+  const recovered=recoverPhotoItemIds({items},ocr,false).items;
   return recovered.map((item,i)=>({item,...trace[i]}));
 }
 export {amounts as readPrintedAmounts, neighbouringRows as nearbyPrintedRows};
@@ -484,7 +513,7 @@ export function extractLocal(ocr) {
     result[key]=key==='discount' ? Math.abs(value) : value;
   }
   if(totals.size>1) result.fieldIssues.push({field:'total',reason:'conflicting_printed_totals',evidence:'Several labelled totals appear on the photo: '+[...totals].join(' / ')+'.'});
-  result.items=recoverPhotoItemIds({items:itemsFromLines(lines)},ocr).items;
+  result.items=recoverPhotoItemIds({items:itemsFromLines(lines)},ocr,false).items;
   const reference=inspectReference(result,ocr);
   if (reference.status==='found' && !result[reference.kind]) result[reference.kind]=reference.value;
   result.imageQuality=ocr.confidence<.65?'poor':'unknown';

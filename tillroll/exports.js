@@ -1,7 +1,7 @@
 import {orderNeedsReview} from './orders.js?v=lineverify1';
-import {reviewForLine} from './checks.js?v=lineverify1';
+import {reviewForLine} from './checks.js?v=productcodes3';
 import {validateOrderPatterns} from './retail-rules.js?v=6';
-import {parsePrintedItemId} from './product-code.js?v=itemid2';
+import {parsePrintedItemId} from './product-code.js?v=productcodes3';
 import * as zipPackage from './export-vendor/jszip.min.js';
 
 const JSZip = zipPackage.default ?? globalThis.JSZip;

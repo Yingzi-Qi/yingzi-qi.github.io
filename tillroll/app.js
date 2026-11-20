@@ -1,12 +1,12 @@
 import {oldestPurchaseFirst,purchaseDateText} from './receipt-date-display.js?v=8';
 import {inspectReference,combineReferenceReadings} from './reference.js?v=6';
-import {readPhoto,secondReadPhoto,extractLocal,extractAI,reconcileReadings,photoFieldConflicts,recoverPhotoItemIds} from './extract.js?v=lineverify1';
-import {checkReceipt,samePurchase,reviewForLine,verifyImportedItemIds} from './checks.js?v=lineverify1';
-import {exportExcel,exportCSV,readOrderFile,readAchungWorkbook} from './exports.js?v=lineverify1';
-import {loadSamples} from './samples.js?v=6';
+import {readPhoto,secondReadPhoto,extractLocal,extractAI,reconcileReadings,photoFieldConflicts,recoverPhotoItemIds} from './extract.js?v=productcodes3';
+import {checkReceipt,samePurchase,reviewForLine,verifyImportedItemIds} from './checks.js?v=productcodes3';
+import {exportExcel,exportCSV,readOrderFile,readAchungWorkbook} from './exports.js?v=productcodes3';
+import {loadSamples} from './samples.js?v=productcodes3';
 import {compareOrder,orderNeedsReview} from './orders.js?v=lineverify1';
 import {verifyOutputItems} from './item-verification.js?v=lineverify1';
-import {photoVerificationRows} from './verification-photo.js?v=lineverify1';
+import {photoVerificationRows} from './verification-photo.js?v=productcodes3';
 import {captureLineWarnings,classifyVerification,hasVerificationMismatch} from './verification-history.js?v=lineverify1';
 const $ = s=>document.querySelector(s);
 const escape = v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -69,6 +69,9 @@ function verifyFinalOutput(r) {
   r.verification=results.map((result,i)=>{
     const line=classifyVerification(result,r.priorLineChecks[i]);
     const sources=[...new Set(result.fields.map(field=>field.source))];
+    if (!r.data.items[i].itemId && r.data.items[i].sku && line.status==='Not verified') {
+      line.reason='This line has a style/SKU. Verification by item ID needs a separately recorded item ID.';
+    }
     line.source=sources.map(source=>source+' · '+(source==='Receipt photo'?r.filename:orderFilename)).join(' + ');
     return line;
   });
@@ -237,13 +240,18 @@ function receiptStatus(r){
   if(r.orders?.length && r.orders.every(o=>o.status==='Matched'))return badge('Order matched');
   return '';
 }
+function productCodeCell(r,item,path) {
+  if (String(item.itemId??'').trim()) return cell(r,path+'itemId',item.itemId,'Edit item ID');
+  if (String(item.sku??'').trim()) return cell(r,path+'sku','SKU '+item.sku,'Only the style/SKU is recorded. Edit the style/SKU.');
+  return cell(r,path+'itemId','No code','No item ID or style/SKU recorded. Enter an item ID.','no-product-code');
+}
 const amountFormat=new Intl.NumberFormat('en-GB',{minimumFractionDigits:2,maximumFractionDigits:2});
 function itemRow(r,item,i,shared=''){
   const field='items.'+i+'.';
   const price=item.amount==null ? '' : [r.data.currency,amountFormat.format(item.amount)].filter(Boolean).join(' ');
   const check=r.verification?.[i];
   const status=check ? `<button class="line-verification ${hasVerificationMismatch(check)?'line-warning':''}" data-id="${r.id}" data-path="verification.${i}" title="${escape(check.reason)}" aria-label="${escape('Line '+(i+1)+' verification: '+check.status)}">${escape(check.status)}</button>` : '';
-  return `<tr>${shared}<td>${cell(r,field+'brand',item.brand,'Edit brand')}</td><td class="item-id">${cell(r,field+'itemId',item.itemId,'Edit item ID')}</td><td>${cell(r,field+'item',item.item,'Edit item')}${status}</td><td class="money">${cell(r,field+'amount',price,'Line amount including quantity')}</td></tr>`;
+  return `<tr>${shared}<td>${cell(r,field+'brand',item.brand,'Edit brand')}</td><td class="item-id">${productCodeCell(r,item,field)}</td><td>${cell(r,field+'item',item.item,'Edit item')}${status}</td><td class="money">${cell(r,field+'amount',price,'Line amount including quantity')}</td></tr>`;
 }
 function rowHTML(r){
   const open=`<button class="receipt-no" data-id="${r.id}" aria-label="Open receipt ${r.id}">#${r.id}</button>`;
@@ -320,7 +328,7 @@ function removeReceiptLine(r,i){
 }
 async function openDetail(id,path=''){
   const r=batch.find(x=>x.id===Number(id));if(!r)return;
-  const {showDetail}=await import('./detail.js?v=lineverify1');
+  const {showDetail}=await import('./detail.js?v=productcodes3');
   const refresh=()=>{duplicates();render();};
   const rerender=(focus='')=>{refresh();openDetail(r.id,focus).catch(e=>note(e.message));};
   showDetail({...r,data:r.record||r.data},{

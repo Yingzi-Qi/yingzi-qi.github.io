@@ -1,4 +1,4 @@
-import {readPrintedProductRows,readPrintedAmounts,nearbyPrintedRows} from './extract.js?v=lineverify1';
+import {readPrintedProductRows,readPrintedAmounts,nearbyPrintedRows} from './extract.js?v=productcodes3';
 
 const fields=['item','brand','amount','unitPrice','qty','currency'];
 const fold=value=>String(value??'').normalize('NFKC').replace(/\s+/g,' ').trim().toLowerCase();

@@ -1,5 +1,5 @@
 import {orderNeedsReview} from './orders.js?v=lineverify1';
-import {isPrintedItemNumber,parsePrintedItemId} from './product-code.js?v=itemid2';
+import {isPrintedItemNumber,parsePrintedItemId,printedBarcodeDetail,barcodesBelowNames} from './product-code.js?v=productcodes3';
 import {referenceFormat} from './retail-rules.js?v=6';
 import {validCalendarDate} from './purchase-date.js?v=6';
 import {inspectReference} from './reference.js?v=6';
@@ -209,6 +209,7 @@ function codeObservations(lines, groups, items) {
   };
   const nearRow=(a,b)=>a && b && b.y-a.y-a.h<=Math.min(.095,3.2*Math.max(a.h,b.h));
   let layout=null;
+  const belowNames=barcodesBelowNames(lines);
   for (const [i,line] of lines.entries()) {
     if (nonProductLine.test(line.text)) {layout=null;continue;}
     const header=productCodeLayout(line);
@@ -216,8 +217,9 @@ function codeObservations(lines, groups, items) {
     const labels=[...line.text.matchAll(productCodeLabel)];
     const description=codeDescription(line.text);
     const parsed=!labels.length && parsePrintedItemId(description);
-    const bare=isPrintedItemNumber(description) ? description : null;
-    const bareRow=bare && line.text.trim()===bare;
+    const detail=printedBarcodeDetail(line);
+    const bare=detail?.id || (isPrintedItemNumber(description) ? description : null);
+    const bareRow=bare && !belowNames.has(i) && !detail?.hasQuantityOrPrice && !/\d+[.,]\d{2}/.test(line.text);
     const previous=lines[i-1], next=lines[i+1];
     let owner=owners.get(line);
     const previousOwner=nearRow(previous,line) ? owners.get(previous) : undefined;

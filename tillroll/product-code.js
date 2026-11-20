@@ -44,3 +44,45 @@ function edgeEvidence(value,separator) {
   if(isGtin(value))return 'barcode';
   return /[^\s]|\s{2}/.test(separator) ? 'separator' : 'position';
 }
+
+// A barcode detail row can contain a quantity, a currency and a tax marker.
+// Discard low-confidence OCR noise only when identifying this narrow layout.
+export function printedBarcodeDetail(line) {
+  if (!line?.text) return null;
+  const words=line.words?.length ? line.words.filter(word=>word.confidence>=.65)
+    : Number(line.confidence)>=.8 ? [{text:line.text}] : [];
+  const text=words.map(word=>word.text).join(' ').trim();
+  const match=text.match(/^[^\p{L}\p{N}]*?(\d{8}|\d{12,14})(?=\s|$)(.*)$/u);
+  if (!match || !isPrintedItemNumber(match[1]) || !isGtin(match[1])) return null;
+  const rest=match[2].trim();
+  if (rest && !/^(?:(?:\d{1,3}\s+)?(?:[€£$]\s*)?\d+(?:[.,]\d{2})?(?:\s*(?:EUR|USD|GBP|CAD|[€£$]))?(?:\s+[a-z*])?|[a-z*])$/i.test(rest)) return null;
+  return {id:match[1],hasQuantityOrPrice:/\d/.test(rest)};
+}
+
+// Some receipts print every barcode below its description. The last pair ends
+// directly at the purchase summary. This establishes the direction of the block
+// even when OCR misses the price column or one of two repeated item names.
+export function barcodesBelowNames(lines) {
+  const summary=/^(?:(?:sub\s*)?total\b|(?:objets?\s+vendus?|items?\s+sold|number\s+of\s+items)\b)/i;
+  const possibleName=line=>line && /\p{L}{2}/u.test(line.text) &&
+    !notAnItem.test(line.text.trim()) && !summary.test(line.text.trim()) &&
+    !/^(?:style|sku|size|brand|upc|ean|barcode)\s*[:#]/i.test(line.text.trim());
+  const close=(a,b)=>a && b && (!Number.isFinite(a.y) || !Number.isFinite(b.y) ||
+    b.y-a.y-a.h<=Math.min(.07,2.5*Math.max(a.h,b.h)));
+  const details=lines.map(printedBarcodeDetail);
+  const found=new Set();
+  for(let i=1;i+1<lines.length;i++){
+    if(!details[i] || !summary.test(lines[i+1].text.trim().replace(/^[^\p{L}]+/u,'')))continue;
+    const block=[];
+    for(let j=i;j>=1 && details[j] && possibleName(lines[j-1]) && close(lines[j-1],lines[j]);){
+      block.push(j);
+      let previous=j-2;
+      // An unpriced description may have lost its identifier entirely.
+      if(previous>0 && !details[previous] && possibleName(lines[previous]))previous--;
+      if(previous<1 || !close(lines[previous],lines[previous+1]))break;
+      j=previous;
+    }
+    if(block.length>=2)for(const j of block)found.add(j);
+  }
+  return found;
+}

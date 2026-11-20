@@ -47,6 +47,7 @@ button.review-reason{min-height:28px;border-color:transparent;font-weight:500}bu
 .receipt-lines td.money,.receipt-lines thead th:last-child{text-align:right}
 .receipt-lines td.money button{white-space:nowrap}
 .receipt-lines td.item-id button{min-width:15ch}
+.receipt-lines td.item-id .no-product-code{color:var(--muted)}
 .receipt-lines tbody:last-child tr:last-child td,.receipt-lines tbody:last-child [rowspan]{border-bottom:0}
 @media(max-width:640px){
   .receipt-lines,.receipt-lines thead,.receipt-lines tbody{display:block}
