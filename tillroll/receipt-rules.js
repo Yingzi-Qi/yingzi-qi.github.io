@@ -162,10 +162,11 @@ export function brandItemIdCandidate(item) {
 export function readPrintedStyleRef(text) {
   const source = clean(text);
   if (/\d[.,]\d{2}/.test(source)) return null;
-  const match = /^(?:style(?:\s*(?:\/\s*sku|ref(?:erence)?|code|no\.?|number))?|ref(?:erence)?|model(?:\s*(?:no\.?|number|code))?)\s*[:#-]?\s*(.+)$/i.exec(source);
+  const match = /^(?:style(?:\s*(?:\/\s*sku|ref(?:erence)?|code|no\.?|number))?|ref(?:erence)?\.?|model(?:\s*(?:no\.?|number|code))?)\s*[:#-]?\s*(.+)$/i.exec(source);
   if (!match) return null;
   const body = match[1].trim();
   const code = body.split(/\s+(?:[-–—](?:\s*:)?|[·|])\s+/)[0].replace(/[,.;]+$/, '').trim();
+  if (/\s/.test(code) || !/^[A-Za-z0-9]/.test(code)) return null;
   const rest = body.slice(code.length);
   if (rest && !/^\s*(?:[-–—]|[·|])\s+\S+$/.test(rest)) return null;
   if (!code || !/\d/.test(code) || storeInternalCode(code) || eanCode(code) || /^NT[0O1]?\d/i.test(code)) return null;

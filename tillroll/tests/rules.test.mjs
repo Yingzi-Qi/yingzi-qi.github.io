@@ -567,6 +567,14 @@ test('residuals: noisy total, footer lines, zeros, phones, missing items and a b
   assert.equal(shop.data.items[0].qty, 1);
   assert.equal(shop.data.total, 40);
 });
+test('REF does not consume the word Reference', () => {
+  const described = read(['ATELIER', '12/11/2026 11:00', 'Wool hat 25.00', 'Reference: AB4401', 'TOTAL 25.00']);
+  const values = described.data.items[0].identifiers.map(entry => entry.value);
+  assert.ok(values.includes('AB4401'));
+  assert.equal(values.includes('erence'), false);
+  assert.equal(readPrintedStyleRef('Ref.  no 5'), null);
+  assert.equal(readPrintedStyleRef('Ref AB-4401'), 'AB-4401');
+});
 test('identifiers: labels, priority, masks, count and untrusted text', () => {
   assert.equal(new Set(identifierClasses).size, identifierClasses.length);
   const wrapped = read(['ATELIER', '12/11/2026 10:00', 'Wool hat 25.00', 'Serial', 'Number: SN-100', 'TOTAL (1 item) 25.00']);

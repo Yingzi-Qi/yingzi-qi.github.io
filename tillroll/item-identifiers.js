@@ -45,7 +45,7 @@ const labelFinders = [
   {label: 'Item No.', class: 'product_id', re: /\bItem\s+No\.?\s*[:#]?\s*([A-Za-z0-9?][A-Za-z0-9?.-]*)/i},
   {label: 'Style', class: 'style_or_model_reference', re: /\bStyle\s*[:#]?\s*([A-Za-z0-9?][A-Za-z0-9?.-]*)/i},
   {label: 'Model', class: 'style_or_model_reference', re: /\bModel\s*[:#]?\s*([A-Za-z0-9?][A-Za-z0-9?.-]*)/i},
-  {label: 'REF', class: 'style_or_model_reference', re: /\bREF\s*[:#]?\s*([A-Za-z0-9?][A-Za-z0-9?.-]*)/i},
+  {label: 'REF', class: 'style_or_model_reference', re: /\bREF\b(?!erence)\s*[:#]?\s*([A-Za-z0-9?][A-Za-z0-9?.-]*)/i},
   {label: 'Article', class: 'product_id', re: /\bArticle\s*[:#]?\s*([A-Za-z0-9?][A-Za-z0-9?.-]*)/i},
   {label: 'Reference', class: 'style_or_model_reference', re: /\bReference\s*[:#]?\s*([A-Za-z0-9?][A-Za-z0-9?.-]*)/i},
   {label: 'Barcode', class: 'barcode_or_qr', re: /\b(?:Barcode|QR)\s*[:#]?\s*([A-Za-z0-9?][A-Za-z0-9?.-]*)/i},
