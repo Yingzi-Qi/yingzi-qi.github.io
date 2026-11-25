@@ -6,6 +6,7 @@
 // fallback, is Amber, with both values kept on the row.
 
 import { canonicalBrand, fold, normaliseItemId } from './brand-aliases.js';
+import { ITEM_ID_GUARD_NOTE } from './brand-item-ids.js';
 import { resolveSupplier } from './uk-branches.js';
 import {
   AMBER, PINK, buildLookupRequest, canonicalDisplayBrand, distinctKey, fieldLocked,
@@ -104,6 +105,7 @@ function baseFields(row, colour) {
 function noteFor(result) {
   const parts = [];
   if (result.fallbackNote) parts.push(result.fallbackNote);
+  if (result.fields?.['品牌货号']?.note) parts.push(result.fields['品牌货号'].note);
   if (result.reason) parts.push(result.reason);
   for (const mismatch of result.mismatches) {
     parts.push(`${mismatch.field}: receipt “${mismatch.receiptValue}”, official “${mismatch.officialValue}”.`);
@@ -211,6 +213,12 @@ function finish(result, row, { response = null, selection = null, orders = null,
   }
   if (round === 2) result.round2Changed = round2Changed(previous, fields);
   else delete result.round2Changed;
+  if (row.itemIdRejected && result.fields['品牌货号'] && !fieldLocked(row.locks, '品牌货号')) {
+    result.fields['品牌货号'].value = '';
+    result.fields['品牌货号'].flag = 'pink';
+    result.fields['品牌货号'].flagColour = PINK;
+    result.fields['品牌货号'].note = ITEM_ID_GUARD_NOTE;
+  }
   if (!held && row.nameUnresolved && !accepted && !lockedSkip && !fieldLocked(row.locks, '品名')) {
     result.fields['品名'] = cell('品名', printedName, null, { pink: true });
     result.mismatches = result.mismatches.filter(entry => entry.field !== '品名');
