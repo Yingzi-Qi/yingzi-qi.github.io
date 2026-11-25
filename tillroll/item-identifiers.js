@@ -120,7 +120,7 @@ function joinWrapped(lines, index) {
 }
 
 function moneyLine(text) {
-  return /(?:^|\s)(?:[£$€]\s*)?\d{1,3}(?:,\d{3})*[.,]\d{2}\b/.test(text);
+  return /(?:^|\s)(?:[£$€]\s*)?\d+(?:,\d{3})*[.,]\d{2}\b/.test(text);
 }
 
 function productStart(text) {
@@ -135,11 +135,25 @@ function isTotalHeading(text) {
 }
 
 function descriptionFrom(text) {
-  const price = text.search(/(?:^|\s)(?:[£$€]\s*)?\d{1,3}(?:,\d{3})*[.,]\d{2}\b/);
+  const price = text.search(/(?:^|\s)(?:[£$€]\s*)?\d+(?:,\d{3})*[.,]\d{2}\b/);
   const head = price > 0 ? text.slice(0, price) : text;
   return head.replace(/\s+/g, ' ').trim() || null;
 }
 
+function descriptionFromBlock(block) {
+  if (!block) return null;
+  for (const part of block.parts) {
+    const info = /^product\s+info\s*:\s*\d{6,14}\s+(.+)$/i.exec(part.text);
+    if (info && /\p{L}{2}/u.test(info[1])) return info[1].replace(/\s+/g, ' ').trim();
+  }
+  for (const part of block.parts.slice(1)) {
+    if (isUntrustedReceiptText(part.text) || isTotalHeading(part.text) || /^product\s+info\b/i.test(part.text)) continue;
+    if (/^\d{3,14}$/.test(part.text.trim())) continue;
+    if (moneyLine(part.text) && !/\p{L}{3}/u.test(part.text)) continue;
+    if (/\p{L}{3}/u.test(part.text)) return part.text.replace(/\s+/g, ' ').trim();
+  }
+  return null;
+}
 function identifiersOn(line, text, itemDescription) {
   return readLabel(line, text, itemDescription);
 }
@@ -224,15 +238,30 @@ export function applyItemIdentifiers(data, ocr) {
   const lines = ocr?.lines || [];
   const {blocks, identifiers} = segmentItemBlocks(lines);
   let cursor = 0;
-  source.items = (source.items || []).map(item => {
+  const filledIndexes = [];
+  source.items = (source.items || []).map((item, itemIndex) => {
     let index = blocks.findIndex((entry, position) => position >= cursor && sameName(item.item, entry.itemDescription));
     if (index < 0 && cursor < blocks.length) index = cursor;
     const block = index >= 0 ? blocks[index] : null;
     if (index >= 0) cursor = index + 1;
     const list = block?.identifiers || [];
     const primary = choosePrimary(list);
-    return {...item, identifiers: list, primaryItemId: primary.value, primaryItemIdReason: primary.reason};
+    const next = {...item, identifiers: list, primaryItemId: primary.value, primaryItemIdReason: primary.reason};
+    if (!next.item) {
+      const filled = descriptionFromBlock(block);
+      if (filled) {
+        next.item = filled;
+        filledIndexes.push(itemIndex);
+      }
+    }
+    return next;
   });
+  if (filledIndexes.length) {
+    source.fieldIssues = (source.fieldIssues || []).filter(issue => {
+      const match = /^items\.(\d+)\.item$/.exec(issue.field || '');
+      return !(match && issue.reason === 'item_name_missing' && filledIndexes.includes(Number(match[1])));
+    });
+  }
   source.identifiers = identifiers;
   source.itemCountCheck = itemCountCheck(lines, source.items);
   if (source.card) source.card = maskCardField(source.card);

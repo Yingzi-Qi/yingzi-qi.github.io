@@ -152,8 +152,9 @@ function findMerchant(lines, text) {
     const sign=signs.find(([pattern])=>pattern.test(line));
     if(sign)return sign[1];
   }
-  const city=/^(?:london|paris|manchester|edinburgh|glasgow|dublin|birmingham|bristol|leeds|liverpool|cambridge|oxford|chelsea|mayfair|knightsbridge|westminster|soho)$/i;
-  return lines.slice(0,4).map(l => l.text.trim()).find(line => /\p{L}/u.test(line) && line.length >= 3 && !city.test(line) && !/\d|receipt|invoice|thank you|order (id|no|confirmation)|welcome|telephone|register|subtotal|^date\b/i.test(line)) || null;
+  const place=/^(?:london|paris|manchester|edinburgh|glasgow|dublin|birmingham|bristol|leeds|liverpool|cambridge|oxford|chelsea|mayfair|knightsbridge|westminster|soho|england|scotland|wales|great britain|united kingdom|uniled kingdom|united kingdon|u\.?k\.?)$/i;
+  const address=line=>/\b(?:street|st\.?|road|rd\.?|avenue|ave\.?|lane|ln\.?|square|place|drive|terrace|gardens|wharf|broadway)\b/i.test(line) || /\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b/i.test(line);
+  return lines.slice(0,6).map(l => l.text.trim()).find(line => /\p{L}/u.test(line) && line.length >= 3 && !place.test(line) && !address(line) && !/\d|receipt|invoice|thank you|order (id|no|confirmation)|welcome|telephone|register|subtotal|^date\b/i.test(line)) || null;
 }
 const refLabels = {orderNumber:/\border\s*(?:number|no\.?|#)/i, orderId:/\border\s*i\.?d\.?\b/i};
 function references(lines, receipt) {
@@ -223,6 +224,7 @@ function nearbyCodedPrices(lines,i,currency) {
 }
 function barcodeProduct(lines,i,belowNames) {
   const line=lines[i], prev=lines[i-1], next=lines[i+1];
+  if(serviceName(prev?.text) || serviceName(line.text))return null;
   if(!possibleLabel(prev) || !neighbouringRows(prev,line))return null;
   const detail=printedBarcodeDetail(line);
   const printed=codedPrice(line);
@@ -397,10 +399,19 @@ function parseHarrodsItem(label) {
   if(!/\p{L}/u.test(rest)) return null;
   return {concessionCode:match[1], internalCode:match[2], styleRef, item:rest};
 }
+function codeOnly(text) {
+  return /^(?:0+\d+|\d{3,14})$/.test(String(text??'').trim());
+}
+function serviceName(text) {
+  const cleaned=String(text??'').replace(/^[^\p{L}\p{N}]+/u,'').replace(/^(?:0+\d+|\d{3,14})\s+/u,'').trim();
+  const match=/^(by\s+appointment|carrier\s+bag)\b/i.exec(cleaned);
+  if(!match) return null;
+  return match[1].replace(/\s+/g, ' ');
+}
 function itemsFromLines(lines, trace, receiptTotal=null) {
   const items=[]; const used=new Set(), inlineSuffixes=new Map();
   const prefixes=printedProductPrefixes(lines), belowNames=barcodesBelowNames(lines);
-  let layout=null, lastHeader=-1, lastProduct=-10, pastTotal=false, skipCashier=false;
+  let layout=null, lastHeader=-1, lastProduct=-10, pastTotal=false, skipCashier=false, paymentBlock=false;
   function record(row,priceLine,nameLine=priceLine,unitLine=priceLine,header=-1) {
     if(row.qty==null) row.qty=1;
     items.push(row);
@@ -426,7 +437,12 @@ function itemsFromLines(lines, trace, receiptTotal=null) {
       }
       continue;
     }
-    if(isPaymentFooter(text) || isUnitMarker(text))continue;
+    if(isPaymentFooter(text) || isUnitMarker(text) || maskedDigitsOnly(text) || /^(?:visa|master\s*card|maestro|amex|american\s+express|union\s*pay|alipay|we\s*chat|cash|citcon|adyen)\b/i.test(tidyLine(text))){paymentBlock=true;continue;}
+    if(paymentBlock && receiptTotal!=null){
+      const echoed=amounts(text);
+      const head=echoed.length?text.slice(0,echoed[0].start):text;
+      if(echoed.length===1 && Math.abs(echoed[0].value-receiptTotal)<.02 && !/\p{L}{3}/u.test(head))continue;
+    }
     const repeatedTotal=receiptTotal!=null && /^(?:balance\s+(?:due|to\s+pay|paid)|amount\s+(?:due|paid)|visa|master\s*card|maestro|amex|union\s*pay|alipay|we\s*chat|cash|citcon|adyen|contactless|arqc)\b/i.test(tidyLine(text)) && amounts(text).some(price=>Math.abs(price.value-receiptTotal)<.02);
     if(repeatedTotal){pastTotal=true;continue;}
     if(pastTotal){if(!footerSaving(text))continue;}
@@ -486,7 +502,12 @@ function itemsFromLines(lines, trace, receiptTotal=null) {
     if(printedCurrency.test(label))continue;
     // "_ 2574 By Appointment 0.00": drop the leading mark and stray digits so the zero line still parses.
     if(final.value===0){
-      label=label.replace(/^[^\p{L}\p{N}]+/u,'').replace(/^\d{3,10}\s+(?=\p{L})/u,'').trim();
+      const service=serviceName(label) || serviceName(lines[i-1]?.text) || serviceName(lines[i+1]?.text);
+      if(service){
+        label=service;
+        if(codeOnly(lines[i-1]?.text) || (serviceName(lines[i-1]?.text) && !amounts(lines[i-1].text).length))used.add(i-1);
+        if(codeOnly(lines[i+1]?.text) || (serviceName(lines[i+1]?.text) && !amounts(lines[i+1].text).length))used.add(i+1);
+      } else label=label.replace(/^[^\p{L}\p{N}]+/u,'').replace(/^(?:0+\d+|\d{3,14})\s+(?=\p{L})/u,'').trim();
     }
     const between=prices.length>1 ? text.slice(prices[0].end, final.start) : '';
     const mergedSaving=prices.length>1 && prices[0].value>0 && final.value<0 && discountWording.test(between);
@@ -579,7 +600,9 @@ function foldLineDiscounts(items,trace) {
     const qty=product?.qty ?? 1, unit=product?.unitPrice;
     const discount=run.reduce((sum,row)=>sum-row.amount,0);
     const balances=product && unit!=null && product.amount!=null && product.amount>0 && Math.abs(qty*unit-discount-product.amount)<=.015;
-    if(!balances){i=start-1;continue;}
+    // A Rewards Saving printed on the next line belongs to that product. The product price stays as printed.
+    const underProduct=product && product.amount>0 && run.every(row=>/\brewards\s+saving\b/i.test(row.item||''));
+    if(!balances && !underProduct){i=start-1;continue;}
     applyLineDiscounts(product, discountEntries(run));
     items.splice(start,run.length);
     trace?.splice(start,run.length);
@@ -675,7 +698,7 @@ export function recoverPhotoItemIds(data,ocr,corroborateTranscription=true) {
     if(owners.length){
       const inline=parsePrintedItemId(label);
       const code=typed ? typed.itemId || parsePrintedItemId(typed.item)?.itemId : inline?.itemId ?? prefixes.get(line)?.id;
-      if(code)add(owners.filter(index=>!embeddedModelNumber(items[index].item,inline,items[index].sku)),line,code);
+      if(code)add(owners.filter(index=>!serviceName(items[index].item) && !embeddedModelNumber(items[index].item,inline,items[index].sku)),line,code);
       continue;
     }
     if(codeHeading.test(lines[i-1]?.text??''))continue;
@@ -686,7 +709,7 @@ export function recoverPhotoItemIds(data,ocr,corroborateTranscription=true) {
     const previous=before && neighbouringRows(before.line,line) ? before.owners : [];
     const next=after && neighbouringRows(line,after.line) ? after.owners : [];
     const linked=amounts(line.text).length || detail?.hasQuantityOrPrice || belowNames.has(i) ? previous : [...new Set([...previous,...next])];
-    add(linked,line,id);
+    add(linked.filter(index=>!serviceName(items[index].item)),line,id);
   }
   for(const {matches,observations} of repeated.values()){
     if(observations.length===matches.length && new Set(observations).size===1)

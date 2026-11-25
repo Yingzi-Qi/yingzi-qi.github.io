@@ -119,9 +119,10 @@ export function toPaymentMethod(value) {
   if (/\b(?:union\s*pay|china\s+union\s*pay|\bcup\b)\b|银联/i.test(text)) return {method: 'UnionPay', reason: null};
   if (/\balipay\b|支付宝/i.test(text)) return {method: 'Alipay', reason: null};
   if (/\b(?:we\s*chat(?:\s*pay)?|weixin(?:\s*pay)?)\b|微信/i.test(text)) return {method: 'WeChat', reason: null};
-  if (/\b(?:gift\s*card|gift\s*voucher|cash|apple\s*pay|google\s*pay|samsung\s*pay|pay\s*pal|klarna)\b/i.test(text))
+  if (/\b(?:gift\s*card|gift\s*voucher|cash|pay\s*pal|klarna)\b/i.test(text))
     return {method: null, reason: 'The tender “' + text + '” is not UnionPay, Card, Alipay or WeChat.'};
-  if (paymentMethodNames.get(loose(text)) === 'Card' || /\b(?:visa|master\s*card|maestro|amex|american\s+express|discover|jcb|diners|carte\s+(?:bleue|bancaire)|\bcb\b|credit\s+card|debit\s+card|contactless|chip(?:\s*(?:&|and)\s*pin)?|eftpos)\b/i.test(text))
+  // A wallet with no card scheme is still a card payment. Cash and gift cards stay null.
+  if (paymentMethodNames.get(loose(text)) === 'Card' || /\b(?:visa|master\s*card|maestro|amex|american\s+express|discover|jcb|diners|carte\s+(?:bleue|bancaire)|\bcb\b|credit\s+card|debit\s+card|contactless|chip(?:\s*(?:&|and)\s*pin)?|eftpos|apple\s*pay|google\s*pay|g\s*pay|samsung\s*pay)\b/i.test(text))
     return {method: 'Card', reason: null};
   return {method: null, reason: 'The tender “' + text + '” is not UnionPay, Card, Alipay or WeChat.'};
 }

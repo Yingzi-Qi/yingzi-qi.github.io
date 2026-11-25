@@ -4,6 +4,7 @@ import {readPhoto,secondReadPhoto,extractLocal,extractAI,reconcileReadings,photo
 import {checkReceipt,samePurchase,reviewForLine,verifyImportedItemIds} from './checks.js?v=discounts1';
 import {normalizeReading} from './extract.js?v=discounts1';
 import {normalizePurchaseTime,confirmedStoreReceiptId} from './receipt-rules.js?v=1';
+import {batchDateFlags} from './date-sanity.js?v=1';
 import {exportExcel,exportCSV,readOrderFile,readAchungWorkbook,readTillrollEdits} from './exports.js?v=policy1';
 import {planWorkbookRefresh,restoreWorkbookReceipts,nextWorkbookBaseline,withLegacyWorkbookBaseline,nextLegacyWorkbookBaseline} from './workbook-refresh.js?v=2';
 import {bindExcelRefresh} from './excel-refresh-ui.js?v=1';
@@ -105,6 +106,7 @@ function evaluate(r, fillMissing=false) {
   if (!r.data) return;
   evaluateReceipt(r,fillMissing);
   if (r.priorLineChecks) verifyFinalOutput(r);
+  applyBatchDateSanity();
 }
 
 function evaluateReceipt(r,fillMissing){
@@ -179,7 +181,22 @@ function startInput(entries, useSaved=savedSamples){
   }
   filter='all';render();pump();
 }
-function pump(){while(nowReading<2 && queue.length){const r=queue.shift();if(r.generation!==generation)continue;nowReading++;run(r).finally(()=>{nowReading--;if(!queue.length&&!batch.some(notDone))finishedTime=Date.now();render();pump();});}}
+function applyBatchDateSanity(){
+  if(batch.some(notDone))return;
+  const flags=batchDateFlags(batch.filter(r=>r.data).map(r=>({
+    id:r.id, date:r.data.date,
+    humanVerifiedUnflagged:[...(r.ack||[])].some(key=>String(key).startsWith('purchaseTime')) ? ['purchaseTime'] : [],
+  })), {uploadTime:new Date()});
+  const byId=new Map(flags.map(flag=>[flag.id, flag]));
+  for(const r of batch){
+    if(!r.review?.flags)continue;
+    r.review.flags=r.review.flags.filter(flag=>flag.source!=='batch-date');
+    const flag=byId.get(r.id);
+    if(!flag || [...(r.ack||[])].some(key=>String(key).startsWith('purchaseTime')))continue;
+    r.review.flags.push({field:'purchaseTime', message:flag.message, severity:'check', escalate:true, category:'reading', source:'batch-date'});
+  }
+}
+function pump(){while(nowReading<2 && queue.length){const r=queue.shift();if(r.generation!==generation)continue;nowReading++;run(r).finally(()=>{nowReading--;if(!queue.length&&!batch.some(notDone)){finishedTime=Date.now();applyBatchDateSanity();}render();pump();});}}
 async function fingerprint(file){const b=new Uint8Array(await crypto.subtle.digest('SHA-256',await file.arrayBuffer()));return Array.from(b,n=>n.toString(16).padStart(2,'0')).join('');}
 async function run(r){
   const begun=performance.now();const current=()=>r.generation===generation&&batch.includes(r);const {mode:chosenMode,key:chosenKey}=r.readerSettings;delete r.readerSettings;

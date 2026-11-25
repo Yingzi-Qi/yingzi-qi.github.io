@@ -526,7 +526,7 @@ const readerIssueMessages = {
   receipt_id_pass_conflict:'receipt id pass conflict',
   payment_method:'Payment method must be UnionPay, Card, Alipay or WeChat',
   unreadable_price:'The price is not a number',
-  item_name_missing:'The item line is only a brand or a code',
+  item_name_missing:'item-name-missing',
 };
 
 // A line amount must be printed on the item's own row or its short detail block.
@@ -602,7 +602,8 @@ export function checkReceipt(data, ocr, previous = null, {independentPhoto = fal
 
   items.forEach((item,i) => {
     const path = 'items.'+i+'.';
-    if (!text(item.item)) add(path+'item',text(item.sku) ? 'Only the product code was read.' : 'Item description is missing.', 'fix');
+    const nameMissing=(data.fieldIssues||[]).some(issue=>issue.field===path+'item' && issue.reason==='item_name_missing');
+    if (!text(item.item)) add(path+'item', nameMissing ? 'item-name-missing' : (text(item.sku) ? 'Only the product code was read.' : 'Item description is missing.'), 'fix');
     else if ((text(item.sku) && name(item.item) === name(item.sku)) || /^(?:\d{4,}|[A-Z]{1,6}[-/.]?\d{3,}[A-Z0-9]*(?:[-/.][A-Z0-9]+)*)$/i.test(text(item.item)))
       add(path+'item','The item description looks like a product code.', 'check');
     const blocked = text(item.item) && nonItemName(item.item);
@@ -642,7 +643,7 @@ export function checkReceipt(data, ocr, previous = null, {independentPhoto = fal
   }
   for (const issue of Array.isArray(data.fieldIssues) ? data.fieldIssues : []) {
     const field = text(issue?.field);
-    if (!/^(merchant|orderId|orderNumber|receiptReference|date|time|payment|total|items\.\d+\.(item|amount|itemId|sku))$/.test(field) || issue.reason === 'missing_on_receipt') continue;
+    if (!/^(merchant|orderId|orderNumber|receiptReference|date|time|payment|total|items\.\d+\.(item|amount|itemId|sku))$/.test(field) || issue.reason === 'missing_on_receipt' || issue.reason === 'item_name_missing') continue;
     const known = readerIssueMessages[issue.reason];
     if (known) {
       add(field, known + (issue.evidence ? '. '+text(issue.evidence) : '.'), issue.reason === 'rejected_code' || issue.reason === 'channel_not_tender' ? 'fix' : 'check');

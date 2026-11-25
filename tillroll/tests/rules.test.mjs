@@ -169,7 +169,11 @@ test('payment method: four exact values, UnionPay before card, other tenders are
     'contactless': 'Card', 'chip & pin': 'Card', 'CUP': 'UnionPay', 'China UnionPay card': 'UnionPay',
     'Alipay': 'Alipay', 'WeChat Pay': 'WeChat', 'Weixin': 'WeChat',
   })) assert.equal(toPaymentMethod(value).method, method, value);
-  for (const value of ['Cash', 'Gift card', 'Apple Pay', '']) assert.equal(toPaymentMethod(value).method, null, value);
+  for (const value of ['Cash', 'Gift card', '']) assert.equal(toPaymentMethod(value).method, null, value);
+  assert.equal(toPaymentMethod('Apple Pay').method, 'Card');
+  assert.equal(toPaymentMethod('Apple Pay').reason, null);
+  assert.equal(toPaymentMethod('Google Pay').method, 'Card');
+  assert.equal(toPaymentMethod('Samsung Pay').method, 'Card');
   assert.equal(dropCardDigits('VISA ****1234'), 'VISA');
   assert.equal(dropCardDigits('Mastercard ending 4242'), 'Mastercard');
   const visa = cleanReceipt({payment: 'VISA ****4242', items: []});
@@ -181,6 +185,10 @@ test('payment method: four exact values, UnionPay before card, other tenders are
   assert.equal(cash.data.paymentMethod, null);
   const cashFlags = flagsFor(cash.review, 'payment');
   assert.ok(cashFlags.some(f => /UnionPay, Card, Alipay or WeChat/i.test(f.message) && flagCategory(f) === 'reading'));
+  const wallet = read(['Corner Shop', '12/11/2026 10:00', 'Soap 4.00', 'TOTAL 4.00', 'Apple Pay']);
+  assert.equal(wallet.data.payment, 'Apple Pay');
+  assert.equal(wallet.data.paymentMethod, 'Card');
+  assert.equal(flagsFor(wallet.review, 'payment').some(f => /UnionPay, Card, Alipay or WeChat/i.test(f.message)), false);
   const union = read(['Corner Shop', '12/11/2026 10:00', 'Soap 4.00', 'TOTAL 4.00', 'CUP']);
   assert.equal(union.data.payment, 'UnionPay');
   assert.equal(union.data.paymentMethod, 'UnionPay');
@@ -241,19 +249,15 @@ test('line discount: qty 3 stays one raw line', () => {
   assert.equal(data.items[0].lineDiscount, 1);
   assert.equal(data.items[0].lineDiscountLabel, 'Offer');
 });
-test('line discount: an untied discount stays raw and is flagged, not moved to the receipt', () => {
-  const {data, review} = read(['MAC', 'Date 12/11/2026 11:03', 'Foundation 1 45.00 40.00', 'Rewards Saving -10.00', 'TOTAL 40.00']);
-  assert.equal(data.receiptDiscount, null);
-  assert.deepEqual(data.receiptDiscounts, []);
-  assert.equal(data.items.length, 2);
-  assert.equal(data.items[0].qty, 1);
-  assert.equal(data.items[0].unitPrice, 45);
+test('line discount: Rewards Saving under a product stays on that line', () => {
+  const {data} = read(['MAC', 'Date 12/11/2026 11:03', 'Foundation 1 45.00 40.00', 'Rewards Saving -10.00', 'TOTAL 40.00']);
+  assert.equal(data.items.length, 1);
+  assert.equal(data.items[0].item, 'Foundation 1');
   assert.equal(data.items[0].amount, 40);
-  assert.equal(data.items[0].lineDiscount, null);
-  assert.equal(data.items[1].item, 'Rewards Saving');
-  assert.equal(data.items[1].amount, -10);
-  const flags = review.flags.filter(f => /discount line unclear/i.test(f.message));
-  assert.ok(flags.length && flags.every(f => flagCategory(f) === 'reading'));
+  assert.equal(data.items[0].unitPrice, 45);
+  assert.equal(data.items[0].lineDiscount, 10);
+  assert.equal(data.items[0].lineDiscountLabel, 'Rewards Saving');
+  assert.equal(data.receiptDiscount, null);
 });
 test('receipt discount: a basket promo is not allocated across items', () => {
   const {data, review} = read(['LIBERTY', 'Date 12/11/2026 11:03', 'Silk scarf 50.00', 'Wool hat 40.00', 'Basket promo -10.00', 'TOTAL 80.00', 'Visa']);
@@ -512,7 +516,9 @@ test('field sorter: Dior description, brand-only line, Gucci style and a bad pri
   assert.equal(mens.data.items[0].brand, 'Dior');
   assert.equal(mens.data.items[0].item, null);
   const mensFlags = flagsFor(mens.review, 'items.0.item');
-  assert.ok(mensFlags.length && mensFlags.every(flag => flagCategory(flag) === 'reading'));
+  assert.equal(mensFlags.length, 1);
+  assert.equal(mensFlags[0].message, 'item-name-missing');
+  assert.equal(flagCategory(mensFlags[0]), 'reading');
   const belt = read(['SHOP', '12/11/2026 16:00', 'Gucci Belt GG1234 450.00', 'TOTAL 450.00']);
   assert.equal(belt.data.items[0].brand, 'Gucci');
   assert.equal(belt.data.items[0].item, 'Belt');
@@ -607,6 +613,35 @@ test('identifiers: labels, priority, masks, count and untrusted text', () => {
   assert.equal(JSON.stringify(injected.data).includes('evil.example'), false);
   assert.equal(JSON.stringify(injected.data).includes('HACKED'), false);
   assert.equal(injected.data.items[0].brandItemId, plain.data.items[0].brandItemId);
+});
+test('addendum: brand description, savings, footer amount, zero lines, merchant and brands', () => {
+  const described = read(['HARRODS', '12/11/2026 14:03 NT04567-333111',
+    '2469 9999991234 Christian Dior 1234.00', 'NAVY CREW 38', 'TOTAL GBP 1234.00']);
+  assert.equal(described.data.items[0].brand, 'Dior');
+  assert.equal(described.data.items[0].item, 'NAVY CREW 38');
+  assert.equal(described.data.items[0].amount, 1234);
+  const saving = read(['SHOP', '12/11/2026 12:00', 'Wool scarf 80.00', 'Rewards Saving -8.00', 'TOTAL 80.00']);
+  assert.equal(saving.data.items.length, 1);
+  assert.equal(saving.data.items[0].item, 'Wool scarf');
+  assert.equal(saving.data.items[0].amount, 80);
+  assert.equal(saving.data.items[0].lineDiscount, 8);
+  assert.equal(saving.data.items[0].lineDiscountLabel, 'Rewards Saving');
+  const footer = read(['SHOP', '12/11/2026 12:10', 'Silk scarf 18.00', 'Visa Tendered', '18.00', 'AID A00001', 'AUTH CODE 445566', 'TOTAL GBP 18.00']);
+  assert.deepEqual(footer.data.items.map(row => row.item), ['Silk scarf']);
+  assert.equal(footer.data.total, 18);
+  const above = read(['HARRODS', '12/11/2026 12:20 NT04567-333112', 'Silk scarf 18.00', '000123456', 'By Appointment 0.00', 'TOTAL GBP 18.00']);
+  const below = read(['HARRODS', '12/11/2026 12:21 NT04567-333113', 'Silk scarf 18.00', 'By Appointment', '0000123456 0.00', 'TOTAL GBP 18.00']);
+  const padded = read(['HARRODS', '12/11/2026 12:22 NT04567-333114', 'Silk scarf 18.00', '0000123456 By Appointment 0.00', 'TOTAL GBP 18.00']);
+  for (const sample of [above, below, padded]) {
+    assert.deepEqual(sample.data.items.map(row => row.item), ['Silk scarf']);
+    assert.equal(sample.data.excludedZeroItems.some(row => row.item.item === 'By Appointment'), true);
+  }
+  const shop = read(['Uniled Kingdom', 'London', '12 High Street', 'N.PEAL', '12/11/2026 15:04', 'Cashmere scarf 40.00', 'TOTAL 40.00']);
+  assert.equal(shop.data.merchant, 'N.PEAL');
+  assert.equal(sortItemFields({item: 'Miu Miu Bag', amount: 10}).item.brand, 'Miu Miu');
+  assert.equal(sortItemFields({item: 'YCA Necklace', amount: 10}).item.brand, 'Van Cleef & Arpels');
+  assert.equal(sortItemFields({item: 'VCA Necklace', amount: 10}).item.item, 'Necklace');
+  assert.equal(sortItemFields({item: 'Bulgari Ring', amount: 10}).item.brand, 'Bulgari');
 });
 test('Gemini reading: the store rule replaces a generic Harrods id', () => {
   const ocr = makeOcr(['HARRODS', '12/11/2026 14:03 NT01234-567890', 'Scarf 20.00', 'TOTAL GBP 20.00']);
