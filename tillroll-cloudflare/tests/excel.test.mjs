@@ -972,8 +972,8 @@ test('a receipt price within max(2% of price, £5) of the official price is not 
 test('an official look-up name that contains the brand keeps its Amber and is not Name needs checking', async () => {
   const env = makeEnv();
   const rows = {
-    CIGALE: { brand: 'Dior', officialName: 'Mini Dior Cigale Bag, sand', price: 400 },
-    CH25BAG: { brand: 'Chanel', officialName: 'Chanel 25 mini handbag, grained calfskin & silver metal', price: 800 },
+    CIGALE: { brand: 'Dior', officialName: 'Dior Aurora folio, sage', price: 400 },
+    CH25BAG: { brand: 'Chanel', officialName: 'Chanel Meridian satchel, slate', price: 800 },
   };
   const lookup = async (_env, body) => {
     const hit = rows[body.itemId];
@@ -994,11 +994,11 @@ test('an official look-up name that contains the brand keeps its Amber and is no
   const dior = result.agreedRows.find(r => r.rowId === 'off-dior');
   const chanel = result.agreedRows.find(r => r.rowId === 'off-chanel');
   const plain = result.agreedRows.find(r => r.rowId === 'off-plain');
-  assert.equal(dior.cells['品名'], 'Mini Dior Cigale Bag, sand');
+  assert.equal(dior.cells['品名'], 'Dior Aurora folio, sage');
   assert.equal(dior.flags['品名'], AMBER);
   assert.doesNotMatch(String(dior.flagReasons['品名'] || ''), /Name needs checking/);
   assert.doesNotMatch(String(dior.exportMeta.comments['品名'] || ''), /Name needs checking/);
-  assert.equal(chanel.cells['品名'], 'Chanel 25 mini handbag, grained calfskin & silver metal');
+  assert.equal(chanel.cells['品名'], 'Chanel Meridian satchel, slate');
   assert.equal(chanel.flags['品名'], AMBER);
   assert.doesNotMatch(String(chanel.flagReasons['品名'] || ''), /Name needs checking/);
   assert.equal(plain.cells['品名'], 'Dior tote');

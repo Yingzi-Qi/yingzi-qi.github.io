@@ -50,7 +50,7 @@ export function mockFetch(catalogue, calls = { brave: 0, gemini: 0 }) {
 }
 export const CATALOGUE = [
   { brand: 'Chanel', officialName: 'Classic Flap Mini Bag', itemId: 'A69900', price: 4950, currency: 'GBP', url: 'https://www.chanel.com/gb/fashion/p/A69900/' },
-  { brand: 'Van Cleef & Arpels', officialName: 'Vintage Alhambra pendant', itemId: '0012345', price: 3600, currency: 'GBP', url: 'https://www.vancleefarpels.com/gb/en/0012345.html' },
+  { brand: 'Van Cleef & Arpels', officialName: 'Vintage Laurel pendant', itemId: '0012345', price: 3600, currency: 'GBP', url: 'https://www.vancleefarpels.com/gb/en/0012345.html' },
   { brand: 'Gucci', officialName: 'GG Marmont mini bag', itemId: '446744', price: 1350, currency: 'GBP', weightGrams: 410, url: 'https://www.gucci.com/uk/en_gb/pr/446744' },
   { brand: 'Gucci', officialName: 'Horsebit 1955 mini bag', itemId: '658574', price: 1350, currency: 'GBP', weightGrams: 380, url: 'https://www.gucci.com/uk/en_gb/pr/658574' },
   { brand: 'Gucci', officialName: 'Fake reseller listing', itemId: '999999', price: 100, currency: 'GBP', url: 'https://www.some-reseller.example/gucci-999999' },
