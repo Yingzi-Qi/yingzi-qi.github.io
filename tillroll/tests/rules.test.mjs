@@ -29,6 +29,14 @@ test('time: 24-hour HH:MM:SS, seconds default to :00, am/pm converted', () => {
   assert.equal(normalizePurchaseTime('13:10 pm'), null);
   assert.equal(normalizePurchaseTime(''), null);
 });
+test('boutique header: brand before a city, dotted time, and receipt number', () => {
+  const shop = read(['THE ROW / PARIS', '15/11/2026 14.03', 'Wool coat 80.00', 'Receipt # TR-9', 'TOTAL 80.00']);
+  assert.equal(shop.data.merchant, 'THE ROW');
+  assert.equal(shop.data.time, '14:03:00');
+  assert.equal(shop.data.date, '2026-11-15');
+  assert.equal(shop.data.receiptReference, 'TR-9');
+  assert.equal(shop.data.items[0].item, 'Wool coat');
+});
 test('time: read from the dated line, not opening hours', () => {
   const {time} = readPurchaseTime('Open 10:00 - 21:00\nDate 12/11/2026 2:15 PM\nTOTAL 34.00');
   assert.equal(time, '14:15:00');

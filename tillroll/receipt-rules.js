@@ -47,6 +47,16 @@ export function readPurchaseTime(text) {
       candidates.push({time, printed: m[0].trim(), score: dated ? 2 : 1, line: i});
     }
   }
+  const dotted = /(?<![\d.])([01]?\d|2[0-3])\.([0-5]\d)(?:\.([0-5]\d))?(?![\d.])/g;
+  for (const [i, line] of lines.entries()) {
+    if (!/\d{1,4}[-/.]\d{1,2}[-/.]\d{2,4}|\b(?:date|time|heure|datum|zeit)\b/i.test(line)) continue;
+    if (/\b(?:expir|valid|return|open(?:ing)?|hours|ouvert|horaires)\w*/i.test(line)) continue;
+    for (const match of line.matchAll(dotted)) {
+      const hour = Number(match[1]), minute = Number(match[2]), second = match[3] == null ? 0 : Number(match[3]);
+      if (hour > 23 || minute > 59 || second > 59) continue;
+      candidates.push({time: pad(hour) + ':' + pad(minute) + ':' + pad(second), printed: match[0], score: 2, line: i});
+    }
+  }
   if (!candidates.length) return {time: null, issue: null};
   // 00:00 is a blank clock. A real printed time on the same receipt replaces it.
   const printedTimes = candidates.filter(c => c.time !== '00:00:00');

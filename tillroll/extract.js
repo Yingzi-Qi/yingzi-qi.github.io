@@ -138,6 +138,11 @@ function findMerchant(lines, text) {
   for (const name of retailers) { const seen = text.match(name); if (seen) return seen[0]; }
   const top=lines.slice(0,4).map(line=>line.text.trim()).find(line=>/\bN\.?\s*PEAL\b/i.test(line) && /\/|\blondon\b/i.test(line));
   if(top) return 'N.Peal';
+  const city=/^(?:london|paris|manchester|edinburgh|glasgow|dublin|birmingham|bristol|leeds|liverpool|cambridge|oxford|chelsea|mayfair|knightsbridge|westminster|soho|england|scotland|wales|great britain|united kingdom)$/i;
+  for (const line of lines.slice(0, 6)) {
+    const parts = line.text.split(/\s*\/\s*/);
+    if (parts.length === 2 && city.test(parts[1].trim()) && /\p{L}{2}/u.test(parts[0])) return parts[0].trim();
+  }
   const header=[];
   for(const line of lines.slice(0,8)) {
     if(/\breceipt\b|\bsale transaction\b|\b(?:sub)?total\b|\d[.,]\d{2}\b/i.test(line.text))break;
