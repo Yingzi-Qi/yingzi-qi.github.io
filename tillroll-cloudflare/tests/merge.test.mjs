@@ -144,13 +144,15 @@ test('one Reading History control and dialog; server-backed with local fallback'
   const html = readFileSync(new URL('../../tillroll/index.html', import.meta.url), 'utf8');
   const app = readFileSync(new URL('../../tillroll/app.js', import.meta.url), 'utf8');
   const v2js = readFileSync(new URL('../../tillroll/v2.js', import.meta.url), 'utf8');
+  const dialog = readFileSync(new URL('../../tillroll/history-dialog.js', import.meta.url), 'utf8');
   assert.equal((html.match(/id="history"/g) || []).length, 1);
   assert.equal((html.match(/<dialog id="history-dialog"/g) || []).length, 1);
-  assert.ok(!/v2-history|landing-history/.test(html + app + v2js));
+  assert.ok(!/v2-history|landing-history/.test(html + app + v2js + dialog));
   assert.match(html, /id="history-server-list"/);
   assert.match(html, /href="\.\/reading-policy\.html"/);
   assert.match(v2js, /serverHistory,/);
-  assert.match(app, /window\.tillrollV2Hooks\?\.serverHistory/);
+  assert.match(app, /from '\.\/history-dialog\.js\?v=merge1'/);
+  assert.match(dialog, /window\.tillrollV2Hooks\?\.serverHistory/);
   for (const v of ['style.css?v=merge1', 'v2.css?v=merge1', 'app.js?v=merge1', 'v2.js?v=merge1']) assert.ok(html.includes(v), v);
 });
 

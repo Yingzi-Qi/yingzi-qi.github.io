@@ -1,1 +1,11 @@
-{"name":"tillroll-v2","private":true,"type":"module","scripts":{"test":"node --test tests/*.test.mjs"}}
+{
+  "name": "tillroll-v2",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "^31.0.1"
+  }
+}

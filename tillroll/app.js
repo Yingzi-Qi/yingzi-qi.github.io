@@ -11,7 +11,8 @@ import {verifyOutputItems} from './item-verification.js?v=history2';
 import {photoVerificationRows} from './verification-photo.js?v=curatedphotos1';
 import {captureLineWarnings,classifyVerification,hasVerificationMismatch} from './verification-history.js?v=history2';
 import {normalizeReceiptData,kindForFlag,kindForVerification,reviewKinds} from './receipt-policy.js?v=policy1';
-import {recordReading,recordExport,recordRefresh,historyEntries,clearHistory} from './reading-history.js?v=history1';
+import {recordReading,recordExport,recordRefresh} from './reading-history.js?v=history1';
+import {openHistory,renderHistory,refreshHistoryView,clearHistory} from './history-dialog.js?v=merge1';
 const $ = s=>document.querySelector(s);
 const escape = v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const paths={settings:'<path d="M4 7h5m4 0h7M4 17h9m4 0h3"/><circle cx="11" cy="7" r="2"/><circle cx="15" cy="17" r="2"/>',upload:'<path d="M12 15V3m-5 5 5-5 5 5M4 14v5a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5"/>',plus:'<path d="M12 5v14M5 12h14"/>',download:'<path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/>',search:'<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>',link:'<path d="m10 14 4-4m-4-3 2-2a5 5 0 0 1 7 7l-2 2m-3 3-2 2a5 5 0 0 1-7-7l2-2"/>',play:'<path d="m8 5 10 7-10 7z"/>'};
@@ -35,42 +36,7 @@ const confidenceOptions = r=>({independentPhoto:r.origin==='ai'||r.origin==='sam
 const active = ()=>batch.filter(r=>r.state==='done' && !r.duplicateOf).sort(oldestPurchaseFirst);
 const notDone = r=>['queued','reading','checking','second'].includes(r.state);
 const isReview = r=>r.state==='error' || (!r.duplicateOf && r.data && (r.review.flags.some(x=>x.severity!=='info') || r.review.photo.some(x=>x.status==='Needs review') || r.orders?.some(orderNeedsReview) || r.verification?.some(hasVerificationMismatch)));
-function note(message){const n=$('#notice');clearTimeout(noticeTimer);n.hidden=!message;n.textContent=message;if(message)noticeTimer=setTimeout(()=>{n.hidden=true;},6500);}
-function historyRecordReading(r){try{recordReading(r);}catch{} }
-function formatHistoryTime(value){try{return new Intl.DateTimeFormat('en-GB',{dateStyle:'medium',timeStyle:'short'}).format(new Date(value));}catch{return value||'';}}
-function renderHistory(){
-  const list=$('#history-list');if(!list)return;
-  const entries=historyEntries();
-  if(!entries.length){list.innerHTML='<p class="history-empty">No reading or workbook history yet.</p>';return;}
-  list.innerHTML=entries.map(entry=>{
-    const events=(entry.events||[]).slice(0,12);
-    const lines=entry.reading?.lines||[];
-    const eventHtml=events.map(event=>`<li><span class="history-tag ${event.type==='manual-clear'||event.type==='lookup-change'?'change':event.type==='refresh'?'refresh':''}">${escape(event.type==='manual-clear'?'Manual correction':event.type==='refresh'?'Excel refresh':event.type==='lookup-change'?'Lookup change':event.type==='export'?'Export':'Reading')}</span> <time>${escape(formatHistoryTime(event.at))}</time> · ${escape(event.detail||'')}</li>`).join('');
-    const preview=lines.length?`<details class="history-preview"><summary>View ${lines.length} exported row${lines.length===1?'':'s'}</summary><div class="history-table"><div class="history-row history-head"><span>品牌</span><span>品名</span><span>品牌货号</span><span>采购商品金额</span></div>${lines.map(line=>`<div class="history-row"><span>${escape(line.brand||'—')}</span><span>${escape(line.item||'—')}</span><span>${escape(line.itemId||'—')}</span><span>${escape(line.amount??line.unitPrice??'—')}</span></div>`).join('')}</div></details>`:'';
-    return `<article class="history-entry"><strong>${escape(entry.filename||entry.merchant||'Receipt')}</strong><small>${escape(entry.merchant||'')}</small><div class="history-meta"><ul>${eventHtml}</ul></div>${preview}</article>`;
-  }).join('')||'<p class="history-empty">No reading or workbook history yet.</p>';
-}
-// One Reading History dialog. Server-backed (v2 /api/history) when signed in;
-// the browser-local history (reading-history.js) is the offline fallback.
-// Exactly one of #history-server-list / #history-list is shown at a time.
-function renderServerHistory(entries){
-  const list=$('#history-server-list');if(!list)return;
-  list.innerHTML=entries.length?entries.map(e=>`<article class="history-entry"><strong>${escape(e.kind||'Event')}</strong> · ${escape(e.summary||'')}<small>${escape(formatHistoryTime(e.created_at))}${e.batch_id?' · '+escape(e.batch_id):''}</small></article>`).join(''):'<p class="history-empty">No reading or workbook history yet.</p>';
-}
-function showHistoryMode(server){
-  const s=$('#history-server-list'),l=$('#history-list'),c=$('#history-clear'),st=$('#history-status');
-  if(s)s.hidden=!server; if(l)l.hidden=server; if(c)c.hidden=server;
-  if(st)st.textContent=server?'Showing the reading history saved on the Tillroll server.':'Showing the history kept in this browser (offline).';
-}
-let historyMode='local';
-async function openHistory(){
-  const dialog=$('#history-dialog');
-  const hook=window.tillrollV2Hooks?.serverHistory;
-  let server=null;
-  if(typeof hook==='function'){try{server=await hook();}catch{server=null;}}
-  if(server?.ok){historyMode='server';renderServerHistory(server.entries);showHistoryMode(true);}
-  else{historyMode='local';renderHistory();showHistoryMode(false);}
-  if(dialog && !dialog.open)dialog.showModal();
+function note(message){const n=$('#notice');clearTimeout(noticeTimer);n.hidden=!message;n.textContent=message;if(message)noticeTimer=setTimeout(()=>{n.hidden=true
 }
 function refreshHistoryView(){if(historyMode==='local')renderHistory();}
 function importedPhotoChecks(r, fillMissing=false) {
