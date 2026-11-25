@@ -4,7 +4,7 @@ import {makeOcr} from './ocr-fixture.mjs';
 import {extractLocal} from '../extract.js';
 import {checkReceipt, flagCategory} from '../checks.js';
 import {sortItemFields} from '../field-sorter.js';
-import {buildCsvBlob, buildXlsxBlob} from '../exports.js';
+import {buildCsvBlob, buildXlsxBlob, buildChinaXlsxBlob} from '../exports.js';
 import * as zipPackage from '../export-vendor/jszip.min.js';
 
 const today = new Date('2026-11-25T12:00:00Z');
@@ -131,13 +131,15 @@ test('card output has no digits in the reading or the export row', async () => {
   const reading = JSON.stringify(data);
   assert.equal(reading.includes(pan), false);
   assert.equal(reading.includes('1234'), false);
+  data.card = pan;
+  data.payment = 'Visa ' + pan;
   const receipt = {data, record: data, review, filename: 'synthetic.jpg', origin: ''};
   const csv = await buildCsvBlob([receipt]).text();
-  const book = await buildXlsxBlob([receipt]);
-  const zip = await (zipPackage.default ?? globalThis.JSZip).loadAsync(await book.arrayBuffer());
-  const sheet = await zip.file('xl/worksheets/sheet1.xml').async('string');
-  for (const row of [csv, sheet]) {
-    assert.equal(row.includes(pan), false);
+  const JSZip = zipPackage.default ?? globalThis.JSZip;
+  const english = await (await JSZip.loadAsync(await (await buildXlsxBlob([receipt])).arrayBuffer())).file('xl/worksheets/sheet1.xml').async('string');
+  const chinese = await (await JSZip.loadAsync(await (await buildChinaXlsxBlob([receipt])).arrayBuffer())).file('xl/worksheets/sheet1.xml').async('string');
+  for (const row of [csv, english, chinese]) {
+    assert.equal(row.includes(pan), false, row.slice(0, 80));
     assert.equal(row.includes('1234'), false);
   }
 });
