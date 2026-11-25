@@ -1,20 +1,16 @@
-// Strip payment-card details from a sanity-run payload before it is stored in D1.
-// Tender is reduced to UnionPay, Card, Alipay, WeChat, or null. Card / PAN / last4,
-// auth and approval codes, merchant IDs, terminal IDs and similar fields are
-// masked so no digit sequences from those fields remain. General: not receipt-specific.
+// Build a redacted deep clone of a sanity-run payload for D1 input_json only.
+// The live run input is not mutated. Mask card / PAN / last4, auth / approval,
+// MID / TID and similar fields. Canonicalise known tenders in the clone only;
+// Cash / PayPal / Klarna / gift card and other unknown tenders are kept (with
+// card digits dropped from the tender string). Other strings are only stripped of distinctive long (>= 6 digit) secrets taken from those masked fields, never short last-4 or CVV groups.
 import { maskCardField, maskPaymentIdentifier } from '../../../tillroll/item-identifiers.js';
 import { toPaymentMethod, dropCardDigits } from '../../../tillroll/receipt-rules.js';
 
 const TENDER_KEYS = /^(?:payment|tender|payment[_-]?method|采购商品方法)$/i;
-
 const CARD_KEYS = /^(?:card(?:[_-]?number|[_-]?no|[_-]?pan|[_-]?last[_-]?4)?|pan|primary[_-]?account(?:[_-]?number)?|last[_-]?4|last[_-]?four|ending(?:[_-]?in)?)$/i;
-
 const AUTH_KEYS = /^(?:auth(?:orisation|orization)?(?:[_-]?code)?|approval(?:[_-]?code)?)$/i;
-
 const MID_TID_KEYS = /^(?:merchant[_-]?id|terminal[_-]?id|acquirer(?:[_-]?id)?|mid|tid|rrn|stan|retrieval[_-]?reference(?:[_-]?number)?)$/i;
-
 const OTHER_PAYMENT_KEYS = /^(?:cvv|cvc|cid|security[_-]?code|payment[_-]?reference)$/i;
-
 const PAYMENT_ID_CLASSES = new Set(['payment_card', 'payment_auth', 'payment_merchant', 'payment_terminal', 'payment_reference']);
 
 function isTenderKey(key) { return TENDER_KEYS.test(String(key)); }
@@ -26,31 +22,71 @@ function isSensitiveKey(key) {
   return isCardKey(key) || isAuthKey(key) || isMidTidKey(key) || isOtherPaymentKey(key);
 }
 
-function collectDigitSequences(value, into) {
-  const text = String(value ?? '');
-  if (!text) return;
-  for (const m of text.match(/\d+/g) || []) {
-    if (m.length >= 3) into.add(m);
-  }
-  const compact = text.replace(/\D/g, '');
-  if (compact.length >= 3) into.add(compact);
-}
-
 function maskSensitiveValue(key, value) {
   if (value == null) return value;
   if (typeof value === 'number') return null;
   if (isCardKey(key)) return maskCardField(value);
-  if (isAuthKey(key) || isMidTidKey(key) || isOtherPaymentKey(key)) {
-    return maskPaymentIdentifier('payment_auth', value);
-  }
-  return String(value).replace(/\d/g, '');
+  return maskPaymentIdentifier('payment_auth', value);
 }
 
-function canonicalTender(value) {
-  if (value == null || value === '') return null;
+// Known tenders become UnionPay / Card / Alipay / WeChat. Unknown tenders stay
+// as-is (after dropping any card digits in the tender string) so P4 can flag them.
+function storedTender(value) {
+  if (value == null || value === '') return value == null ? null : '';
   const cleaned = dropCardDigits(value);
   const { method } = toPaymentMethod(cleaned || value);
-  return method ?? null;
+  if (method) return method;
+  return cleaned || String(value);
+}
+
+// Distinctive secrets only (length >= 6). Short last-4 / CVV groups are not
+// stripped from other strings, so overlapping receipt refs and style codes survive.
+const LONG_SECRET_MIN = 6;
+
+function collectLongSecrets(value, into) {
+  const text = String(value ?? '');
+  if (!text) return;
+  for (const m of text.match(/\d+/g) || []) {
+    if (m.length >= LONG_SECRET_MIN) into.add(m);
+  }
+  const compact = text.replace(/\D/g, '');
+  if (compact.length >= LONG_SECRET_MIN) {
+    into.add(compact);
+    into.add(text); // original form, e.g. an alphanumeric auth code
+  }
+}
+
+function scrubLongSecrets(text, secrets) {
+  let out = String(text);
+  const ordered = [...secrets].sort((a, b) => b.length - a.length);
+  for (const seq of ordered) {
+    if (!seq) continue;
+    if (out.includes(seq)) out = out.split(seq).join('');
+    const spaced = new RegExp(seq.split('').join('[\\s-]*'), 'g');
+    out = out.replace(spaced, '');
+  }
+  return out;
+}
+
+function walkScrubLong(node, secrets) {
+  if (!secrets.size) return node;
+  if (Array.isArray(node)) {
+    for (let i = 0; i < node.length; i++) {
+      const v = node[i];
+      if (typeof v === 'string') node[i] = scrubLongSecrets(v, secrets);
+      else if (v && typeof v === 'object') walkScrubLong(v, secrets);
+    }
+    return node;
+  }
+  if (!node || typeof node !== 'object') return node;
+  for (const [key, value] of Object.entries(node)) {
+    if (typeof value === 'string' && !isSensitiveKey(key) && !isTenderKey(key)) {
+      node[key] = scrubLongSecrets(value, secrets);
+    } else if (value && typeof value === 'object') {
+      walkScrubLong(value, secrets);
+    }
+  }
+  return node;
 }
 
 function identifierClassOf(node) {
@@ -59,18 +95,15 @@ function identifierClassOf(node) {
   return PAYMENT_ID_CLASSES.has(cls) ? cls : null;
 }
 
-function walkMask(node, sequences) {
+function walkMask(node, secrets) {
   if (Array.isArray(node)) {
-    for (let i = 0; i < node.length; i++) {
-      const v = node[i];
-      if (v && typeof v === 'object') walkMask(v, sequences);
-    }
+    for (const v of node) if (v && typeof v === 'object') walkMask(v, secrets);
     return node;
   }
   if (!node || typeof node !== 'object') return node;
   const idClass = identifierClassOf(node);
   if (idClass && node.value != null) {
-    collectDigitSequences(node.value, sequences);
+    collectLongSecrets(node.value, secrets);
     node.value = idClass === 'payment_card'
       ? maskCardField(node.value)
       : maskPaymentIdentifier(idClass, node.value);
@@ -78,67 +111,24 @@ function walkMask(node, sequences) {
   for (const [key, value] of Object.entries(node)) {
     if (value == null) continue;
     if (isTenderKey(key) && (typeof value === 'string' || typeof value === 'number')) {
-      collectDigitSequences(value, sequences);
-      node[key] = canonicalTender(value);
+      collectLongSecrets(value, secrets);
+      node[key] = storedTender(value);
       continue;
     }
     if (isSensitiveKey(key) && (typeof value === 'string' || typeof value === 'number')) {
-      collectDigitSequences(value, sequences);
+      collectLongSecrets(value, secrets);
       node[key] = maskSensitiveValue(key, value);
       continue;
     }
-    if (value && typeof value === 'object') walkMask(value, sequences);
+    if (value && typeof value === 'object') walkMask(value, secrets);
   }
   return node;
-}
-
-function scrubString(text, sequences) {
-  let out = String(text);
-  const ordered = [...sequences].sort((a, b) => b.length - a.length);
-  for (const seq of ordered) {
-    if (!seq || !out.includes(seq)) continue;
-    out = out.split(seq).join('');
-  }
-  return out;
-}
-
-function walkScrub(node, sequences) {
-  if (!sequences.size) return node;
-  if (Array.isArray(node)) {
-    for (let i = 0; i < node.length; i++) {
-      const v = node[i];
-      if (typeof v === 'string') node[i] = scrubString(v, sequences);
-      else if (v && typeof v === 'object') walkScrub(v, sequences);
-    }
-    return node;
-  }
-  if (!node || typeof node !== 'object') return node;
-  for (const [key, value] of Object.entries(node)) {
-    if (typeof value === 'string' && !isSensitiveKey(key) && !isTenderKey(key)) {
-      node[key] = scrubString(value, sequences);
-    } else if (value && typeof value === 'object') {
-      walkScrub(value, sequences);
-    }
-  }
-  return node;
-}
-
-function hasRemainingSensitiveDigits(node, sequences) {
-  const blob = JSON.stringify(node);
-  for (const seq of sequences) {
-    if (seq && blob.includes(seq)) return seq;
-  }
-  return null;
 }
 
 export function sanitiseRunInput(input) {
   const clone = structuredClone(input);
-  const sequences = new Set();
-  walkMask(clone, sequences);
-  walkScrub(clone, sequences);
-  // Last pass: if a distinctive digit sequence from a sensitive field is still
-  // present anywhere, strip it from every remaining string.
-  const leftover = hasRemainingSensitiveDigits(clone, sequences);
-  if (leftover) walkScrub(clone, sequences);
+  const secrets = new Set();
+  walkMask(clone, secrets);
+  walkScrubLong(clone, secrets);
   return clone;
 }
