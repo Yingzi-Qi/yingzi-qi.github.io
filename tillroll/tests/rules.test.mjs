@@ -155,6 +155,55 @@ test('lineDiscount: qty × unitPrice − lineDiscount ≠ amount is flagged', ()
   const flags = checkReceipt(data, makeOcr(['MAC', 'Foundation 1 45.00 40.00', 'TOTAL 40.00']), null, {today}).flags;
   assert.ok(flags.some(f => f.field.startsWith('items.0.') && f.severity !== 'info'));
 });
+test('line discount: Rewards Saving -£131 under an item is kept raw on that line', () => {
+  const {data, review} = read(['BOOTS', 'Date 12/11/2026 14:03', 'No7 Serum 1 x 262.00 131.00', 'Rewards Saving -£131', 'TOTAL 131.00', 'VISA']);
+  assert.equal(data.items.length, 1);
+  const item = data.items[0];
+  assert.equal(item.qty, 1);
+  assert.equal(item.unitPrice, 262);
+  assert.equal(item.amount, 131);
+  assert.equal(item.lineDiscount, 131);
+  assert.equal(item.lineDiscountLabel, 'Rewards Saving');
+  assert.deepEqual(item.lineDiscounts, [{label: 'Rewards Saving', amount: 131}]);
+  assert.equal(data.receiptDiscount, null);
+  assert.equal(review.flags.filter(f => f.field === 'items.0.amount' && f.severity !== 'info').length, 0);
+  assert.equal(review.flags.filter(f => f.field === 'total' && f.severity !== 'info').length, 0);
+});
+test('line discount: several printed lines stay raw and sum', () => {
+  const {data} = read(['MAC', 'Date 12/11/2026 11:03', 'Foundation 1 30.00 22.00', 'Staff saving -5.00', 'Rewards Saving -3.00', 'TOTAL 22.00']);
+  assert.equal(data.items.length, 1);
+  assert.equal(data.items[0].unitPrice, 30);
+  assert.equal(data.items[0].amount, 22);
+  assert.equal(data.items[0].lineDiscount, 8);
+  assert.deepEqual(data.items[0].lineDiscounts, [{label: 'Staff saving', amount: 5}, {label: 'Rewards Saving', amount: 3}]);
+  assert.equal(data.items[0].lineDiscountLabel, 'Staff saving + Rewards Saving');
+});
+test('receipt discount: a basket promo is not allocated across items', () => {
+  const {data, review} = read(['LIBERTY', 'Date 12/11/2026 11:03', 'Silk scarf 50.00', 'Wool hat 40.00', 'Basket promo -10.00', 'TOTAL 80.00', 'Visa']);
+  assert.equal(data.items.length, 2);
+  assert.deepEqual(data.items.map(row => row.amount), [50, 40]);
+  assert.deepEqual(data.items.map(row => row.unitPrice), [null, null]);
+  assert.ok(data.items.every(row => row.lineDiscount == null));
+  assert.equal(data.receiptDiscount, 10);
+  assert.deepEqual(data.receiptDiscounts, [{label: 'Basket promo', amount: 10}]);
+  assert.equal(review.flags.filter(f => f.field === 'total' && f.severity !== 'info').length, 0);
+  const model = cleanReceipt({
+    merchant: 'Liberty', total: 80, receiptDiscount: 10,
+    receiptDiscounts: [{label: 'Basket promo', amount: -10}],
+    items: [
+      {item: 'Silk scarf', qty: 1, unitPrice: 50, amount: 50, lineDiscount: null, lineDiscounts: []},
+      {item: 'Wool hat', qty: 1, unitPrice: 40, amount: 40, lineDiscount: null, lineDiscounts: []},
+    ],
+  });
+  assert.deepEqual(model.items.map(row => [row.unitPrice, row.amount, row.lineDiscount]), [[50, 50, null], [40, 40, null]]);
+  assert.equal(model.receiptDiscount, 10);
+  assert.deepEqual(model.receiptDiscounts, [{label: 'Basket promo', amount: 10}]);
+  assert.match(geminiPrompt, /Never allocate a receipt-level discount/);
+  assert.ok(geminiSchema.properties.receiptDiscount);
+  assert.ok(geminiSchema.properties.receiptDiscounts);
+  assert.ok(geminiSchema.properties.items.items.properties.lineDiscountLabel);
+  assert.ok(geminiSchema.properties.items.items.properties.lineDiscounts);
+});
 
 // ---- 8. true zero vs OCR miss ----------------------------------------------
 test('zero price: confirmed printed 0.00 moves to excludedZeroItems', () => {

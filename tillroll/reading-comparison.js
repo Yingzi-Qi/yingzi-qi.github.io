@@ -1,10 +1,10 @@
-const receiptFields=['merchant','date','time','orderId','orderNumber','receiptReference','currency','payment','card','total','subtotal','discount','tax'];
-const productFields=['brand','item','itemId','sku','qty','unitPrice','amount','colour','size','lineDiscount'];
+const receiptFields=['merchant','date','time','orderId','orderNumber','receiptReference','currency','payment','card','total','subtotal','discount','receiptDiscount','tax'];
+const productFields=['brand','item','itemId','sku','qty','unitPrice','amount','colour','size','lineDiscount','lineDiscountLabel'];
 const labels={merchant:'Retailer',date:'Purchase date',time:'Time',orderId:'Order ID',orderNumber:'Order number',
   receiptReference:'Receipt reference',currency:'Currency',payment:'Payment',card:'Card ending',total:'Receipt total',
-  subtotal:'Subtotal',discount:'Discount',tax:'Tax',brand:'Brand',item:'Item name',itemId:'Item ID',sku:'Style / SKU',qty:'Quantity',
-  unitPrice:'Unit price',amount:'Line amount',colour:'Colour',size:'Size',lineDiscount:'Line discount'};
-const numeric=new Set(['qty','unitPrice','amount','lineDiscount','total','subtotal','discount','tax']);
+  subtotal:'Subtotal',discount:'Discount',receiptDiscount:'Receipt discount',tax:'Tax',brand:'Brand',item:'Item name',itemId:'Item ID',sku:'Style / SKU',qty:'Quantity',
+  unitPrice:'Unit price',amount:'Line amount',colour:'Colour',size:'Size',lineDiscount:'Line discount',lineDiscountLabel:'Discount label'};
+const numeric=new Set(['qty','unitPrice','amount','lineDiscount','receiptDiscount','total','subtotal','discount','tax']);
 const present=value=>value!=null && String(value).trim()!=='';
 const normal=value=>String(value??'').normalize('NFKC').trim().toLowerCase().replace(/\s+/g,' ');
 function same(key,a,b) {

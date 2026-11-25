@@ -1,5 +1,5 @@
 import {orderNeedsReview} from './orders.js?v=lineverify1';
-import {reviewForLine,flagCategory} from './checks.js?v=productcodes3';
+import {reviewForLine,flagCategory} from './checks.js?v=discounts1';
 import {validateOrderPatterns} from './retail-rules.js?v=6';
 import {parsePrintedItemId} from './product-code.js?v=productcodes3';
 import * as zipPackage from './export-vendor/jszip.min.js';

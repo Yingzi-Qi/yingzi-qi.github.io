@@ -428,7 +428,10 @@ function arithmetic(data, items, flag, repeats) {
   const amounts = items.map(i => number(i.amount)), total = number(data.total);
   const sum = amounts.reduce((a, b) => a + (b || 0), 0), tax = number(data.tax);
   const alreadyApplied = items.reduce((value,item)=>value+includedLineDiscount(item),0);
-  const discount = Math.max(0,(number(data.discount) ?? 0)-alreadyApplied);
+  // receiptDiscount is only the saving that is not already inside a line amount.
+  // Older readings that lack the field still use the printed discount minus line discounts.
+  const listedReceiptDiscount = number(data.receiptDiscount);
+  const discount = listedReceiptDiscount !== null ? Math.max(0, listedReceiptDiscount) : Math.max(0,(number(data.discount) ?? 0)-alreadyApplied);
   const balances = beforeDiscount => total !== null && (
     near(beforeDiscount - discount, total) || (tax !== null && near(beforeDiscount - discount + tax, total)));
   const repeated = new Map();

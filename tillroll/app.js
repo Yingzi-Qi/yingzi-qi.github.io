@@ -1,8 +1,8 @@
 import {oldestPurchaseFirst,purchaseDateText} from './receipt-date-display.js?v=8';
 import {inspectReference,combineReferenceReadings} from './reference.js?v=6';
-import {readPhoto,secondReadPhoto,extractLocal,extractAI,reconcileReadings,photoFieldConflicts,recoverPhotoItemIds} from './extract.js?v=curatedphotos1';
-import {checkReceipt,samePurchase,reviewForLine,verifyImportedItemIds} from './checks.js?v=productcodes3';
-import {normalizeReading} from './extract.js?v=curatedphotos1';
+import {readPhoto,secondReadPhoto,extractLocal,extractAI,reconcileReadings,photoFieldConflicts,recoverPhotoItemIds} from './extract.js?v=discounts1';
+import {checkReceipt,samePurchase,reviewForLine,verifyImportedItemIds} from './checks.js?v=discounts1';
+import {normalizeReading} from './extract.js?v=discounts1';
 import {applyZeroPriceExclusion,normalizePurchaseTime,readStoreClues} from './receipt-rules.js?v=1';
 import {exportExcel,exportCSV,readOrderFile,readAchungWorkbook,readTillrollEdits} from './exports.js?v=policy1';
 import {planWorkbookRefresh,restoreWorkbookReceipts,nextWorkbookBaseline,withLegacyWorkbookBaseline,nextLegacyWorkbookBaseline} from './workbook-refresh.js?v=2';
@@ -25,7 +25,7 @@ let referenceHash=null,referenceRevision=0;
 const excelBaselines=new Map();
 const legacyBaselines=new Map();
 const emptyOCR=()=>({text:'',confidence:0,lines:[]});
-const blankItem=()=>({brand:'',item:'',sku:'',itemId:'',colour:'',size:'',qty:null,unitPrice:null,amount:null,lineDiscount:null});
+const blankItem=()=>({brand:'',item:'',sku:'',itemId:'',colour:'',size:'',qty:null,unitPrice:null,amount:null,lineDiscount:null,lineDiscountLabel:null,lineDiscounts:null});
 const referenceLabels={orderId:'Order ID',orderNumber:'Order number',receiptReference:'Receipt reference'};
 const sameReference=(a,b)=>String(a??'').trim().toLowerCase()===String(b??'').trim().toLowerCase();
 const get=(obj,key)=>key.split('.').reduce((v,k)=>v?.[k],obj);
@@ -409,7 +409,7 @@ function updateReceiptFields(r,data,removeIndex=null){
 }
 async function openDetail(id,path=''){
   const r=batch.find(x=>x.id===Number(id));if(!r)return;
-  const {showDetail}=await import('./detail.js?v=curatedphotos1');
+  const {showDetail}=await import('./detail.js?v=discounts1');
   const refresh=()=>{duplicates();render();};
   const rerender=(focus='')=>{refresh();openDetail(r.id,focus).catch(e=>note(e.message));};
   showDetail({...r,data:r.record||r.data},{
