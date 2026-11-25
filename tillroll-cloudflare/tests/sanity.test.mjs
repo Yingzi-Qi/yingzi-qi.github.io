@@ -167,7 +167,7 @@ test('brand/name take official values on mismatch; price and item ID stay as pri
   const row = result.agreedRows[0];
   assert.equal(row.cells['品牌'], 'Van Cleef & Arpels');
   assert.equal(row.flags['品牌'], AMBER);
-  assert.equal(row.cells['品名'], 'Vintage Alhambra pendant');
+  assert.equal(row.cells['品名'], 'Vintage Laurel pendant');
   assert.equal(row.flags['品名'], AMBER);
   assert.equal(row.cells['采购商品原价'], 3700);
   assert.equal(row.flags['采购商品原价'], AMBER);
