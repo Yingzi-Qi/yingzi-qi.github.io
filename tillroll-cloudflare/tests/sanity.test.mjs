@@ -132,3 +132,46 @@ test('/api/sanity-run lifecycle: queued -> completed, returns only the agreed ve
   const hist = await env.DB.prepare("SELECT * FROM reading_history WHERE kind='sanity-run'").all();
   assert.equal(hist.results.length, 1);
 });
+
+test('qty 3 line becomes 3 unit rows, look-up runs once, no qty>1 Amber on 原价', async () => {
+  const env = makeEnv(KEYS); const f = mockFetch(CATALOGUE);
+  const { result, audit } = await runSanity(env, { batchId: 'q3', mode: 'round1', receipts: [{
+    receiptKey: 'q3', merchant: 'Boutique', receiptReference: 'T1', date: '2026-11-20', time: '12:00', payment: 'Visa', currency: 'GBP',
+    items: [{ brand: 'Chanel', item: 'Classic Flap Mini Bag', itemId: 'A69900', qty: 3, unitPrice: 4950, amount: 14850 }],
+  }] }, { fetchImpl: f, lookup });
+  assert.equal(result.agreedRows.length, 3);
+  assert.deepEqual(result.agreedRows.map(r => r.rowId), ['q3:0:0', 'q3:0:1', 'q3:0:2']);
+  assert.ok(result.agreedRows.every(r => r.cells['采购小票id'] === 'T1' && r.cells['采购时间'] === '2026-11-20 12:00:00'));
+  assert.ok(result.agreedRows.every(r => r.cells['采购商品原价'] === 4950 && r.cells['采购商品金额'] === 4950 && r.cells['销售金额'] === 4356));
+  assert.equal(audit.lookupsUsed, 1);
+  assert.ok(result.agreedRows.every(r => r.flags['采购商品原价'] !== AMBER || r.mismatches?.some(m => m.field === 'price')));
+});
+
+test('qty 3 with a line discount is estimated, Amber, and sums to the paid total', async () => {
+  const env = makeEnv();
+  const { result } = await runSanity(env, { batchId: 'ld', mode: 'round1', receipts: [{
+    receiptKey: 'ld', merchant: 'Shop', receiptReference: 'L1', date: '2026-11-20', time: '12:00', payment: 'Visa', currency: 'GBP',
+    items: [{ brand: 'X', item: 'Item', itemId: '1', qty: 3, unitPrice: 100, amount: 290, lineDiscount: 10 }],
+  }] });
+  assert.equal(result.agreedRows.length, 3);
+  assert.deepEqual(result.agreedRows.map(r => r.cells['采购商品金额']), [96.67, 96.67, 96.66]);
+  assert.ok(result.agreedRows.every(r => r.estimated && r.flags['采购商品金额'] === AMBER));
+});
+
+test('brand/name take official values on mismatch; price and item ID stay as printed', async () => {
+  const env = makeEnv(KEYS); const f = mockFetch(CATALOGUE);
+  const { result } = await runSanity(env, { batchId: 'mm', mode: 'round1', receipts: [{
+    receiptKey: 'mm', merchant: 'Selfridges', receiptReference: 'M1', date: '2026-11-20', time: '12:00', payment: 'Visa', currency: 'GBP',
+    items: [{ brand: 'VCA', item: 'pendant', itemId: '0012345', qty: 1, unitPrice: 3700, amount: 3700 }],
+  }] }, { fetchImpl: f, lookup });
+  const row = result.agreedRows[0];
+  assert.equal(row.cells['品牌'], 'Van Cleef & Arpels');
+  assert.equal(row.flags['品牌'], AMBER);
+  assert.equal(row.cells['品名'], 'Vintage Alhambra pendant');
+  assert.equal(row.flags['品名'], AMBER);
+  assert.equal(row.cells['采购商品原价'], 3700);
+  assert.equal(row.flags['采购商品原价'], AMBER);
+  assert.equal(row.cells['品牌货号'], '0012345');
+  assert.ok(row.mismatches.some(m => m.field === 'price' && m.receiptValue === 3700 && m.officialValue === 3600));
+  assert.ok(row.mismatches.some(m => m.field === 'brand' && m.receiptValue === 'VCA' && m.officialValue === 'Van Cleef & Arpels'));
+});

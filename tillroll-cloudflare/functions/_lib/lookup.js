@@ -162,6 +162,41 @@ async function resolveBranch(env, req, deps) {
   return { ...v, cacheKey: key, cacheHit: false };
 }
 
+
+const display = v => (v === undefined || v === null || String(v).trim() === '') ? null : (typeof v === 'number' ? v : String(v).trim());
+const sameText = (a, b) => String(a).trim().toLowerCase() === String(b).trim().toLowerCase();
+export function officialMismatches(req, candidate) {
+  if (!candidate) return [];
+  const out = [];
+  const receiptBrand = display(req.brandRaw) || display(req.brand);
+  const officialBrand = display(candidate.brand);
+  if (officialBrand && receiptBrand && !sameText(receiptBrand, officialBrand)) {
+    out.push({ field: 'brand', receiptValue: receiptBrand, officialValue: officialBrand });
+  } else if (officialBrand && !receiptBrand) {
+    out.push({ field: 'brand', receiptValue: null, officialValue: officialBrand });
+  }
+  const receiptName = display(req.name);
+  const officialName = display(candidate.officialName);
+  if (officialName && receiptName && !sameText(receiptName, officialName)) {
+    out.push({ field: 'name', receiptValue: receiptName, officialValue: officialName });
+  } else if (officialName && !receiptName) {
+    out.push({ field: 'name', receiptValue: null, officialValue: officialName });
+  }
+  const receiptId = display(req.itemId);
+  const officialId = display(candidate.itemId);
+  if (officialId && receiptId && compact(receiptId) !== compact(officialId)) {
+    out.push({ field: 'itemId', receiptValue: receiptId, officialValue: officialId });
+  }
+  const receiptPrice = req.price, officialPrice = candidate.price;
+  if (officialPrice !== null && officialPrice !== undefined && receiptPrice !== null && receiptPrice !== undefined) {
+    const sameCurrency = !req.currency || !candidate.currency || req.currency === candidate.currency;
+    if (!sameCurrency || Math.abs(Number(officialPrice) - Number(receiptPrice)) > 0.005) {
+      out.push({ field: 'price', receiptValue: receiptPrice, officialValue: officialPrice });
+    }
+  }
+  return out;
+}
+
 export async function lookup(env, body, deps = {}) {
   const req = normaliseRequest(body);
   const trail = [];
@@ -197,7 +232,8 @@ export async function lookup(env, body, deps = {}) {
     result = { cacheHit: r.cacheHit, cacheKey: key, sourcesQueried: r.sourcesQueried, candidates: r.candidates };
   }
   const branch = await resolveBranch(env, req, deps);
-  const out = { ...result, flag: '#FDE68A', printedItemId: req.itemId, canonicalBrand: req.brand };
+  const mismatches = officialMismatches(req, result.candidates[0]);
+  const out = { ...result, mismatches, flag: null, printedItemId: req.itemId, canonicalBrand: req.brand };
   if (branch) out.branch = branch;
   const live = trail.filter(t => !t.cache);
   if (live.length && live.every(t => (t.problems || []).length >= 2)) {
@@ -205,6 +241,10 @@ export async function lookup(env, body, deps = {}) {
     out.unavailableReason = [...new Set(unavailable)].join(' ');
   }
   if (paused.length) out.quotaGuard = [...new Set(paused)];
+  const itemAttempted = Boolean(req.itemId || req.name || req.style || req.price !== null);
+  if (mismatches.length || (itemAttempted && !out.candidates.length) || out.paused || out.unavailableReason || out.quotaGuard?.length) {
+    out.flag = '#FDE68A';
+  }
   if (env?.DB) {
     try {
       await env.DB.prepare('INSERT INTO lookup_audit (created_at, cache_key, cache_hit, sources_queried, request_json, candidate_count, top_match_type, paused_reason) VALUES (?,?,?,?,?,?,?,?)')

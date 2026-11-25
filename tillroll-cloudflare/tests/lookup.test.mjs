@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { makeEnv, mockFetch, CATALOGUE } from './helpers.mjs';
-import { lookup, invalidate } from '../functions/_lib/lookup.js';
+import { lookup, invalidate, officialMismatches } from '../functions/_lib/lookup.js';
 import { keys } from '../functions/_lib/cache.js';
 import { status } from '../functions/_lib/quota.js';
 const KEYS = { BRAVE_API_KEY: 'test-brave', GEMINI_API_KEY: 'test-gemini' };
@@ -133,4 +133,27 @@ test('price fallback does not run when the item-ID lookup is fully unavailable',
   assert.equal(f.calls.brave + f.calls.gemini, 0);
   assert.ok(!String(r.cacheKey || '').includes(':pf:'));
   assert.equal((r.candidates || []).length, 0);
+});
+
+
+test('official mismatches: abbreviation, name upgrade, price and item-ID differences', () => {
+  const req = { brandRaw: 'VCA', brand: 'Van Cleef & Arpels', itemId: '0012345', name: 'pendant', price: 3700, currency: 'GBP' };
+  const cand = { brand: 'Van Cleef & Arpels', officialName: 'Vintage Alhambra pendant', itemId: '0012345', price: 3600, currency: 'GBP' };
+  const m = officialMismatches(req, cand);
+  assert.deepEqual(m.find(x => x.field === 'brand'), { field: 'brand', receiptValue: 'VCA', officialValue: 'Van Cleef & Arpels' });
+  assert.deepEqual(m.find(x => x.field === 'name'), { field: 'name', receiptValue: 'pendant', officialValue: 'Vintage Alhambra pendant' });
+  assert.deepEqual(m.find(x => x.field === 'price'), { field: 'price', receiptValue: 3700, officialValue: 3600 });
+  assert.ok(!m.some(x => x.field === 'itemId'));
+});
+
+test('/api/lookup returns mismatches and flags Amber only when a mismatch or no match exists', async () => {
+  const env = makeEnv(KEYS); const f = mockFetch(CATALOGUE);
+  const exact = await lookup(env, { brand: 'Chanel', itemId: 'A69900', name: 'Classic Flap Mini Bag', price: 4950, currency: 'GBP' }, { fetchImpl: f });
+  assert.deepEqual(exact.mismatches, []);
+  assert.equal(exact.flag, null);
+  const diff = await lookup(env, { brand: 'VCA', itemId: '0012345', name: 'pendant', price: 3700, currency: 'GBP' }, { fetchImpl: f });
+  assert.ok(Array.isArray(diff.mismatches));
+  assert.ok(diff.mismatches.some(m => m.field === 'brand' && m.receiptValue === 'VCA' && m.officialValue === 'Van Cleef & Arpels'));
+  assert.ok(diff.mismatches.some(m => m.field === 'price' && m.receiptValue === 3700 && m.officialValue === 3600));
+  assert.equal(diff.flag, '#FDE68A');
 });

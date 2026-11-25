@@ -111,7 +111,8 @@ function renderResult(out) {
     return `<td${f ? ` style="background:${f}" class="${f === '#FECDD3' ? 'v2-pink' : 'v2-amber'}"` : ''}${why ? ` title="${esc(why.join(' · '))}"` : ''}>${esc(typeof v === 'number' ? v.toFixed(2) : v ?? '')}</td>`;
   }).join('') + '</tr>').join('');
   const pinkList = out.readingErrors.slice(0, 30).map(e => `<li><b>${esc(e.col)}</b> · ${esc(e.reason)}</li>`).join('');
-  const amberList = out.lookupUncertainties.slice(0, 30).map(e => `<li><b>${esc(e.col)}</b> · ${esc(e.reason)}${(e.sourceUrls || []).slice(0, 2).map(u => ` <a href="${esc(u)}" target="_blank" rel="noopener noreferrer">source</a>`).join('')}</li>`).join('');
+  const mismatchText = e => (e.mismatches || []).map(m => `${m.field}: receipt ${m.receiptValue ?? '—'} vs official ${m.officialValue ?? '—'}`).join('; ');
+  const amberList = out.lookupUncertainties.slice(0, 30).map(e => `<li><b>${esc(e.col)}</b> · ${esc(e.reason)}${mismatchText(e) ? ' · ' + esc(mismatchText(e)) : ''}${(e.sourceUrls || []).slice(0, 2).map(u => ` <a href="${esc(u)}" target="_blank" rel="noopener noreferrer">source</a>`).join('')}</li>`).join('');
   panel.innerHTML = `
     <div class="v2-result-head"><h2>Final agreed version</h2>
       <div class="actions"><button id="v2-csv" class="quiet">Download CSV</button><button id="v2-json" class="quiet">Download JSON (for Excel export)</button></div></div>
