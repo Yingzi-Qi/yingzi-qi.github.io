@@ -483,7 +483,7 @@ test('1a: Visa, Mastercard, Amex, Maestro, debit and credit map to Card with no 
   }
 });
 
-test('1b: a wallet with no printed scheme is Card and Pink; a scheme plus a wallet is Card with no fill', async () => {
+test('1b: a wallet with no printed scheme is Card with no fill; cash and an empty tender stay Pink', async () => {
   const env = makeEnv();
   const base = { merchant: 'Synthetic Store', date: '2026-07-06', time: '10:00', currency: 'GBP', items: [{ brand: 'Synthetic', item: 'Pencil', itemId: 'SYN-1B', unitPrice: 4, amount: 4 }] };
   const { result } = await runSanity(env, { batchId: '1b', mode: 'round1', receipts: [
@@ -496,10 +496,10 @@ test('1b: a wallet with no printed scheme is Card and Pink; a scheme plus a wall
   const byId = Object.fromEntries(result.agreedRows.map(r => [r.cells['采购小票id'], r]));
   for (const id of ['1B-APPLE', '1B-GOOGLE']) {
     assert.equal(byId[id].cells['采购商品方法'], 'Card');
-    assert.equal(byId[id].flags['采购商品方法'], PINK);
-    assert.equal(byId[id].exportMeta.comments['采购商品方法'], 'wallet, scheme not printed');
-    assert.equal(byId[id].flagReasons['采购商品方法'], 'wallet, scheme not printed');
-    assert.equal(byId[id].exportMeta.pendingOwnerConfirmation['采购商品方法'], true);
+    assert.equal(byId[id].flags['采购商品方法'], undefined);
+    assert.equal(byId[id].exportMeta.comments['采购商品方法'], undefined);
+    assert.equal(byId[id].flagReasons['采购商品方法'], undefined);
+    assert.equal(byId[id].exportMeta.pendingOwnerConfirmation, null);
   }
   assert.equal(byId['1B-VISA'].cells['采购商品方法'], 'Card');
   assert.equal(byId['1B-VISA'].flags['采购商品方法'], undefined);
@@ -513,8 +513,10 @@ test('1b: a wallet with no printed scheme is Card and Pink; a scheme plus a wall
   const blob = await buildV2XlsxBlob(result);
   const parsed = await readV2Workbook(blob);
   const apple = parsed.rows.find(r => r.values['采购小票id'] === '1B-APPLE');
-  assert.equal(apple.baseline.pendingOwnerConfirmation['采购商品方法'], true);
-  assert.equal(apple.comments['采购商品方法'], 'wallet, scheme not printed');
+  assert.equal(apple.values['采购商品方法'], 'Card');
+  assert.equal(apple.fills['采购商品方法'], undefined);
+  assert.equal(apple.comments['采购商品方法'], undefined);
+  assert.equal(apple.baseline.pendingOwnerConfirmation, null);
 });
 
 test('2: a concession code never stays in 品牌货号; an official id, an EAN and a printed style ref follow the look-up', async () => {
@@ -837,4 +839,33 @@ test('a gate Pink keeps the look-up Amber reason and candidates in the comment a
   assert.equal(saved.baseline.gateNotes['品名'].candidates[0].itemId, 'OFF-1');
   assert.match(saved.comments['品名'], /Name needs checking/);
   assert.match(saved.comments['品名'], /Price-fallback look-up/);
+});
+
+test('03/04/2026 is 3 April in 采购时间', async () => {
+  const env = makeEnv();
+  const { result } = await runSanity(env, { batchId: 'dmy', mode: 'round1', receipts: [{
+    receiptKey: 'dmy', merchant: 'Synthetic Store', receiptReference: 'DMY-1', date: '03/04/2026', time: '09:15', payment: 'Card', currency: 'GBP',
+    items: [{ brand: 'Synthetic', item: 'Pencil', itemId: 'SYN-DMY', unitPrice: 4, amount: 4 }],
+  }] }, { lookup: noLookup });
+  assert.equal(result.agreedRows[0].cells['采购时间'], '2026-04-03 09:15:00');
+});
+
+test('a receipt price within max(2% of price, £5) of the official price is not an Amber mismatch', async () => {
+  const env = makeEnv();
+  const official = { 'SYN-IN5': 104, 'SYN-OUT5': 106, 'SYN-IN2': 1019, 'SYN-OUT2': 1021 };
+  const lookup = async (_env, body) => ({
+    candidates: [{ brand: 'Synthetic', officialName: 'Pencil', itemId: body.itemId, price: official[body.itemId], currency: 'GBP', matchType: 'id', confidence: 0.9, sourceUrls: ['https://synthetic.example/tol'], matchedFields: ['itemId'], onOfficialSite: true, weightGrams: null }],
+    cacheHit: false, cacheKey: body.itemId, sourcesQueried: ['brave'], printedItemId: body.itemId, canonicalBrand: 'Synthetic',
+  });
+  const item = (rowId, itemId, unitPrice) => ({ rowId, brand: 'Synthetic', item: 'Pencil', itemId, unitPrice, amount: unitPrice });
+  const { result } = await runSanity(env, { batchId: 'tol', mode: 'round1', receipts: [{
+    receiptKey: 'tol', merchant: 'Synthetic Store', receiptReference: 'TOL-1', date: '2026-07-12', time: '10:00', payment: 'Card', currency: 'GBP',
+    items: [item('tol-in5', 'SYN-IN5', 100), item('tol-out5', 'SYN-OUT5', 100), item('tol-in2', 'SYN-IN2', 1000), item('tol-out2', 'SYN-OUT2', 1000)],
+  }] }, { lookup });
+  const by = Object.fromEntries(result.agreedRows.map(r => [r.rowId, r]));
+  assert.equal(by['tol-in5'].flags['采购商品原价'], undefined);
+  assert.equal(by['tol-in5'].flags['品名'], undefined);
+  assert.equal(by['tol-out5'].flags['采购商品原价'], AMBER);
+  assert.equal(by['tol-in2'].flags['采购商品原价'], undefined);
+  assert.equal(by['tol-out2'].flags['采购商品原价'], AMBER);
 });

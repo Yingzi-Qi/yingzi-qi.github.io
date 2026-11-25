@@ -32,6 +32,7 @@ test('timestamps: 24h, 00 seconds, am/pm converted', () => {
   assert.equal(normaliseTimestamp('2025-01-17', '12:05 am'), '2025-01-17 00:05:00');
   assert.equal(normaliseTimestamp('2025-01-17', '19:20:31'), '2025-01-17 19:20:31');
   assert.equal(normaliseTimestamp('17/01/2025', null), '2025-01-17 00:00:00');
+  assert.equal(normaliseTimestamp('03/04/2026', null), '2026-04-03 00:00:00');
   assert.equal(normaliseTimestamp('2025-13-40', '10:00'), null);
 });
 

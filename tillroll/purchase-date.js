@@ -71,7 +71,8 @@ export function readPurchaseDate(text) {
     for (const m of line.matchAll(digitsDate)) {
       if (m[1]) {add(m,possibleDates(m[1],m[4],m[3]));continue;}
       const format=formatOn(line) || formatOn(lines[i-1]||'');
-      add(m,format==='month' ? possibleDates(m[8],m[7],m[5]) : possibleDates(m[8],m[5],m[7],format!=='day'));
+      // Ambiguous UK numeric dates are day/month. Only an explicit MM/DD hint swaps them.
+      add(m,format==='month' ? possibleDates(m[8],m[7],m[5]) : possibleDates(m[8],m[5],m[7],false));
     }
   }
   if (!candidates.length) return {date:null,issue:null};

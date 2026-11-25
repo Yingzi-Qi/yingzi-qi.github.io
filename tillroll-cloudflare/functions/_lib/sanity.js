@@ -3,7 +3,7 @@
 // Excel Sync audit) and iterates until the audit converges. Only the final
 // agreed version leaves this module; the internal trail is stored in D1 only.
 import { canonicalBrand } from './brands.js';
-import { lookup as defaultLookup, invalidate } from './lookup.js';
+import { lookup as defaultLookup, invalidate, priceTolerance } from './lookup.js';
 import { nowIso, sha256Hex } from './http.js';
 import { expandReceipt, isConfirmedZero, joinPurchaseTime, supplierVisibleName } from '../../../tillroll/units.js';
 import { matchBrandIdFormat } from '../../../tillroll/brand-id-format.js';
@@ -40,13 +40,10 @@ export function stripBrandFromItemId(itemId, brand) {
   }
   return out.trim() || id;
 }
-// P4, with the 25 Nov wallet decision. Card schemes map to Card with no fill.
-// A wallet with a scheme printed also maps to Card with no fill. A wallet with
-// no scheme maps to Card and is Pink, pending owner confirmation. Cash and an
-// empty tender stay as printed or empty and are Pink.
+// P4. Card schemes and wallets map to Card with no fill. Cash and an empty
+// tender stay as printed or empty and are Pink.
 export const ALLOWED_TENDERS = ['UnionPay', 'Card', 'Alipay', 'WeChat'];
 export const TENDER_REASON = 'Payment method must be UnionPay, Card, Alipay or WeChat.';
-export const WALLET_REASON = 'wallet, scheme not printed';
 const SCHEME = /\b(visa|mastercard|master\s*card|maestro|amex|american express|debit|credit|card)\b/i;
 const WALLET = /\b(apple\s*pay|google\s*pay|samsung\s*pay|garmin\s*pay|android\s*pay|wallet)\b/i;
 const CHANEL_BLOCKED_COMMENT = 'chanel.com blocked; confirmed on chanel.cn/gb';
@@ -58,10 +55,6 @@ export function normaliseTender(p) {
   if (/we\s*chat|wechat/i.test(s)) return 'WeChat';
   if (SCHEME.test(s) || WALLET.test(s)) return 'Card';
   return s;
-}
-export function walletWithoutScheme(original) {
-  const s = str(original);
-  return Boolean(s) && WALLET.test(s) && !SCHEME.test(s) && !/union\s*pay/i.test(s);
 }
 function priceReading(raw) {
   if (raw === null || raw === undefined || String(raw).trim() === '') return { invalid: false, missing: true };
@@ -78,7 +71,7 @@ function exactIdAndPrice(top, row) {
   const price = row.cells['采购商品原价'];
   if (top?.matchType !== 'id' || typeof price !== 'number' || top.price == null) return false;
   if (top.currency && row.raw?.currency && top.currency !== row.raw.currency) return false;
-  return Math.abs(Number(top.price) - price) < 0.009;
+  return Math.abs(Number(top.price) - price) <= priceTolerance(price);
 }
 function touchCell(row, col) {
   if (!row._lookupTouched) row._lookupTouched = new Set();
@@ -159,10 +152,7 @@ function readerStage(receipt, rIndex, state, ctx) {
     if (!receiptId) addFlag(row, '采购小票id', PINK, /selfridges/i.test(merchant || '') ? 'Selfridges receipt number (below the barcode) not read.' : /harrods/i.test(merchant || '') ? 'Harrods receipt number (right of date/time) not read.' : 'Receipt ID not read.');
     if (!ts) addFlag(row, '采购时间', PINK, 'Date/time missing or not a valid date.');
     if (!merchant) addFlag(row, '供应商', PINK, 'Supplier not read.');
-    if (walletWithoutScheme(receipt.payment)) {
-      addFlag(row, '采购商品方法', PINK, WALLET_REASON, { pendingOwnerConfirmation: true });
-      row._comments['采购商品方法'] = WALLET_REASON;
-    } else if (!tender || !ALLOWED_TENDERS.includes(tender)) {
+    if (!tender || !ALLOWED_TENDERS.includes(tender)) {
       addFlag(row, '采购商品方法', PINK, TENDER_REASON);
       row._comments['采购商品方法'] = TENDER_REASON;
     }
@@ -370,7 +360,7 @@ async function verifierStage(rows, receipt, ctx) {
         lookupFlag(row, '品名', AMBER, why, { confidence: top.confidence, sourceUrls: top.sourceUrls, ...(row._candidates ? { candidates: row._candidates } : {}) });
       }
     }
-    if (top.price !== null && top.price !== undefined && typeof c['采购商品原价'] === 'number' && Math.abs(Number(top.price) - c['采购商品原价']) > 0.009) {
+    if (top.price !== null && top.price !== undefined && typeof c['采购商品原价'] === 'number' && Math.abs(Number(top.price) - c['采购商品原价']) > priceTolerance(c['采购商品原价'])) {
       for (const col of ['采购商品原价', '采购商品金额']) {
         if (ctx.locked(row.rowId, col)) continue;
         noteMismatch(row, col, c[col], top.price, 'receipt');
