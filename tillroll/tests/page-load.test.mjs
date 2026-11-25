@@ -47,5 +47,18 @@ describe('page load', () => {
     assert.equal(document.querySelector('h1').textContent, 'Receipts');
     assert.ok(document.querySelector('#settings'));
     assert.ok(document.querySelector('#lookup-base'));
+    assert.ok(document.querySelector('#v2-history-dialog'));
+    assert.equal(document.querySelector('#history-dialog'), null);
+  });
+
+  it('index.html has no duplicate element ids and loads app.js plus v2.js', () => {
+    const html = readFileSync(join(root, 'index.html'), 'utf8');
+    const ids = [...html.matchAll(/\sid="([^"]+)"/g)].map(match => match[1]);
+    const duplicates = [...new Set(ids.filter((id, index) => ids.indexOf(id) !== index))];
+    assert.deepEqual(duplicates, []);
+    assert.match(html, /<script type="module" src="\.\/app\.js[^"]*"><\/script><script type="module" src="\.\/v2\.js[^"]*"><\/script>/);
+    assert.match(html, /id="v2-workbooks-dialog"/);
+    assert.match(html, /id="v2-history-dialog"/);
+    assert.match(html, /id="v2-unlock-dialog"/);
   });
 });

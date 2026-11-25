@@ -239,16 +239,27 @@ describe('brand item id', () => {
     assert.equal(chooseItemId({
       brand: 'Dior',
       fields: { itemId: '9999999001', sku: '3607670123456' },
-    }), '');
+    }), '3607670123456');
     assert.equal(chooseItemId({
       brand: 'Dior',
       fields: { item: '3607670123456', allowEan: true },
     }), '3607670123456');
   });
 
-  it('does not use a concession code or an EAN as a Chanel item id', () => {
-    assert.equal(chooseItemId({ brand: 'Chanel', fields: { itemId: '9999999001', sku: '3607670123456' } }), '');
+  it('does not use a concession code as a Chanel item id, and falls through to the EAN', () => {
+    assert.equal(chooseItemId({ brand: 'Chanel', fields: { itemId: '9999999001', sku: '3607670123456' } }), '3607670123456');
     assert.equal(chooseItemId({ brand: 'Other Atelier', fields: { itemId: '3607670123456' } }), '3607670123456');
+  });
+
+  it('lets an unfitting code fall through to the EAN and strips a Chanel season prefix', () => {
+    assert.equal(chooseItemId({
+      brand: 'Chanel',
+      fields: { itemId: 'NOT-A-REF', sku: '3607670123456' },
+    }), '3607670123456');
+    assert.equal(chooseItemId({
+      brand: 'Chanel',
+      fields: { item: '25C AS44010', itemId: 'NOT-A-REF', sku: '3607670123456' },
+    }), 'AS44010');
   });
 
   it('sends the chosen brand item id on the look-up', async () => {
