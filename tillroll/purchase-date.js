@@ -49,7 +49,17 @@ function contextScore(line,index) {
   return structure.test(line) ? 2 : 1;
 }
 
-export function readPurchaseDate(text) {
+function dayFirstIso(printed) {
+  const match=/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2}|\d{4})$/.exec(String(printed??'').trim());
+  if(!match) return null;
+  const year=match[3].length===2 ? (Number(match[3])>=70 ? '19' : '20')+match[3] : match[3];
+  const iso=year+'-'+pad(match[2])+'-'+pad(match[1]);
+  return validCalendarDate(iso) ? iso : null;
+}
+
+// options.uk selects DD/MM when a numeric date is ambiguous. Unambiguous dates
+// are unchanged. Non-UK receipts still return null and an issue.
+export function readPurchaseDate(text, options={}) {
   const lines=String(text ?? '').normalize('NFD').replace(/\p{M}+/gu,'').split(/\r?\n/);
   const candidates=[];
   for (const [i,line] of lines.entries()) {
@@ -87,5 +97,9 @@ export function readPurchaseDate(text) {
   // An unambiguous rendering elsewhere on the slip can settle the order of day and month.
   const supporting=new Set(candidates.filter(c=>c.score<highest && c.values.length===1 && possible.includes(c.values[0])).map(c=>c.values[0]));
   if (supporting.size===1) return {date:[...supporting][0],issue:null};
+  if (options.uk) {
+    const preferred=[...new Set(chosen.map(c=>dayFirstIso(c.printed)).filter(v=>v && possible.includes(v)))];
+    if (preferred.length===1) return {date:preferred[0],issue:null};
+  }
   return {date:null,issue:'Day and month are ambiguous in the printed date ('+printed+').'};
 }
