@@ -914,6 +914,39 @@ test('4-digit and 9999999 concession codes never land in 品牌货号', async ()
   assert.equal(by['cc-style'].cells['品牌货号'], '000001');
 });
 
+test('a card last-four stays Pink when an official lookup returns a catalogue id', async () => {
+  const env = makeEnv(KEYS);
+  const lookup = async () => ({ candidates: [{
+    brand: 'Chanel', officialName: 'Synthetic Pencil', itemId: 'AS1234', price: 4, currency: 'GBP',
+    sourceUrls: ['https://www.chanel.com/gb/p/AS1234'], onOfficialSite: true,
+    matchedFields: ['name'], confidence: 0.9, matchType: 'id',
+  }] });
+  const { result } = await runSanity(env, { batchId: 'last4-official', mode: 'round1', receipts: [{
+    receiptKey: 'last4-official', merchant: 'Chanel', receiptReference: 'L4-1', date: '2026-07-13', time: '11:00', payment: 'Card', currency: 'GBP',
+    items: [{ rowId: 'last4-official-1', brand: 'Chanel', item: 'Pencil', itemId: '1234', unitPrice: 4, amount: 4 }],
+  }] }, { lookup });
+  const row = result.agreedRows[0];
+  assert.equal(row.cells['品牌货号'], null);
+  assert.equal(row.flags['品牌货号'], PINK);
+  assert.equal(row.flagReasons['品牌货号'], 'Item ID looks like card last-4.');
+  assert.match(row.exportMeta.comments['品牌货号'], /1234/);
+  assert.doesNotMatch(JSON.stringify(row.cells), /AS1234/);
+});
+
+test('a code found only in the product name does not become 品牌货号', async () => {
+  const env = makeEnv();
+  const { result } = await runSanity(env, { batchId: 'name-code', mode: 'round1', receipts: [{
+    receiptKey: 'name-code', merchant: 'Synthetic Store', receiptReference: 'NC-1', date: '2026-07-13', time: '11:00', payment: 'Card', currency: 'GBP',
+    items: [{ rowId: 'name-code-1', brand: 'Synthetic', item: 'Synthetic Shirt / RM0003', itemId: '1000600098', sku: '1000600098', unitPrice: 53, amount: 53 }],
+  }] }, { lookup: noLookup });
+  const row = result.agreedRows[0];
+  assert.equal(row.cells['品牌货号'], null);
+  assert.equal(row.flags['品牌货号'], PINK);
+  assert.equal(row.flagReasons['品牌货号'], 'no brand item ID printed');
+  assert.match(row.exportMeta.comments['品牌货号'], /1000600098/);
+  assert.notEqual(row.cells['品牌货号'], 'RM0003');
+});
+
 test('builder per-unit item id is exported as given, and a Chanel cn/gb source keeps the P6 comment', async () => {
   const env = makeEnv();
   const { result } = await runSanity(env, { batchId: 'bld', mode: 'round1', receipts: [{

@@ -427,7 +427,12 @@ function readerStage(receipt, rIndex, state, ctx) {
       }
     }
     const formatTable = ctx?.formatTable || getBrandItemIdFormat();
-    const readerChosenId = chooseItemId({ brand: brandRaw, fields: { itemId: it.itemId, sku: it.sku, styleRef: it.styleRef, ean: it.ean, item: it.item, name: it.name, allowEan: true } }) || itemCell || null;
+    // Reader-selected ids come from labelled identifier fields. A code found
+    // only inside the product name is descriptive evidence, not a confirmed
+    // catalogue id. labelledEan still allows an explicit EAN/GTIN label in the
+    // name to be used as a fallback.
+    const labelledNameEan = labelledEan({ ean: it.ean, itemId: it.itemId, sku: it.sku, styleRef: it.styleRef, item: it.item, name: it.name });
+    const readerChosenId = chooseItemId({ brand: brandRaw, fields: { itemId: it.itemId, sku: it.sku, styleRef: it.styleRef, ean: it.ean, allowEan: true } }) || labelledNameEan || itemCell || null;
     const hasFormat = brandHasItemIdFormat(brandRaw) || Boolean(formatPattern(brandRaw, formatTable));
     const hookKeeps = v => {
       const hook = ctx?.brandIdFormat;
@@ -629,7 +634,7 @@ function syncBrandItemIdMetadata(row, top) {
 }
 
 function settleBrandItemId(row, top, ctx) {
-  if (row.raw?.idClass === 'builder') {
+  if (row.raw?.idClass === 'builder' || row.raw?.idClass === 'last4') {
     noteStoreCodes(row);
     return;
   }
