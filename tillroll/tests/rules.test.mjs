@@ -7,7 +7,7 @@ import {
   nonItemName, readStoreClues, mergeStoreClues, storeReceiptId, confirmedStoreReceiptId, classifyZeroPrice, applyZeroPriceExclusion,
 } from '../receipt-rules.js';
 import {extractLocal, cleanReceipt, geminiSchema, geminiPrompt, prepareModelReading} from '../extract.js';
-import {checkReceipt, flagCategory} from '../checks.js';
+import {checkReceipt, flagCategory, verifyImportedItemIds} from '../checks.js';
 
 const today = new Date('2026-11-25T12:00:00Z');
 const read = rows => { const ocr = makeOcr(rows); const data = extractLocal(ocr); return {ocr, data, review: checkReceipt(data, ocr, null, {today})}; };
@@ -358,6 +358,58 @@ test('line discount: trailing OCR junk is kept, folded when it reconciles, flagg
   const flags = raw.review.flags.filter(f => /discount line unclear/i.test(f.message));
   assert.ok(flags.length && flags.every(f => flagCategory(f) === 'reading'));
   assert.equal(raw.data.receiptDiscount, null);
+});
+test('Harrods total: TOTAL (n items) stops the list so AMOUNT is not an item', () => {
+  const {data} = read(['HARRODS', '12/11/2026 14:15 NT04567-111222',
+    '4321 0001234560 Silk scarf 18.00', 'Carrier Bag 0.00', 'By Appointment 0.00',
+    'TOTAL (1 item)', 'AMOUNT £18.00', 'Item Total: £18.00']);
+  assert.equal(data.total, 18);
+  assert.deepEqual(data.items.map(row => row.item), ['Silk scarf']);
+  assert.equal(data.items[0].concessionCode, '4321');
+  assert.equal(data.items[0].internalCode, '0001234560');
+  assert.equal(data.items[0].itemId, null);
+  assert.ok(!data.items.some(row => /amount|item total/i.test(row.item || '')));
+  assert.deepEqual(data.excludedZeroItems.map(row => row.item.item).sort(), ['By Appointment', 'Carrier Bag']);
+});
+test('N.Peal Item Total is not an item', () => {
+  const {data} = read(['N.PEAL', 'Date 12/11/2026 15:04', 'Cashmere scarf 40.00', 'Item Total: £40.00', 'Visa Tendered 40.00']);
+  assert.deepEqual(data.items.map(row => row.item), ['Cashmere scarf']);
+  assert.equal(data.total, 40);
+});
+test('store id: an unclear normalised id is kept and does not raise the generic suggestion flag', () => {
+  const ocr = makeOcr(['HARRODS', '12/11/2026 14:03 NTO5555-121212', 'Scarf 20.00', 'TOTAL GBP 20.00', 'REF AB12CD34']);
+  const data = extractLocal(ocr);
+  assert.equal(data.receiptReference, 'NT05555-121212');
+  assert.equal(storeReceiptId('Harrods', ocr).status, 'unclear');
+  assert.equal(confirmedStoreReceiptId(data.merchant, ocr, data.receiptReference), true);
+  const review = checkReceipt(data, ocr, null, {today, reference: {
+    status: 'ambiguous', kind: 'receiptReference', value: null, requiresReview: true,
+    suggestion: {value: 'AB12CD34', kind: 'receiptReference', reason: 'Several printed references'},
+    candidates: [{value: 'AB12CD34'}], reasonCode: 'conflict', reason: 'Several printed references could identify this purchase.',
+  }});
+  assert.equal(review.flags.some(f => /Check the suggested reference/i.test(f.message)), false);
+  const flags = flagsFor(review, 'receiptReference');
+  assert.ok(flags.length && flags.every(f => flagCategory(f) === 'reading'));
+});
+test('Harrods line: any 10-digit code is internalCode and the concession is not a missing item id', () => {
+  const rows = ['HARRODS', '12/11/2026 16:10 NT01234-567890',
+    '2201 0009876540 Wool scarf 30.00', 'Product Info: 5009999888777', 'TOTAL GBP 30.00'];
+  const {data, review, ocr} = read(rows);
+  assert.equal(data.items[0].concessionCode, '2201');
+  assert.equal(data.items[0].internalCode, '0009876540');
+  assert.equal(data.items[0].ean, '5009999888777');
+  assert.equal(data.items[0].itemId, null);
+  assert.equal(review.flags.some(f => /printed item ID .* missing from the record/i.test(f.message)), false);
+  const imported = verifyImportedItemIds(data, ocr);
+  assert.equal((imported[0].reason || '').includes('missing from the record'), false);
+});
+test('storeClues: fused till digits are not a phone, spaced UK numbers stay whole, SH1X becomes SW1X', () => {
+  const clues = readStoreClues(makeOcr(['HARRODS', '87-135 Brompton Road', 'London SH1X 7XL',
+    'Tel: 020 7730 1234', 'Scarf 20.00', 'TOTAL GBP 20.00', '2001111222333']).lines, 'Harrods');
+  assert.equal(clues.phone, '020 7730 1234');
+  assert.equal(clues.postcode, 'SW1X 7XL');
+  const raw = readStoreClues(makeOcr(['SHOP', 'Somewhere QQ1A 9ZZ', 'TOTAL 10.00']).lines, 'Shop');
+  assert.equal(raw.postcode, 'QQ1A 9ZZ');
 });
 test('Gemini reading: the store rule replaces a generic Harrods id', () => {
   const ocr = makeOcr(['HARRODS', '12/11/2026 14:03 NT01234-567890', 'Scarf 20.00', 'TOTAL GBP 20.00']);

@@ -225,6 +225,30 @@ export function nonItemName(value) {
 // Store clues: printed address, postcode, store number and phone. Only copied
 // from the header and footer text; never inferred and never appended to 供应商.
 const ukPostcode = /\b(GIR\s?0AA|[A-PR-UWYZ][A-HK-Y]?\d[A-Z\d]?\s?\d[ABD-HJLNP-UW-Z]{2})\b/;
+const ukAreas = new Set('AB AL B BA BB BD BH BL BN BR BS BT CA CB CF CH CM CO CR CT CV CW DA DD DE DG DH DL DN DT DY E EC EH EN EX FK FY G GL GU HA HD HG HP HR HS HU HX IG IP IV KA KT KW KY L LA LD LE LL LN LS LU M ME MK ML N NE NG NN NP NR NW OL OX PA PE PH PL PO PR RG RH RM S SA SE SG SK SL SM SN SO SP SR SS ST SW SY TA TD TF TN TQ TR TS TW UB W WA WC WD WF WN WR WS WV YO ZE'.split(' '));
+function validOutward(outward) {
+  const compact = String(outward || '').replace(/\s+/g, '').toUpperCase();
+  if (!/^[A-Z]{1,2}\d[A-Z\d]?$/.test(compact)) return false;
+  return ukAreas.has(compact.match(/^[A-Z]{1,2}/)[0]);
+}
+// SH1X is the usual OCR of SW1X. Correct H→W only when the result is a real district; otherwise keep the printed text.
+function readUkPostcode(text) {
+  const upper = String(text || '').toUpperCase();
+  const match = upper.match(/\b([A-Z]{1,2}\d[A-Z\d]?)\s?(\d[ABD-HJLNP-UW-Z]{2})\b/);
+  if (!match) return null;
+  const raw = text.slice(match.index, match.index + match[0].length).replace(/\s+/g, ' ').trim();
+  if (validOutward(match[1])) return match[1] + ' ' + match[2];
+  if (match[1].length >= 2 && match[1][1] === 'H') {
+    const fixed = match[1][0] + 'W' + match[1].slice(2);
+    if (validOutward(fixed)) return fixed + ' ' + match[2];
+  }
+  return raw;
+}
+function extractPhone(text) {
+  const spaced = text.match(/\b((?:\+44\s?(?:\(0\)\s?)?|0)\d{2,4}(?:[\s-]\d{3,4}){1,3})\b/);
+  const generic = text.match(/(?:\b(?:tel|phone|telephone|tél|téléphone|telefon)\.?\s*(?:no\.?)?\s*[:.]?\s*)?(\+?\(?\d[\d\s().-]{6,}\d)/i);
+  return ((spaced && spaced[1]) || (generic && generic[1]) || '').trim() || null;
+}
 const usZip = /\b[A-Z]{2}\s+(\d{5}(?:-\d{4})?)\b/;
 const euPostcode = /^(?:[A-Z]-)?(\d{4,5})\s+[A-ZÀ-Ý][A-Za-zÀ-ÿ'’ -]{2,}$/;
 const streetWords = /\b(?:road|rd|street|st|avenue|ave|lane|ln|drive|dr|square|sq|place|pl|terrace|way|row|court|ct|crescent|close|gardens|park|walk|wharf|centre|center|mall|plaza|parade|broadway|blvd|boulevard|highway|hwy|rue|avenue|place|chemin|bd|allée|strasse|straße|platz|weg|via|calle|plaza|jalan|jl|unit|level|floor|building|bldg|suite)\b\.?/i;
@@ -243,16 +267,20 @@ export function readStoreClues(lines, merchant = null) {
   const merchantKey = loose(merchant);
   for (const text of [...header, ...footer]) {
     if (!clues.storeNumber) clues.storeNumber = storeNumberPattern.exec(text)?.[1] ?? null;
-    const phone = phonePattern.exec(text);
-    const phoneDigits = phone ? digitsOf(phone[1]) : '';
-    const labelledPhone = phone && /\b(?:tel|phone|telephone|tél|téléphone|telefon)\b/i.test(text);
-    // A Harrods till number (NT… or the same digits as ####-######) is not a telephone.
-    const phoneShaped = phone && phoneDigits.length >= 9 && phoneDigits.length <= 13 &&
-      (labelledPhone || /^\s*(?:\+|\(?0)\d/.test(phone[1])) && !/\d[.,]\d{2}\b/.test(text) &&
-      !/^\d{4}-\d{6}$/.test(phone[1].replace(/\s+/g, '')) && !/\bNT[0O1]\d/i.test(text);
-    if (!clues.phone && phoneShaped) clues.phone = phone[1].trim();
-    const uk = ukPostcode.exec(text.toUpperCase()), us = usZip.exec(text), eu = euPostcode.exec(text.trim());
-    const postcode = uk?.[1] || us?.[1] || eu?.[1] || null;
+    const phoneText = extractPhone(text);
+    const phoneDigits = phoneText ? digitsOf(phoneText) : '';
+    const labelledPhone = /\b(?:tel|phone|telephone|tél|téléphone|telefon)\b/i.test(text);
+    const tillDigits = (text.match(/\d{4}-\d{6}/) || [''])[0].replace(/\D/g, '');
+    const fusedTill = phoneDigits.length === 13 && !/\s/.test(phoneText || '')
+      || (tillDigits.length === 10 && phoneDigits.includes(tillDigits));
+    // A Harrods till number, or a 13-digit run fused from one, is not a telephone.
+    // A spaced UK number such as 020 7730 1234 is kept in full.
+    const phoneShaped = phoneText && phoneDigits.length >= 9 && phoneDigits.length <= 13 && !fusedTill &&
+      (labelledPhone || /^\s*(?:\+|\(?0)\d/.test(phoneText)) && !/\d[.,]\d{2}\b/.test(text) &&
+      !/^\d{4}-\d{6}$/.test(phoneText.replace(/\s+/g, '')) && !/\bNT[0O1]\d/i.test(text);
+    if (!clues.phone && phoneShaped) clues.phone = phoneText;
+    const uk = readUkPostcode(text), us = usZip.exec(text), eu = euPostcode.exec(text.trim());
+    const postcode = uk || us?.[1] || eu?.[1] || null;
     if (!clues.postcode && postcode && !headerStop.test(text.replace(ukPostcode, ''))) clues.postcode = postcode;
     const policyLine = /\b(?:return|refund|policy|exchange|warranty|served|appointment|please|goods|customer)\b/i.test(text);
     const shortStreetOnly = /\b(?:pl|ln|st|rd|ct|dr|sq)\b/i.test(text) && !/\b(?:road|street|avenue|lane|drive|square|place|terrace|way|court|crescent|close|gardens|park|walk|wharf|centre|center|mall|plaza|parade|broadway|boulevard|highway|strasse|straße|platz|chemin|calle)\b/i.test(text);
@@ -360,10 +388,11 @@ export function storeReceiptId(merchant, ocr) {
   return missing('Harrods: no receipt number was found to the right of the date and time.');
 }
 
-// A found store-rule id is owned by that rule. A generic ambiguous suggestion must not clear it.
+// A store-rule id, including an unclear NT0 normalisation, is owned by that rule.
+// A generic ambiguous suggestion must not clear it. The pink flag still comes from the rule.
 export function confirmedStoreReceiptId(merchant, ocr, value) {
   const storeId = storeReceiptId(merchant, ocr);
-  if (storeId?.status !== 'found' || !storeId.value) return false;
+  if (!storeId?.value || (storeId.status !== 'found' && storeId.status !== 'unclear')) return false;
   return String(value ?? '').trim().toLowerCase() === String(storeId.value).trim().toLowerCase();
 }
 

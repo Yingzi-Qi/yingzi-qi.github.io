@@ -173,7 +173,7 @@ const otherTotal=/^(?:total(?:\s+(?:net|des))?\s+(?:h\.?\s?t\.?\b|tva|tua|vat|ta
 const subLabel=/^(?:sub\s*total|sous[-~\s]*total|zwischensumme|total\s+(?:net\s+)?h\.?\s?t\.?\b)/i;
 const taxLabel=/^(?:(?:includes?|included|sales|total)\s+)?(?:tax|vat|tva)\b/i;
 const discountLabel=/^(?:discount|savings|remise|rabatt)\b/i;
-const metadata=/^(?:sub\s*total|sous[-~\s]*total|(?:(?:grand|order|receipt|gross|net)\s+)?total\b|(?:amount|balance)\s+(?:due|paid|to\s+pay)|item\s+total\b|net\s+[àa]\s+payer|tva\b|gesamt(?:betrag|summe)?\b|summe\b|montant\b|(?:sales\s+)?tax\b|vat\b|includes?\s+vat|discount\b|shipping\b|delivery\b|savings\b|remise\b|rabatt\b|cash\b|change\b|credit\b|tender(?:ed)?\b|paid\b|payment\b|card\b|contactless\b|master\s*card\b|visa\b|american express\b|apple pay\b|thank you\b|auth\b|arqc\b|adyen\b|citcon\b|union\s*pay\b|returns?\b|you have been served\b|product\s+info\b)/i;
+const metadata=/^(?:sub\s*total|sous[-~\s]*total|(?:(?:grand|order|receipt|gross|net)\s+)?total\b|(?:amount|balance)\s+(?:due|paid|to\s+pay)|item\s+total\b|^amount\b|net\s+[àa]\s+payer|tva\b|gesamt(?:betrag|summe)?\b|summe\b|montant\b|(?:sales\s+)?tax\b|vat\b|includes?\s+vat|discount\b|shipping\b|delivery\b|savings\b|remise\b|rabatt\b|cash\b|change\b|credit\b|tender(?:ed)?\b|paid\b|payment\b|card\b|contactless\b|master\s*card\b|visa\b|american express\b|apple pay\b|thank you\b|auth\b|arqc\b|adyen\b|citcon\b|union\s*pay\b|returns?\b|you have been served\b|product\s+info\b)/i;
 const noProduct = /(?:\border\s*(?:no|number|id)\b|^receipt\b|\binvoice\b|^date\b|^time\b|^till\b|^cashier\b|^placed\b|^store\b|style\s*[:#]|\b(?:qty|price)\b.*\b(?:price|amount|total)\b|\bdescription\b.*\bqty\b|^\d{1,2}[\s/-]\w+[\s/-](?:\d{2}|\d{4})\b|\d{1,2}:\d{2}|^demonstration\b)/i;
 function possibleLabel(line) {
   return line && /\p{L}/u.test(line.text) && !metadata.test(tidyLine(line.text)) && !noProduct.test(line.text) && !/^style\b|^sku\b|^(?:item|product|article)\s+(?:id|code)\b|^(?:upc|ean|barcode)\b/i.test(line.text) && !amounts(line.text).length;
@@ -345,6 +345,9 @@ function embeddedModelNumber(item,parsed,sku) {
     String(item??'').trim().endsWith(parsed.itemId);
 }
 function isClosingTotal(text) {
+  const label=tidyLine(text);
+  // Harrods closes the item list with "TOTAL (1 item)" / "TOTAL (3 items)" and prints the figure on the next AMOUNT line.
+  if(/^(?:(?:grand|order|receipt|net|gross)\s+)?total\s*\(\s*\d+\s+items?\s*\)/i.test(label) || /^item\s+total\b/i.test(label)) return true;
   const prices=amounts(text);
   if(prices.length!==1) return false;
   const head=tidyLine(text.slice(0,prices[0].start));
@@ -359,7 +362,7 @@ function footerSaving(text) {
 // Harrods: 4-digit concession, 10-digit 9999999xxx code, optional style ref, then the name.
 // Those codes stay in their own fields. They are not chosen as 品牌货号 / itemId.
 function parseHarrodsItem(label) {
-  const match=/^(\d{4})\s+(9999999\d{3})\s+(.+)$/.exec(String(label||'').trim());
+  const match=/^(\d{4})\s+(\d{10})\s+(.+)$/.exec(String(label||'').trim());
   if(!match) return null;
   let rest=match[3].trim(), styleRef=null;
   const style=/\b([A-Z]{1,4}\d{2,6}[A-Z0-9]*)\b/u.exec(rest);
@@ -676,6 +679,10 @@ export function extractLocal(ocr) {
     else if (taxLabel.test(label)) key='tax';
     else if (discountLabel.test(label)) key='discount';
     else if (totalLabel.test(label) && !otherTotal.test(label)) key='total';
+    if (/^item\s+total\b/i.test(label)) {
+      const itemTotal=amounts(l.text);
+      if (itemTotal.length===1 && result.total==null) { result.total=itemTotal[0].value; totals.add(result.total); }
+    }
     if (!key)continue;
     // OCR can separate the cents after a visible punctuation mark.
     const monetaryText=l.text.replace(/([£€$]\s*\d+)\s*[.,]\s*(\d{2})(?!\d)/g,'$1.$2');
@@ -689,6 +696,11 @@ export function extractLocal(ocr) {
       if(split && tender)values=[{value:Number(split[2]+'.'+split[3])}];
     }
     const next=lines[i+1];
+    if(key==='total' && /^total\s*\(\s*\d+\s+items?\s*\)/i.test(label)){
+      const amountLine=next && /^amount\b/i.test(tidyLine(next.text)) ? amounts(next.text) : [];
+      if(amountLine.length===1){result.total=amountLine[0].value;totals.add(result.total);}
+      continue;
+    }
     let pricedHere=values.length>0;
     if(!values.length && next && next.y>=l.y && next.y-l.y-l.h<=Math.min(.035,1.6*l.h)) {
       const nextAmounts=amounts(next.text);

@@ -292,7 +292,8 @@ function verifyProductCode(observations, item, field, index) {
   const printed=unique(known.map(hit=>name(hit.value)));
   if (field==='itemId' && printed.length>1) return {issue:'Several item IDs could belong to this product line.',evidence:unique(known.map(hit=>hit.text)).join(' | ')};
   const observed=field==='itemId' && printed.length===1 ? {printedItemId:known[0].value} : {};
-  if (!value && observed.printedItemId) return {...observed,issue:'The printed item ID '+observed.printedItemId+' is missing from the record.',evidence:known[0].text};
+  const keptAside=field==='itemId' && [item.concessionCode,item.internalCode,item.ean].some(code=>name(code) && name(code)===name(observed.printedItemId));
+  if (!value && observed.printedItemId && !keptAside) return {...observed,issue:'The printed item ID '+observed.printedItemId+' is missing from the record.',evidence:known[0].text};
   const hits=value ? (observations.byValue.get(value)||[]).filter(hit=>hit.kind===field || (!hit.kind && field==='sku')) : [];
   const own=hits.find(hit=>hit.owner===index);
   if (own) return {...observed,found:true,evidence:own.text};
@@ -565,11 +566,13 @@ export function checkReceipt(data, ocr, previous = null, {independentPhoto = fal
   const storeId = storeReceiptId(data.merchant, ocr);
   // A store rule owns 采购小票id, so a generic heuristic is not the photo value to confirm.
   const genericReceipt = storeId && reference.kind==='receiptReference';
+  const storeRuleId = storeId && (storeId.status==='found' || storeId.status==='unclear') && storeId.value
+    && name(data.receiptReference)===name(storeId.value);
   if(!genericReceipt && reference.status==='found' && data[reference.kind] && name(data[reference.kind])!==name(reference.value)) {
     add(reference.kind,reference.label+' differs from the value on the photo ('+reference.value+').','check');
-  } else if(reference.requiresReview && reference.suggestion) {
+  } else if(reference.requiresReview && reference.suggestion && !storeRuleId) {
     add('receipt','Check the suggested reference '+reference.suggestion.value+' against the other possible numbers.','check');
-  } else if(reference.reasonCode==='conflict') {
+  } else if(!storeRuleId && reference.reasonCode==='conflict') {
     add('receipt',reference.reason,'check');
   }
   const orderNumber = text(data.orderNumber);
