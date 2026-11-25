@@ -138,6 +138,13 @@ function findMerchant(lines, text) {
   for (const name of retailers) { const seen = text.match(name); if (seen) return seen[0]; }
   const top=lines.slice(0,4).map(line=>line.text.trim()).find(line=>/\bN\.?\s*PEAL\b/i.test(line) && /\/|\blondon\b/i.test(line));
   if(top) return 'N.Peal';
+  const city=/^(?:london|paris|manchester|edinburgh|glasgow|dublin|birmingham|bristol|leeds|liverpool|cambridge|oxford|chelsea|mayfair|knightsbridge|westminster|soho|england|scotland|wales|great britain|united kingdom)$/i;
+  const addressLike=value=>/^\d|\b(?:street|st\.?|road|rd\.?|avenue|ave\.?|lane|ln\.?|square|place|drive|terrace|gardens|wharf|broadway|floor|level|unit|suite)\b/i.test(value);
+  for (const line of lines.slice(0, 6)) {
+    const parts = line.text.split(/\s*\/\s*/);
+    const brand = parts[0].trim();
+    if (parts.length === 2 && city.test(parts[1].trim()) && /\p{L}{2}/u.test(brand) && !addressLike(brand)) return brand;
+  }
   const header=[];
   for(const line of lines.slice(0,8)) {
     if(/\breceipt\b|\bsale transaction\b|\b(?:sub)?total\b|\d[.,]\d{2}\b/i.test(line.text))break;
@@ -473,6 +480,13 @@ function itemsFromLines(lines, trace, receiptTotal=null) {
         items.at(-1).itemId=printedId;
         if(trace)trace.at(-1).idLine=i;
       }
+      continue;
+    }
+    const sizeToken=/^(?:(?:xxs|xs|s|m|l|xl|xxl|xxxl|os)(?:\s*\/\s*(?:xxs|xs|s|m|l|xl|xxl|xxxl))*|(?:eu|uk|us|it|fr|de|jp|cn)\s*-?\s*\d{1,3}(?:\.\d)?|\d{1,3}\.\d)$/i.test(text);
+    const bareStyle=/^(?:[A-Za-z]{1,6}-?\d{2,}[A-Za-z0-9]*)$/.test(text) && !/^NT/i.test(text) && !sizeToken;
+    if(bareStyle && items.length && i-lastProduct>0 && i-lastProduct<=3){
+      const row=items.at(-1);
+      if(!row.styleRef) row.styleRef=text;
       continue;
     }
     const printedStyle=readPrintedStyleRef(text);
@@ -1133,12 +1147,21 @@ export async function extractAI(file, apiKey, tier = 1, reasons = []) {
   const timeout = setTimeout(() => controller.abort(), 120000);
   let result;
   try {
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,{
+    const payload={contents:[{role:'user',parts:[{text:prompt + notes},{inlineData:{mimeType:'image/jpeg',data:imageData}}]}],
+        generationConfig:{responseMimeType:'application/json',responseJsonSchema:schema}};
+    // Tillroll v2: the Gemini key lives in the Cloudflare Worker; the browser never holds it.
+    const viaServer = apiKey.trim()==='__server__';
+    const response = viaServer
+      ? await fetch('/api/ocr',{method:'POST',credentials:'same-origin',signal:controller.signal,headers:{'Content-Type':'application/json'},body:JSON.stringify({model,...payload})})
+      : await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,{
       method:'POST',credentials:'omit',referrerPolicy:'no-referrer',signal:controller.signal,
       headers:{'Content-Type':'application/json','x-goog-api-key':apiKey.trim()},
-      body:JSON.stringify({contents:[{role:'user',parts:[{text:prompt + notes},{inlineData:{mimeType:'image/jpeg',data:imageData}}]}],
-        generationConfig:{responseMimeType:'application/json',responseJsonSchema:schema}}),
+      body:JSON.stringify(payload),
     });
+    if(viaServer && !response.ok) {
+      let detail=''; try { detail=(await response.json()).error||''; } catch {}
+      throw new Error(`Tillroll server OCR unavailable (${response.status}). ${detail}`.trim());
+    }
     if(!response.ok) {
       const message = {400:'Check your API key and model access.',401:'The API key was rejected.',403:'The API key cannot use this model.',429:'The Google quota or rate limit was reached.'}[response.status] || 'Try again or switch to on-device OCR.';
       throw new Error(`Google could not read this photo (${response.status}). ${message}`);

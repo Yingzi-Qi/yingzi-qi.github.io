@@ -62,6 +62,29 @@ export function readPurchaseTime(text) {
       candidates.push({time, printed: m[0].trim(), score: dated ? 2 : 1, line: i});
     }
   }
+  const dotted = /(?<![\d.£$€¥])([01]?\d|2[0-3])\.([0-5]\d)(?![\d.])/g;
+  const dotDate = /\b\d{1,2}\.\d{1,2}\.\d{2,4}\b/g;
+  const colonClock = new RegExp(clockPattern.source, 'i');
+  for (const [i, line] of lines.entries()) {
+    if (!/\d{1,4}[-/.]\d{1,2}[-/.]\d{2,4}|\b(?:date|time|heure|datum|zeit)\b/i.test(line)) continue;
+    if (/\b(?:expir|valid|return|open(?:ing)?|hours|ouvert|horaires)\w*/i.test(line)) continue;
+    // A colon clock on this line already owns the time. A dotted amount must not compete with it.
+    if (colonClock.test(line)) continue;
+    const dates = [...line.matchAll(dotDate)];
+    for (const match of line.matchAll(dotted)) {
+      const hour = Number(match[1]), minute = Number(match[2]);
+      if (hour > 23 || minute > 59) continue;
+      const start = match.index, end = start + match[0].length;
+      if (dates.some(date => start < date.index + date[0].length && end > date.index)) continue;
+      const around = line.slice(Math.max(0, start - 1), end + 1);
+      const before = line.slice(0, start);
+      if (/[£$€¥]/.test(around)) continue;
+      if (/\b(?:total|sub\s*-?\s*total|price|amount|amt)\b/i.test(before)) continue;
+      const time = pad(hour) + ':' + pad(minute) + ':00';
+      if (candidates.some(candidate => /:/.test(candidate.printed) && candidate.time !== time)) continue;
+      candidates.push({time, printed: match[0], score: 2, line: i});
+    }
+  }
   if (!candidates.length) return {time: null, issue: null};
   // 00:00 is a blank clock. A real printed time on the same receipt replaces it.
   const printedTimes = candidates.filter(c => c.time !== '00:00:00');
@@ -302,6 +325,12 @@ export function nonItemName(value) {
   if (/^[\d\s.,'£$€¥%#*+-]+$/.test(text)) return 'The item name is only a number (' + clean(value) + ').';
   const words = text.replace(/[\s:]+(?:GBP|EUR|USD|[£$€])?\s*[\d.,]+\s*%?$/i, '').replace(/[\s:#*.=-]+$/g, '');
   if (nonItemWords.test(words)) return 'The item name is a receipt label, not a product (' + clean(value) + ').';
+  if (/^(?:salesperson|sales\s*person|served\s+by|cashier|associate|staff)\b/i.test(text))
+    return 'The item name is a staff line, not a product (' + clean(value) + ').';
+  if (/^(?:visa|master\s*card|maestro|amex|american\s+express|union\s*pay|alipay|we\s*chat|apple\s+pay|google\s+pay|cash|tender(?:ed)?|auth(?:\s+code)?|aid|cryptogram|pan\s*seq|terminal|merchant\s+id|card\s*number|approved)\b/i.test(text))
+    return 'The item name is a payment line, not a product (' + clean(value) + ').';
+  if (/^(?:40|80)\//.test(text))
+    return 'The item name is a payment line, not a product (' + clean(value) + ').';
   return null;
 }
 
