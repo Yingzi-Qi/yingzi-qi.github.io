@@ -251,6 +251,17 @@ describe('brand item id', () => {
     assert.equal(chooseItemId({ brand: 'Other Atelier', fields: { itemId: '3607670123456' } }), '3607670123456');
   });
 
+  it('uses a reader style ref through the brand item-id table', () => {
+    assert.equal(chooseItemId({
+      brand: 'Chanel',
+      fields: { itemId: '999999912345', styleRef: 'AS44010', brandItemId: 'AS44010', sku: '3607670123456' },
+    }), 'AS44010');
+    assert.equal(chooseItemId({
+      brand: 'Chanel',
+      fields: { itemId: '999999912345', styleRef: 'NOT-A-REF', sku: '3607670123456' },
+    }), '3607670123456');
+  });
+
   it('lets an unfitting code fall through to the EAN and strips a Chanel season prefix', () => {
     assert.equal(chooseItemId({
       brand: 'Chanel',

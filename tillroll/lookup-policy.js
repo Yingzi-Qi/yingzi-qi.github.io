@@ -66,6 +66,8 @@ function separateLine(item) {
     fields: {
       itemId: rawId,
       sku: item?.sku ?? item?.style,
+      styleRef: item?.styleRef,
+      brandItemId: item?.brandItemId,
       item: nameField,
       name: item?.name,
       codes: item?.codes,

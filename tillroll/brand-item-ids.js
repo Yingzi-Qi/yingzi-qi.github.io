@@ -124,9 +124,18 @@ export function stripProductCodes(text) {
   return String(text ?? '').replace(CODE, ' ');
 }
 
+function parkedCodes(value) {
+  const text = squash(value);
+  const tight = compact(text);
+  if (!text || isConcessionCode(text) || /^\d{4}$/.test(tight) || /^\d{10}$/.test(tight)) return [];
+  if (looksLikeCode(text) || isEan(text)) return [text];
+  return [];
+}
+
 export function chooseItemId({ brand, fields = {} } = {}) {
   const raw = [fields.itemId, fields.sku, fields.item, fields.name, ...(fields.codes || [])];
-  const found = [...new Set([...raw.flatMap(codesIn), ...raw.flatMap(seasonRefs)].map(squash).filter(Boolean))];
+  const parked = [fields.styleRef, fields.brandItemId].flatMap(parkedCodes);
+  const found = [...new Set([...raw.flatMap(codesIn), ...raw.flatMap(seasonRefs), ...parked].map(squash).filter(Boolean))];
   const rule = ruleFor(brand);
   const branded = rule ? found.filter(rule.test) : [];
   if (branded.length) {
