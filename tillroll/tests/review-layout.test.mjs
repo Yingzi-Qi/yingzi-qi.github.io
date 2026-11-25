@@ -1,0 +1,118 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {makeOcr} from './ocr-fixture.mjs';
+import {extractLocal} from '../extract.js';
+import {checkReceipt, flagCategory} from '../checks.js';
+import {sortItemFields} from '../field-sorter.js';
+
+const today = new Date('2026-11-25T12:00:00Z');
+const read = rows => {
+  const ocr = makeOcr(rows);
+  const data = extractLocal(ocr);
+  return {data, review: checkReceipt(data, ocr, null, {today})};
+};
+
+test('P7: a UK ambiguous date is DD/MM and an unambiguous date stays', () => {
+  const uk = read(['HARRODS', '04/11/26 14:03', 'Scarf 10.00', 'TOTAL 10.00']);
+  assert.equal(uk.data.date, '2026-11-04');
+  assert.equal(uk.data.dateIssue, null);
+  assert.equal(uk.review.flags.some(flag => flag.field === 'date' && /ambiguous/i.test(flag.message)), false);
+  const clue = read(['Atelier', 'Tel 020 7730 1234', '04/11/26 14:03', 'Scarf 10.00', 'TOTAL 10.00']);
+  assert.equal(clue.data.date, '2026-11-04');
+  const clear = read(['HARRODS', '25/11/26 14:03', 'Scarf 10.00', 'TOTAL 10.00']);
+  assert.equal(clear.data.date, '2026-11-25');
+  const foreign = read(['Saks', '04/11/26 14:03', 'Soap 4.00', 'TOTAL 4.00']);
+  assert.equal(foreign.data.date, null);
+  assert.match(foreign.data.dateIssue, /ambiguous/i);
+  assert.ok(foreign.review.flags.some(flag => flag.field === 'date' && /ambiguous/i.test(flag.message) && flagCategory(flag) === 'reading'));
+  const foreignClear = read(['Saks', '25/11/26 14:03', 'Soap 4.00', 'TOTAL 4.00']);
+  assert.equal(foreignClear.data.date, '2026-11-25');
+});
+
+test('Harrods block: codes, brand, description and one Rewards Saving', () => {
+  const {data} = read(['HARRODS', '04/11/2026 14:03 NT0682-111111',
+    '2469 9999991234 3612345678901 £5,700.00', 'CHANEL', 'WOOL COAT',
+    'Rewards Saving -£570.00', 'Customer 10% Day -£570.00', 'TOTAL 5130.00', 'Visa Tendered 5130.00']);
+  assert.equal(data.items.length, 1);
+  assert.equal(data.items[0].brand, 'Chanel');
+  assert.equal(data.items[0].item, 'WOOL COAT');
+  assert.equal(data.items[0].concessionCode, '2469');
+  assert.equal(data.items[0].internalCode, '9999991234');
+  assert.equal(data.items[0].ean, '3612345678901');
+  assert.equal(data.items[0].amount, 5700);
+  assert.equal(data.items[0].lineDiscount, 570);
+  assert.equal(data.items[0].lineDiscountLabel, 'Rewards Saving');
+  assert.equal(data.receiptDiscount, null);
+  assert.equal(data.total, 5130);
+});
+
+test('money: thousands, European cents, and qty 1', () => {
+  const {data} = read(['SHOP', '25/11/2026 10:00', 'Parka 1 x £1.295,00', '1 Unit(s)', 'TOTAL 1295.00']);
+  assert.equal(data.items.length, 1);
+  assert.equal(data.items[0].item, 'Parka');
+  assert.equal(data.items[0].qty, 1);
+  assert.equal(data.items[0].amount, 1295);
+  const split = read(['SHOP', '25/11/2026 10:00', 'Coat £5, 700.00', 'TOTAL 5700.00']);
+  assert.equal(split.data.items[0].amount, 5700);
+  assert.equal(split.data.items.length, 1);
+});
+
+test('EMV footer lines are not items', () => {
+  const {data} = read(['SHOP', '25/11/2026 10:00', 'Scarf 18.00', 'TOTAL 18.00', 'Visa Tendered 18.00',
+    'Cryptogram AB12', 'ogram CD34', 'AID A00001', 'PAN Seq 01', 'Auth Code 445566',
+    'Merchant ID M1', 'Terminal ID T9', '40/12345', '80/ABC']);
+  assert.deepEqual(data.items.map(row => row.item), ['Scarf']);
+});
+
+test('identifiers: REF, Chanel style, boutique SKU, and a confusable letter', () => {
+  const {data} = read(['CHANEL', '25/11/2026 10:00', 'Wool coat 80.00', 'REF# AB1O23', '24A A12345', 'TOTAL 80.00']);
+  assert.equal(data.items[0].styleRef, 'A12345');
+  const ref = data.items[0].identifiers.find(entry => entry.label === 'REF');
+  assert.equal(ref.value, 'AB1O23');
+  assert.ok(ref.alternatives.includes('AB1023'));
+  const style = data.identifiers.find(entry => entry.value === '24A A12345');
+  assert.equal(style.class, 'style_or_model_reference');
+  const sku = read(['SHOP', '25/11/2026 10:00', 'Hat 20.00', 'ABC12345', 'TOTAL 20.00']);
+  assert.ok(sku.data.identifiers.some(entry => entry.value === 'ABC12345' && entry.class === 'product_code'));
+  const serial = read(['SHOP', '25/11/2026 10:00', 'Hat 20.00', 'SERIAL NUMBER SN-9', 'ID# 00077', 'TOTAL 20.00']);
+  assert.ok(serial.data.items[0].identifiers.some(entry => entry.class === 'serial_number' && entry.value === 'SN-9'));
+  assert.equal(serial.data.items[0].primaryItemId, '00077');
+});
+
+test('brands: CG, N.PEAL and the next description line', () => {
+  assert.equal(sortItemFields({item: 'CG Parka', amount: 10}).item.brand, 'Canada Goose');
+  assert.equal(sortItemFields({item: 'YCA Necklace', amount: 10}).item.brand, 'Van Cleef & Arpels');
+  assert.equal(sortItemFields({item: 'THE ROW Coat', amount: 10}).item.brand, 'The Row');
+  const {data} = read(['N.PEAL / LONDON', '25/11/2026 10:00', 'N.PEAL 40.00', 'CREAM SCARF', 'TOTAL 40.00']);
+  assert.equal(data.merchant, 'N.Peal');
+  assert.equal(data.items[0].brand, 'N.Peal');
+  assert.equal(data.items[0].item, 'CREAM SCARF');
+});
+
+test('Harrods id: a damaged prefix and a disagreeing barcode stay printed', () => {
+  const damaged = read(['HARRODS', '25/11/2026 14:03 NR0123-456789', 'Scarf 10.00', 'TOTAL 10.00']);
+  assert.equal(damaged.data.receiptReference, 'NR0123-456789');
+  assert.ok(damaged.data.receiptReferenceAlternatives.includes('NT0123-456789'));
+  assert.ok(damaged.review.flags.some(flag => flag.field === 'receiptReference' && flagCategory(flag) === 'reading'));
+  const shaped = read(['HARRODS', '25/11/2026 14:03 NT0123-456789', 'Scarf 10.00', 'TOTAL 10.00', '999888777666']);
+  assert.equal(shaped.data.receiptReference, 'NT0123-456789');
+  assert.ok(shaped.data.receiptReferenceAlternatives.includes('999888777666'));
+  assert.ok(shaped.review.flags.some(flag => flag.field === 'receiptReference'));
+});
+
+test('TOTAL is checked against Tendered', () => {
+  const same = read(['SHOP', '25/11/2026 10:00', 'Scarf 18.00', 'TOTAL 18.00', 'Visa Tendered 18.00']);
+  assert.equal(same.review.flags.some(flag => /tendered amount/i.test(flag.message)), false);
+  const differ = read(['SHOP', '25/11/2026 10:00', 'Scarf 18.00', 'TOTAL 18.00', 'Visa Tendered 17.00']);
+  assert.ok(differ.review.flags.some(flag => flag.field === 'total' && /tendered amount/i.test(flag.message) && flagCategory(flag) === 'reading'));
+});
+
+test('boutique: merchant, receipt number, and the printed footer', () => {
+  const {data, review} = read(['N.PEAL / LONDON', 'Date 15/11/2026 10:00', 'Cashmere scarf 40.00',
+    'Receipt # NP-100', 'TOTAL 40.00', 'Printed: 2026-11-16 09:15:00']);
+  assert.equal(data.merchant, 'N.Peal');
+  assert.equal(data.receiptReference, 'NP-100');
+  assert.equal(data.date, '2026-11-16');
+  assert.equal(data.time, '09:15:00');
+  assert.ok(review.flags.some(flag => /Printed footer/i.test(flag.message) && flagCategory(flag) === 'info'));
+});

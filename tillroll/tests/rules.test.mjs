@@ -325,10 +325,12 @@ test('store id: a found Harrods id is not cleared by a generic ambiguous suggest
 });
 test('Harrods id: NTO and N10 prefixes normalise to NT0 and stay unclear', () => {
   const oto = storeReceiptId('Harrods', makeOcr(['HARRODS', '12/11/2026 14:03 NTO1234-567890', 'TOTAL 20.00']));
-  assert.equal(oto.value, 'NT01234-567890');
+  assert.equal(oto.value, 'NTO1234-567890');
+  assert.deepEqual(oto.alternatives, ['NT01234-567890']);
   assert.equal(oto.status, 'unclear');
   const n10 = storeReceiptId('Harrods', makeOcr(['HARRODS', '12/11/2026 14:03 N101234-567890', 'TOTAL 20.00']));
-  assert.equal(n10.value, 'NT01234-567890');
+  assert.equal(n10.value, 'N101234-567890');
+  assert.deepEqual(n10.alternatives, ['NT01234-567890']);
   assert.equal(n10.status, 'unclear');
   const {review} = read(['HARRODS', '12/11/2026 14:03 NTO1234-567890', 'Scarf 20.00', 'TOTAL GBP 20.00']);
   const flags = flagsFor(review, 'receiptReference');
@@ -410,7 +412,8 @@ test('N.Peal Item Total is not an item', () => {
 test('store id: an unclear normalised id is kept and does not raise the generic suggestion flag', () => {
   const ocr = makeOcr(['HARRODS', '12/11/2026 14:03 NTO5555-121212', 'Scarf 20.00', 'TOTAL GBP 20.00', 'REF AB12CD34']);
   const data = extractLocal(ocr);
-  assert.equal(data.receiptReference, 'NT05555-121212');
+  assert.equal(data.receiptReference, 'NTO5555-121212');
+  assert.deepEqual(data.receiptReferenceAlternatives, ['NT05555-121212']);
   assert.equal(storeReceiptId('Harrods', ocr).status, 'unclear');
   assert.equal(confirmedStoreReceiptId(data.merchant, ocr, data.receiptReference), true);
   const review = checkReceipt(data, ocr, null, {today, reference: {

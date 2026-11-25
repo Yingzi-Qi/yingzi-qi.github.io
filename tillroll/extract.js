@@ -3,7 +3,7 @@ import {inspectReference} from './reference.js?v=6';
 import {isGtin,isPrintedItemNumber,parsePrintedItemId,printedBarcodeDetail,barcodesBelowNames} from './product-code.js?v=productcodes3';
 import {readPurchaseDate} from './purchase-date.js?v=8';
 import {comparePhotoFields,mergeReadings} from './reading-comparison.js?v=discounts1';
-import {readPurchaseTime,normalizePurchaseTime,readTender,normalizeTender,toPaymentMethod,dropCardDigits,brandItemIdCandidate,readPrintedStyleRef,readStoreClues,mergeStoreClues,storeReceiptId,cleanProductCode,applyZeroPriceExclusion} from './receipt-rules.js?v=1';
+import {readPurchaseTime,normalizePurchaseTime,readTender,normalizeTender,toPaymentMethod,dropCardDigits,brandItemIdCandidate,readPrintedStyleRef,readStoreClues,mergeStoreClues,storeReceiptId,cleanProductCode,applyZeroPriceExclusion,isUkPurchase} from './receipt-rules.js?v=1';
 import {sortItemFields} from './field-sorter.js';
 import {applyItemIdentifiers, isUntrustedReceiptText, maskCardField} from './item-identifiers.js';
 // OCR assets resolve on this site. Receipt images remain in the tab unless the
@@ -105,9 +105,9 @@ export const secondReadPhoto = file => recognize(file, true);
 
 // A decimal comma or point is data on the receipt. Parse the last separator as
 // the decimal marker and require a complete monetary token (never part of a date or SKU).
-const moneyToken=/(?<![\p{L}\d.,])(?:[-−]?(?:[£$€]\s*)?(?:\d{1,3}(?:[.,'’\u00a0\u202f]\d{3})+|\d+)[.,]\d{2}|[-−]\s*[£$€]\s*\d+)(?![.,]\d|\d)/gu;
+const moneyToken=/(?<![\p{L}\d.,])(?:[-−]?(?:[£$€]\s*)?(?:\d{1,3}(?:[.,'’\u00a0\u202f]\s*\d{3})+|\d+)[.,]\d{2}|[-−]\s*[£$€]\s*\d+)(?![.,]\d|\d)/gu;
 function amounts(text) {
-  return [...text.matchAll(moneyToken)].map(m=>{
+  return [...String(text).matchAll(moneyToken)].map(m=>{
     const whole=m[0].match(/^[-−]\s*[£$€]\s*(\d+)$/);
     if(whole) return {value:-Number(whole[1]),start:m.index,end:m.index+m[0].length};
     const literal=m[0].replace(/[£$€\s'’]/g,'').replace('−','-');
@@ -136,6 +136,8 @@ function columns(line) {
 const retailers = [/Harvey\s+Nichols/i,/Harrods/i,/Selfridges/i,/Liberty(?: London)?/i,/Fortnum\s*(?:and|&)\s*Mason/i,/Flannels/i,/Net[-\s]a[-\s]Porter/i,/Bicester Village/i];
 function findMerchant(lines, text) {
   for (const name of retailers) { const seen = text.match(name); if (seen) return seen[0]; }
+  const top=lines.slice(0,4).map(line=>line.text.trim()).find(line=>/\bN\.?\s*PEAL\b/i.test(line) && /\/|\blondon\b/i.test(line));
+  if(top) return 'N.Peal';
   const header=[];
   for(const line of lines.slice(0,8)) {
     if(/\breceipt\b|\bsale transaction\b|\b(?:sub)?total\b|\d[.,]\d{2}\b/i.test(line.text))break;
@@ -359,7 +361,8 @@ function isUnitMarker(text) {
 }
 function isPaymentFooter(text) {
   if(maskedDigitsOnly(text)) return true;
-  if(/\b(?:arqc|pan\s*seq|auth(?:orisation|orization)?\s*code|card\s*number)\b/i.test(text)) return true;
+  if(/\b(?:arqc|cryptogram|ogram|pan\s*seq|auth(?:orisation|orization)?\s*code|card\s*number|merchant\s*id|terminal\s*id)\b/i.test(text)) return true;
+  if(/^(?:40|80)\/\S+/.test(tidyLine(text))) return true;
   return /^(?:aid|terminal|contactless|approved)\b/i.test(tidyLine(text));
 }
 function maskedDigitsOnly(text) {
@@ -387,6 +390,14 @@ function footerSaving(text) {
 }
 // Harrods: 4-digit concession, 10-digit 9999999xxx code, optional style ref, then the name.
 // Those codes stay in their own fields. They are not chosen as 品牌货号 / itemId.
+function harrodsCodePrice(text) {
+  const prices=amounts(text);
+  if(prices.length!==1) return null;
+  const head=text.slice(0,prices[0].start).trim();
+  const match=/^(\d{4})\s+(\d{10})(?:\s+(\d{10}|\d{13}))?$/.exec(head);
+  if(!match) return null;
+  return {concessionCode:match[1], internalCode:match[2], extra:match[3]||null, amount:prices[0].value};
+}
 function parseHarrodsItem(label) {
   const match=/^(\d{4})\s+(\d{10})\s+(.+)$/.exec(String(label||'').trim());
   if(!match) return null;
@@ -437,7 +448,8 @@ function itemsFromLines(lines, trace, receiptTotal=null) {
       }
       continue;
     }
-    if(isPaymentFooter(text) || isUnitMarker(text) || maskedDigitsOnly(text) || /^(?:visa|master\s*card|maestro|amex|american\s+express|union\s*pay|alipay|we\s*chat|cash|citcon|adyen)\b/i.test(tidyLine(text))){paymentBlock=true;continue;}
+    if(isUnitMarker(text)){if(items.length)items.at(-1).qty=1;continue;}
+    if(isPaymentFooter(text) || maskedDigitsOnly(text) || /^(?:visa|master\s*card|maestro|amex|american\s+express|union\s*pay|alipay|we\s*chat|cash|citcon|adyen)\b/i.test(tidyLine(text))){paymentBlock=true;continue;}
     if(paymentBlock && receiptTotal!=null){
       const echoed=amounts(text);
       const head=echoed.length?text.slice(0,echoed[0].start):text;
@@ -523,12 +535,36 @@ function itemsFromLines(lines, trace, receiptTotal=null) {
     }
     const namedSaving=/^(.*\p{L}.*?\S)\s+((?:rewards\s+saving|customer\s+\d+\s*%\s*day|staff\s+saving)\b.*)$/iu.exec(label);
     if(namedSaving && !discountWording.test(namedSaving[1])) label=namedSaving[1].trim();
+    const leadingQty=/^(\d+)\s*[x×]\s+/i.exec(label);
+    if(leadingQty){row.qty=Number(leadingQty[1]);label=label.slice(leadingQty[0].length).trim();}
     const qty=label.match(/(?:^|\s)(?:(?:qty|quantity)\s*[:#]?\s*(\d+)|(\d+)\s*[x×@])\s*$/i);
     if(qty){
       row.qty=Number(qty[1] || qty[2]);label=label.slice(0,qty.index).trim();
     } else if(quantityColumn) {
       const columnQty=label.match(/(?:^|\s)(\d+)\s*$/);
       if(columnQty && columns(line).includes(columnQty[1])){row.qty=Number(columnQty[1]);label=label.slice(0,columnQty.index).trim();}
+    }
+    const block=harrodsCodePrice(text);
+    if(block){
+      row.concessionCode=block.concessionCode;
+      row.internalCode=block.internalCode;
+      row.amount=block.amount;
+      row.itemId=null;
+      if(block.extra && block.extra.length===13) row.ean=block.extra;
+      const names=[];
+      for(let j=i+1;j<lines.length && j<=i+3;j++){
+        const follow=lines[j].text.trim();
+        if(!follow || amounts(follow).length || isClosingTotal(follow) || footerSaving(follow) || isPaymentFooter(follow)) break;
+        if(/^(?:rewards\s+saving|customer\s+\d+\s*%\s*day|staff\s+saving)\b/i.test(follow)) break;
+        names.push(follow);
+        used.add(j);
+      }
+      const sorted=names[0] ? sortItemFields({item:names[0], amount:row.amount, concessionCode:row.concessionCode, internalCode:row.internalCode}) : {item:{}, issues:[]};
+      if(sorted.item.brand){row.brand=sorted.item.brand;row.brandRaw=sorted.item.brandRaw;}
+      row.item=sorted.item.item || names[1] || names[0] || null;
+      if(row.brand && names[1]) row.item=names[1];
+      if(pastTotal)row.afterTotal=true;
+      record(row,i);lastProduct=i;continue;
     }
     const harrodsItem=parseHarrodsItem(label);
     if(harrodsItem){
@@ -602,6 +638,18 @@ function foldLineDiscounts(items,trace) {
     const balances=product && unit!=null && product.amount!=null && product.amount>0 && Math.abs(qty*unit-discount-product.amount)<=.015;
     // A Rewards Saving printed on the next line belongs to that product. The product price stays as printed.
     const underProduct=product && product.amount>0 && run.every(row=>/\brewards\s+saving\b/i.test(row.item||''));
+    const leadingRewards=[];
+    for(const row of run){
+      if(/\brewards\s+saving\b/i.test(row.item||'')) leadingRewards.push(row);
+      else break;
+    }
+    if(!balances && !underProduct && product && product.amount>0 && leadingRewards.length && leadingRewards.length<run.length){
+      applyLineDiscounts(product, discountEntries(leadingRewards));
+      items.splice(start, leadingRewards.length);
+      trace?.splice(start, leadingRewards.length);
+      i=start-1;
+      continue;
+    }
     if(!balances && !underProduct){i=start-1;continue;}
     applyLineDiscounts(product, discountEntries(run));
     items.splice(start,run.length);
@@ -753,9 +801,15 @@ export function extractLocal(ocr) {
   const result=receiptShape();
   const lines=ocr.lines || []; const text=lines.map(l=>l.text).join('\n');
   result.merchant=findMerchant(lines,text);
-  const date=readPurchaseDate(text);result.date=date.date;result.dateIssue=date.issue;
+  result.storeClues=readStoreClues(lines,result.merchant);
+  const date=readPurchaseDate(text,{uk:isUkPurchase(result.merchant,result.storeClues)});result.date=date.date;result.dateIssue=date.issue;
   const time=readPurchaseTime(text);result.time=time.time;
   if(time.issue)result.fieldIssues.push({field:'time',reason:'ambiguous_time',evidence:time.issue});
+  const printedFooter=/printed:\s*((?:19|20)\d{2}-\d{2}-\d{2})\s+((?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d)/i.exec(text);
+  if(printedFooter && (result.date!==printedFooter[1] || result.time!==printedFooter[2])){
+    result.date=printedFooter[1];result.time=printedFooter[2];result.dateIssue=null;
+    result.fieldIssues.push({field:'date',reason:'printed_footer',evidence:'Printed footer '+printedFooter[1]+' '+printedFooter[2]+' disagrees with Date/Time, so the footer is used.'});
+  }
   references(lines,result);
   result.currency=receiptCurrency(lines.map(line=>line.text));
   result.payment=readTender(text);
@@ -843,16 +897,34 @@ export function extractLocal(ocr) {
     if(restated || receiptDiscounts.some(kept=>kept.label===entry.label && Math.abs(kept.amount-entry.amount)<=.02)) continue;
     receiptDiscounts.push(entry);
   }
-  result.receiptDiscounts=receiptDiscounts;
-  result.receiptDiscount=receiptDiscounts.length?roundMoney(receiptDiscounts.reduce((sum,entry)=>sum+entry.amount,0)):null;
-  result.storeClues=readStoreClues(lines,result.merchant);
+  const lineDiscountAmounts=result.items.map(item=>roundMoney(Number(item.lineDiscount)||0)).filter(amount=>amount>0);
+  const countedOnce=receiptDiscounts.filter(entry=>{
+    const same=lineDiscountAmounts.some(amount=>Math.abs(amount-entry.amount)<=.02);
+    return !(same && /customer\s+\d+\s*%\s*day/i.test(entry.label||''));
+  });
+  result.receiptDiscounts=countedOnce;
+  result.receiptDiscount=countedOnce.length?roundMoney(countedOnce.reduce((sum,entry)=>sum+entry.amount,0)):null;
+  const settlements=[];
+  for(const line of lines){
+    const label=tidyLine(line.text);
+    if(!/\btendered\b/i.test(label) && !/^amount\b/i.test(label)) continue;
+    const priced=amounts(line.text);
+    if(priced.length===1) settlements.push(priced[0].value);
+  }
+  if(result.total!=null && settlements.some(amount=>Math.abs(amount-result.total)>.02))
+    result.fieldIssues.push({field:'total',reason:'tendered_mismatch',evidence:'TOTAL '+result.total+' does not match the tendered or AMOUNT line ('+settlements.join(' / ')+').'});
   // Store-specific 采购小票id layouts (Selfridges below the barcode, Harrods beside date/time).
   // The store rule decides the id. A found value replaces a generic heuristic.
   // Missing or unclear does not keep that heuristic as a confirmed id.
   const storeId=storeReceiptId(result.merchant,ocr);
   const ruled=applyStoreReceiptId(result,ocr);
   result.receiptReference=ruled.receiptReference;
+  if(ruled.receiptReferenceAlternatives) result.receiptReferenceAlternatives=ruled.receiptReferenceAlternatives;
   if(ruled.readConfidence) result.readConfidence=ruled.readConfidence;
+  if(!result.receiptReference){
+    const slip=/receipt\s*#\s*([A-Za-z0-9-]+)/i.exec(text);
+    if(slip) result.receiptReference=slip[1];
+  }
   const reference=inspectReference(result,ocr);
   if (reference.status==='found' && !result[reference.kind] && !(storeId && reference.kind==='receiptReference'))
     result[reference.kind]=reference.value;
@@ -867,6 +939,7 @@ export function applyStoreReceiptId(data, ocr) {
   const next={...data};
   if((storeId.status==='found' || storeId.status==='unclear') && storeId.value){
     next.receiptReference=storeId.value;
+    if(storeId.alternatives?.length) next.receiptReferenceAlternatives=storeId.alternatives;
     next.readConfidence={...(data.readConfidence||{}), receiptReference:Number(storeId.certainty)||0};
   } else next.receiptReference=null;
   return next;

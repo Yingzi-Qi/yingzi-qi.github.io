@@ -340,6 +340,21 @@ const phonePattern = /(?:\b(?:tel|phone|telephone|tél|téléphone|telefon)\.?\s
 const storeNumberPattern = /\b(?:store|shop|branch|boutique|magasin|site|filiale|location|loc)\s*(?:no\.?|number|nr\.?|n[°º]|#|id)?\s*[:#]?\s*([A-Z]?\d{1,8})\b/i;
 const headerStop = /\b(?:qty|quantity|description|item|article|price|amount|sale|vente|receipt\s*(?:no|number)|order\s*(?:id|no|number)|transaction|date|time|cashier|caissier|subtotal|total)\b|\d+[.,]\d{2}\b/i;
 
+// UK day-month dates apply to Harrods, N.Peal, Selfridges, or a receipt whose
+// store clues show a UK address, a UK postcode, +44, or a 020 phone.
+export function isUkPurchase(merchant, storeClues) {
+  const name = String(merchant || '');
+  if (/\bharrods\b/i.test(name) || /\bselfridges\b/i.test(name) || /\bn\.?\s*peal\b/i.test(name)) return true;
+  const clues = storeClues && typeof storeClues === 'object' ? storeClues : {};
+  if (readUkPostcode(String(clues.postcode || ''))) return true;
+  const phone = String(clues.phone || '');
+  const digits = phone.replace(/\D/g, '');
+  if (/\+44\b/.test(phone) || digits.startsWith('44') || digits.startsWith('020')) return true;
+  const address = [].concat(clues.addressLines || []).join('\n');
+  if (/\b(?:united kingdom|uniled kingdom|united kingdon|england|scotland|wales|great britain|london)\b/i.test(address)) return true;
+  return Boolean(readUkPostcode(address));
+}
+
 export function readStoreClues(lines, merchant = null) {
   const texts = (lines || []).map(l => clean(typeof l === 'string' ? l : l?.text)).filter(Boolean);
   const clues = {addressLines: [], postcode: null, storeNumber: null, phone: null};
@@ -459,12 +474,28 @@ export function storeReceiptId(merchant, ocr) {
       .filter(w => !hasBox(w) || !hasBox(anchor) || w.x >= anchor.x + anchor.w - .001);
     if (right.length === 1) {
       const raw = right[0].token.toUpperCase();
-      const corrected = /^NTO(?=\d)/.test(raw) || /^N10(?=\d)/.test(raw);
-      const value = corrected ? 'NT0' + raw.slice(3) : raw;
+      const shape = /^NT\d{4}-\d{6}$/;
+      const ntFamily = /^(?:NT|NR|N7|NTO|N10)/.test(raw);
+      const repaired = raw.replace(/^NR/, 'NT').replace(/^N7/, 'NT').replace(/^NTO/, 'NT0').replace(/^N10/, 'NT0');
+      const alternatives = [];
+      if (repaired !== raw) alternatives.push(repaired);
+      const laterDigits = lines.slice(lines.indexOf(line) + 1)
+        .map(row => String(row.text || '').trim())
+        .filter(row => /^\d[\d\s-]{9,}$/.test(row))
+        .map(row => row.replace(/\D/g, ''))
+        .filter(digits => digits.length >= 10 && digits.length <= 16);
+      const ownDigits = raw.replace(/\D/g, '');
+      const barcodeDisagrees = laterDigits.length > 0 && laterDigits.every(digits => digits !== ownDigits);
+      for (const digits of laterDigits) if (digits !== ownDigits && !alternatives.includes(digits)) alternatives.push(digits);
       const certainty = Number(right[0].confidence ?? line.confidence) || 0;
-      const clear = !corrected && certainty >= .8;
-      return {rule, status: clear ? 'found' : 'unclear', value, evidence: line.text, certainty,
-        reason: corrected ? 'Harrods: the NT0 prefix was uncertain in the photo and was normalised.' : clear ? 'Harrods: the receipt number to the right of the date and time.' : 'Harrods: the number beside the date and time is not clearly legible.'};
+      if (ntFamily) {
+        const clear = shape.test(raw) && !barcodeDisagrees && certainty >= .8;
+        return {rule, status: clear ? 'found' : 'unclear', value: raw, alternatives, evidence: line.text, certainty,
+          reason: clear ? 'Harrods: the receipt number to the right of the date and time.' : 'Harrods: the receipt number is not exactly NT and four digits, a hyphen, and six digits. The printed reading is kept.'};
+      }
+      const clear = !barcodeDisagrees && certainty >= .8;
+      return {rule, status: clear ? 'found' : 'unclear', value: raw, alternatives, evidence: line.text, certainty,
+        reason: clear ? 'Harrods: the receipt number to the right of the date and time.' : 'Harrods: the number beside the date and time is not clearly legible.'};
     }
     if (right.length > 1) return {rule, status: 'unclear', value: right.at(-1).token, evidence: line.text, certainty: 0,
       reason: 'Harrods: several codes are printed to the right of the date and time.'};

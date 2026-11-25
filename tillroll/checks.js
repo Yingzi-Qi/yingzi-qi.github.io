@@ -527,6 +527,7 @@ const readerIssueMessages = {
   payment_method:'Payment method must be UnionPay, Card, Alipay or WeChat',
   unreadable_price:'The price is not a number',
   item_name_missing:'item-name-missing',
+  tendered_mismatch:'TOTAL does not match the tendered amount',
 };
 
 // A line amount must be printed on the item's own row or its short detail block.
@@ -644,6 +645,7 @@ export function checkReceipt(data, ocr, previous = null, {independentPhoto = fal
   for (const issue of Array.isArray(data.fieldIssues) ? data.fieldIssues : []) {
     const field = text(issue?.field);
     if (!/^(merchant|orderId|orderNumber|receiptReference|date|time|payment|total|items\.\d+\.(item|amount|itemId|sku))$/.test(field) || issue.reason === 'missing_on_receipt' || issue.reason === 'item_name_missing') continue;
+    if (issue.reason === 'printed_footer') { add(field, text(issue.evidence), 'info'); continue; }
     const known = readerIssueMessages[issue.reason];
     if (known) {
       add(field, known + (issue.evidence ? '. '+text(issue.evidence) : '.'), issue.reason === 'rejected_code' || issue.reason === 'channel_not_tender' ? 'fix' : 'check');

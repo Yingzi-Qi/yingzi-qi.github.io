@@ -1,5 +1,5 @@
 // Batch date checks. This never rewrites a parsed date. It only reports flags
-// on 采购时间 (purchaseTime). DD/MM parsing is unchanged.
+// on 采购时间 (purchaseTime). It runs on the dates the parser already emitted.
 
 const FIELD = 'purchaseTime';
 const DAY = 86400000;
@@ -84,4 +84,39 @@ export function batchDateFlags(receipts, {uploadTime = new Date(), locks} = {}) 
     });
   }
   return flags;
+}
+
+/**
+ * One receipt row in a batch, after purchase-date parsing.
+ * @typedef {object} DateOutlierUnit
+ * @property {string} rowId Stable id of the receipt row. It is copied onto each returned flag and is not a line number.
+ * @property {string} [date] Parsed purchase date, `YYYY-MM-DD`, as `readPurchaseDate` left it. This is the date the check reads.
+ * @property {string} [purchaseTime] Used only when `date` is absent. Only the leading `YYYY-MM-DD` of this 采购时间 value is read.
+ * @property {string[]} [human_verified_unflagged] Field names the user cleared. `purchaseTime` or `采购时间` in this list skips the row.
+ */
+
+/**
+ * Backend batch date check. Pure: no I/O, and it does not change a date.
+ * The month test runs only when at least three units have a parsed date.
+ * Same rules as {@link batchDateFlags}.
+ * @param {DateOutlierUnit[]} units
+ * @param {{now?: Date|string|number}} [options] `now` is the upload time.
+ * @returns {Array<{rowId: string, field: '采购时间', flag: '#FECDD3', reason: string}>}
+ */
+export function checkBatchDateOutliers(units, { now = new Date() } = {}) {
+  const flags = batchDateFlags((units || []).map(unit => {
+    const listed = [].concat(unit?.human_verified_unflagged || unit?.humanVerifiedUnflagged || []);
+    const lockedField = listed.some(name => name === 'purchaseTime' || name === '采购时间');
+    return {
+      id: unit?.rowId,
+      date: unit?.date ?? unit?.purchaseTime,
+      human_verified_unflagged: lockedField ? ['purchaseTime'] : [],
+    };
+  }), {uploadTime: now});
+  return flags.map(flag => ({
+    rowId: flag.id,
+    field: '采购时间',
+    flag: '#FECDD3',
+    reason: flag.message,
+  }));
 }

@@ -91,7 +91,11 @@ function readLabel(line, text, itemDescription) {
     const alternative = /\(\s*or\s+([^)]+)\)/i.exec(text);
     const alternatives = [];
     if (alternative && alternative[1].trim() !== value) alternatives.push(alternative[1].trim());
-    const unclear = /[?]/.test(value) || alternatives.length > 0;
+    if (/[IO]/.test(value)) {
+      const swapped = value.replace(/[IO]/g, ch => ({I: '1', O: '0'}[ch]));
+      if (swapped !== value && !alternatives.includes(swapped)) alternatives.push(swapped);
+    }
+    const unclear = /[?]/.test(value) || Boolean(alternative);
     let confidence = wordConfidence(line, value);
     if (unclear) confidence = Math.min(confidence, 0.5);
     if (paymentClasses.has(finder.class)) value = maskPaymentIdentifier(finder.class, value);
@@ -247,6 +251,8 @@ export function applyItemIdentifiers(data, ocr) {
     const list = block?.identifiers || [];
     const primary = choosePrimary(list);
     const next = {...item, identifiers: list, primaryItemId: primary.value, primaryItemIdReason: primary.reason};
+    const ref = list.find(entry => /^ref#?$/i.test(entry.label) && entry.value);
+    if (ref && !next.styleRef) next.styleRef = ref.value;
     if (!next.item) {
       const filled = descriptionFromBlock(block);
       if (filled) {
@@ -262,7 +268,32 @@ export function applyItemIdentifiers(data, ocr) {
       return !(match && issue.reason === 'item_name_missing' && filledIndexes.includes(Number(match[1])));
     });
   }
-  source.identifiers = identifiers;
+  const extra = [];
+  const chanel = /^(?:(\d{2}[A-Z])\s+)?([A-Z]{1,3}\d{4,5})\b/;
+  const confusable = value => {
+    const swapped = String(value).replace(/[IO10]/g, ch => ({I: '1', '1': 'I', O: '0', '0': 'O'}[ch]));
+    return swapped === value ? [] : [swapped];
+  };
+  for (const line of lines) {
+    const text = tidy(line.text);
+    const styled = chanel.exec(text);
+    const season = Boolean(styled && styled[1]);
+    if (styled && (season || /chanel/i.test(text))) {
+      const entry = {value: text, label: 'Style', class: 'style_or_model_reference', evidence: text, confidence: 0.9, alternatives: confusable(text), itemDescription: null};
+      extra.push(entry);
+      const target = source.items.find(item => /chanel/i.test(String(item.brand || '') + ' ' + String(item.item || ''))) || (season ? source.items.find(item => item.amount != null) : null);
+      if (target && (season || !target.styleRef)) {
+        target.styleRef = styled[2];
+        target.identifiers = [...(target.identifiers || []), entry];
+      }
+    } else if (/^[A-Z]{2,}\d{2,}$/.test(text)) {
+      const entry = {value: text, label: 'SKU', class: 'product_code', evidence: text, confidence: 0.9, alternatives: confusable(text), itemDescription: null};
+      extra.push(entry);
+      const target = source.items.find(item => !(item.identifiers || []).some(found => found.value === text));
+      if (target) target.identifiers = [...(target.identifiers || []), entry];
+    }
+  }
+  source.identifiers = identifiers.concat(extra);
   source.itemCountCheck = itemCountCheck(lines, source.items);
   if (source.card) source.card = maskCardField(source.card);
   return source;

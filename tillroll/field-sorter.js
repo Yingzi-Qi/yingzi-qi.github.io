@@ -31,6 +31,8 @@ const dictionary = [
   ['Loro Piana', ['LORO PIANA']],
   ['Brunello Cucinelli', ['BRUNELLO CUCINELLI']],
   ['The Row', ['THE ROW']],
+  ['Canada Goose', ['CANADA GOOSE', 'CG']],
+  ['N.Peal', ['N.PEAL', 'N. PEAL', 'N PEAL']],
   ['Max Mara', ['MAX MARA']],
 ];
 
