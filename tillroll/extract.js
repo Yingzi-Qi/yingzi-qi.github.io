@@ -909,8 +909,14 @@ export function extractLocal(ocr) {
   for(const line of lines){
     const label=tidyLine(line.text);
     if(!/\btendered\b/i.test(label) && !/^amount\b/i.test(label)) continue;
-    const priced=amounts(line.text);
-    if(priced.length===1) settlements.push(priced[0].value);
+    const leader=/[—–−-]+\s*(?=[£$€])/;
+    if(/\btendered\b/i.test(label) && /\b(?:refund|return)\b/i.test(label) && leader.test(label)){
+      result.fieldIssues.push({field:'total',reason:'tender_sign_ambiguous',evidence:'The tender line has both a dash leader and refund wording, so the sign is not clear.'});
+      continue;
+    }
+    const tenderText=/\btendered\b/i.test(label) ? line.text.replace(/[—–−-]+(?=\s*[£$€])/g,'') : line.text;
+    const priced=amounts(tenderText);
+    if(priced.length===1) settlements.push(Math.abs(priced[0].value));
   }
   if(result.total!=null && settlements.some(amount=>Math.abs(amount-result.total)>.02))
     result.fieldIssues.push({field:'total',reason:'tendered_mismatch',evidence:'TOTAL '+result.total+' does not match the tendered or AMOUNT line ('+settlements.join(' / ')+').'});

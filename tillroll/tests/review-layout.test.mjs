@@ -103,6 +103,12 @@ test('Harrods id: a damaged prefix and a disagreeing barcode stay printed', () =
   assert.ok(shaped.review.flags.some(flag => flag.field === 'receiptReference'));
 });
 
+test('a dash before a tendered amount is a leader', () => {
+  const paid = read(['ATELIER', '12/11/2026 11:00', 'Wool coat 1234.00', 'TOTAL 1234.00', 'Visa Tendered —-£1,234.00']);
+  assert.equal(paid.review.flags.some(flag => /tender amount sign is ambiguous|tendered amount/i.test(flag.message)), false);
+  const unclear = read(['ATELIER', '12/11/2026 11:00', 'Wool coat 20.00', 'TOTAL 20.00', 'Visa Tendered refund —-£20.00']);
+  assert.ok(unclear.review.flags.some(flag => /tender amount sign is ambiguous/i.test(flag.message) && flagCategory(flag) === 'reading'));
+});
 test('TOTAL is checked against Tendered', () => {
   const same = read(['SHOP', '25/11/2026 10:00', 'Scarf 18.00', 'TOTAL 18.00', 'Visa Tendered 18.00']);
   assert.equal(same.review.flags.some(flag => /tendered amount/i.test(flag.message)), false);

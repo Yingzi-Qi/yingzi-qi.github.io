@@ -532,6 +532,7 @@ const readerIssueMessages = {
   unreadable_price:'The price is not a number',
   item_name_missing:'item-name-missing',
   tendered_mismatch:'TOTAL does not match the tendered amount',
+  tender_sign_ambiguous:'The tender amount sign is ambiguous',
 };
 
 // A line amount must be printed on the item's own row or its short detail block.
