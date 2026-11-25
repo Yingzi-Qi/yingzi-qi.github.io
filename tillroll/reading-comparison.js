@@ -6,7 +6,15 @@ const labels={merchant:'Retailer',date:'Purchase date',time:'Time',orderId:'Orde
   unitPrice:'Unit price',amount:'Line amount',colour:'Colour',size:'Size',lineDiscount:'Line discount',lineDiscountLabel:'Discount label'};
 const numeric=new Set(['qty','unitPrice','amount','lineDiscount','receiptDiscount','total','subtotal','discount','tax']);
 const present=value=>value!=null && String(value).trim()!=='';
-const normal=value=>String(value??'').normalize('NFKC').trim().toLowerCase().replace(/\s+/g,' ');
+// OCR engines frequently alternate between straight and typographic
+// punctuation for the same printed value. Treat those glyph variants as the
+// same value during cross-reading comparisons while keeping the visible text
+// that the reader chose. This prevents a punctuation-only change from becoming
+// a reading error, especially for names such as D'E/PENET/R.
+const normal=value=>String(value??'').normalize('NFKC').trim().toLowerCase()
+  .replace(/[\u2018\u2019\u201a\u201b\u02bc\u0060\u00b4]/g,"'")
+  .replace(/[\u2010-\u2015\u2212]/g,'-')
+  .replace(/\s+/g,' ');
 function same(key,a,b) {
   if (!present(a) || !present(b))return !present(a) && !present(b);
   if (numeric.has(key)) return Number.isFinite(Number(a)) && Number(a)===Number(b);
