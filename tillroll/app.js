@@ -41,10 +41,13 @@ function renderHistory(){
   const list=$('#history-list');if(!list)return;
   const entries=historyEntries();
   if(!entries.length){list.innerHTML='<p class="history-empty">No reading or workbook history yet.</p>';return;}
-  list.innerHTML=entries.flatMap(entry=>(entry.events||[]).slice(0,12).map(event=>{
-    const kind=event.type==='manual-clear'?'change':event.type==='refresh'?'refresh':event.type==='lookup-change'?'change':'';
-    return `<article class="history-entry"><strong>${escape(entry.filename||entry.merchant||'Receipt')}</strong><span class="history-tag ${kind}">${escape(event.type==='manual-clear'?'Manual correction':event.type==='refresh'?'Excel refresh':event.type==='lookup-change'?'Lookup change':event.type==='export'?'Export':'Reading')}</span><time>${escape(formatHistoryTime(event.at))}</time><div class="history-meta">${escape(event.detail||'')}</div></article>`;
-  })).join('')||'<p class="history-empty">No reading or workbook history yet.</p>';
+  list.innerHTML=entries.map(entry=>{
+    const events=(entry.events||[]).slice(0,12);
+    const lines=entry.reading?.lines||[];
+    const eventHtml=events.map(event=>`<li><span class="history-tag ${event.type==='manual-clear'||event.type==='lookup-change'?'change':event.type==='refresh'?'refresh':''}">${escape(event.type==='manual-clear'?'Manual correction':event.type==='refresh'?'Excel refresh':event.type==='lookup-change'?'Lookup change':event.type==='export'?'Export':'Reading')}</span> <time>${escape(formatHistoryTime(event.at))}</time> · ${escape(event.detail||'')}</li>`).join('');
+    const preview=lines.length?`<details class="history-preview"><summary>View ${lines.length} exported row${lines.length===1?'':'s'}</summary><div class="history-table"><div class="history-row history-head"><span>品牌</span><span>品名</span><span>品牌货号</span><span>采购商品金额</span></div>${lines.map(line=>`<div class="history-row"><span>${escape(line.brand||'—')}</span><span>${escape(line.item||'—')}</span><span>${escape(line.itemId||'—')}</span><span>${escape(line.amount??line.unitPrice??'—')}</span></div>`).join('')}</div></details>`:'';
+    return `<article class="history-entry"><strong>${escape(entry.filename||entry.merchant||'Receipt')}</strong><small>${escape(entry.merchant||'')}</small><div class="history-meta"><ul>${eventHtml}</ul></div>${preview}</article>`;
+  }).join('')||'<p class="history-empty">No reading or workbook history yet.</p>';
 }
 function openHistory(){renderHistory();const dialog=$('#history-dialog');if(dialog && !dialog.open)dialog.showModal();}
 function importedPhotoChecks(r, fillMissing=false) {
