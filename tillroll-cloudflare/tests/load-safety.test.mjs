@@ -341,17 +341,14 @@ test('index.html loads app.js and v2.js with no uncaught errors, and main handle
   for (const el of presentHistory) {
     if (el.hasAttribute('hidden') || el.hidden) continue;
     const before = fetchCalls.filter(c => String(c.url).includes('/api/history')).length;
-    const localDlg = window.document.getElementById('history-dialog');
-    const v2Dlg = window.document.getElementById('v2-history-dialog');
-    if (localDlg && isOpen(localDlg) && typeof localDlg.close === 'function') localDlg.close();
-    if (v2Dlg && isOpen(v2Dlg) && typeof v2Dlg.close === 'function') v2Dlg.close();
+    const dialog = window.document.getElementById('history-dialog');
+    if (dialog && isOpen(dialog) && typeof dialog.close === 'function') dialog.close();
     el.click();
     await new Promise(r => setTimeout(r, 30));
     const after = fetchCalls.filter(c => String(c.url).includes('/api/history')).length;
-    const opened = isOpen(localDlg) || isOpen(v2Dlg) || after > before;
-    assert.ok(opened, `#${el.id} should open a history dialog or fetch /api/history`);
-    if (localDlg && isOpen(localDlg) && typeof localDlg.close === 'function') localDlg.close();
-    if (v2Dlg && isOpen(v2Dlg) && typeof v2Dlg.close === 'function') v2Dlg.close();
+    const opened = isOpen(dialog) || after > before;
+    assert.ok(opened, `#${el.id} should fetch /api/history or open #history-dialog`);
+    if (dialog && isOpen(dialog) && typeof dialog.close === 'function') dialog.close();
   }
 
   t.after(() => { dom.window.close(); });

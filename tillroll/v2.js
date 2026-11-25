@@ -218,33 +218,50 @@ async function openWorkbooks() {
     window.tillrollV2Hooks?.refreshFromFile?.(file);
   };
 }
-// ONE Reading History screen: the v2 server-backed /api/history dialog.
-// The browser-only reading-history.js dialog is an offline fallback only,
-// used when the API is unreachable or returns a 5xx. A 401 / locked
-// response opens the existing passcode dialog and retries after unlock;
-// cancelling unlock shows nothing extra.
+// Reading History uses the existing #history-dialog. Opening it fetches
+// GET /api/history and renders the server rows there. A 401 / locked
+// response opens the passcode dialog and retries after unlock; cancelling
+// unlock shows nothing extra. Only a 5xx or a network failure falls back
+// to the browser-local reading-history.js list in the same dialog.
 export async function openReadingHistory({ fetchImpl, openLocal, unlockImpl } = {}) {
   const fetchFn = fetchImpl || (typeof fetch === 'function' ? fetch.bind(globalThis) : null);
   const doUnlock = unlockImpl || unlock;
+  const historyDialog = () => document.getElementById('history-dialog');
+  const serverList = () => document.getElementById('history-server-list') || document.getElementById('history-list');
+  const localList = () => document.getElementById('history-list');
+  const setStatus = text => { const el = document.getElementById('history-status'); if (el) el.textContent = text || ''; };
   const showLocal = () => {
-    const v2 = document.getElementById('v2-history-dialog');
-    if (v2?.open) v2.close();
+    const server = document.getElementById('history-server-list');
+    const local = localList();
+    if (server && local && server !== local) { server.hidden = true; local.hidden = false; }
+    const clear = document.getElementById('history-clear');
+    if (clear) clear.hidden = false;
+    setStatus('Showing the history kept in this browser (offline).');
     const fallback = openLocal || (typeof window !== 'undefined' && window.tillrollLocalHistory?.open);
     if (typeof fallback === 'function') fallback();
+    else {
+      const d = historyDialog();
+      if (d && !d.open) d.showModal();
+    }
     return 'local';
   };
-  const showV2 = (data) => {
+  const showServer = (data) => {
     const entries = Array.isArray(data.entries) ? data.entries : [];
-    const list = document.getElementById('v2-history-list');
+    const list = serverList();
     if (list) {
       list.innerHTML = entries.length
-        ? '<ul class="v2-list">' + entries.map(e => `<li><span><b>${esc(e.kind)}</b> · ${esc(e.summary)}<br><small>${esc(new Date(e.created_at).toLocaleString('en-GB', { timeZone: 'Europe/London' }))}${e.batch_id ? ' · ' + esc(e.batch_id) : ''}</small></span></li>`).join('') + '</ul>'
-        : '<p>No history yet.</p>';
+        ? entries.map(e => `<article class="history-entry"><strong>${esc(e.kind || 'Event')}</strong> · ${esc(e.summary || '')}<small>${esc(new Date(e.created_at).toLocaleString('en-GB', { timeZone: 'Europe/London' }))}${e.batch_id ? ' · ' + esc(e.batch_id) : ''}</small></article>`).join('')
+        : '<p class="history-empty">No history yet.</p>';
+      list.hidden = false;
     }
-    const local = document.getElementById('history-dialog');
-    if (local?.open) local.close();
-    const v2 = document.getElementById('v2-history-dialog');
-    if (v2 && !v2.open) v2.showModal();
+    const server = document.getElementById('history-server-list');
+    const local = localList();
+    if (server && local && server !== local) local.hidden = true;
+    const clear = document.getElementById('history-clear');
+    if (clear) clear.hidden = true;
+    setStatus('Showing the reading history saved on the Tillroll server.');
+    const d = historyDialog();
+    if (d && !d.open) d.showModal();
     return 'v2';
   };
   try {
@@ -258,7 +275,7 @@ export async function openReadingHistory({ fetchImpl, openLocal, unlockImpl } = 
       return 'cancelled';
     }
     if (!r.ok) return 'error';
-    return showV2(data);
+    return showServer(data);
   } catch {
     return showLocal();
   }
@@ -284,14 +301,8 @@ function init() {
   $('#v2-run')?.addEventListener('click', runSanity);
   $('#v2-workbooks')?.addEventListener('click', openWorkbooks);
   $('#v2-history')?.addEventListener('click', openHistory);
-  // One visible history action: Yingzi's landing/workspace "Reading history"
-  // buttons open the v2 server-backed screen. Hide the extra v2-nav button.
-  const localHistoryBtns = [$('#landing-history'), $('#history')].filter(Boolean);
-  if (localHistoryBtns.length) {
-    const nav = $('#v2-history');
-    if (nav) nav.hidden = true;
-    for (const b of localHistoryBtns) b.onclick = ev => { ev?.preventDefault?.(); openReadingHistory(); };
-  }
+  // #history / #landing-history (app.js) and #v2-history all go through
+  // openReadingHistory, which fills the existing #history-dialog.
   document.addEventListener('change', onCheckChange);
   for (const b of document.querySelectorAll('[data-v2-close]')) b.onclick = () => document.getElementById(b.dataset.v2Close).close();
   const p = new URLSearchParams(location.search).get('drive');
