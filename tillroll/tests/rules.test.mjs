@@ -567,15 +567,22 @@ test('residuals: noisy total, footer lines, zeros, phones, missing items and a b
   assert.equal(shop.data.items[0].qty, 1);
   assert.equal(shop.data.total, 40);
 });
-test('a zero service line is not part of TOTAL (n items)', () => {
-  const lines = makeOcr(['ATELIER', 'Scarf 18.00', 'By Appointment 0.00', 'TOTAL (1 item) 18.00']).lines;
-  const check = itemCountCheck(lines, [{item: 'Scarf', amount: 18}, {item: 'By Appointment', amount: 0}]);
-  assert.equal(check.printed, 1);
-  assert.equal(check.counted, 1);
-  assert.equal(check.matches, true);
-  const kept = itemCountCheck(lines, [{item: 'Scarf', amount: 18}, {item: 'Spare button', amount: 0}]);
-  assert.equal(kept.counted, 2);
-  assert.equal(kept.matches, false);
+test('TOTAL (n items) matches purchased lines or purchased plus excluded zeros', () => {
+  const purchased = [{item: 'Scarf', amount: 18}];
+  const bag = [{item: 'Carrier bag', amount: 0}];
+  const purchasedOnly = itemCountCheck(makeOcr(['ATELIER', 'Scarf 18.00', 'Carrier bag 0.00', 'TOTAL (1 item) 18.00']).lines, purchased, bag);
+  assert.equal(purchasedOnly.purchased, 1);
+  assert.equal(purchasedOnly.withExcludedZeros, 2);
+  assert.equal(purchasedOnly.matches, true);
+  const withWrap = itemCountCheck(makeOcr(['ATELIER', 'Scarf 18.00', 'Gift wrap 0.00', 'TOTAL (2 items) 18.00']).lines, purchased, [{item: 'Gift wrap', amount: 0}]);
+  assert.equal(withWrap.matches, true);
+  const wrong = makeOcr(['ATELIER', 'Scarf 18.00', 'By Appointment 0.00', 'TOTAL (4 items) 18.00']);
+  const mismatch = itemCountCheck(wrong.lines, purchased, [{item: 'By Appointment', amount: 0}]);
+  assert.equal(mismatch.matches, false);
+  const flagged = checkReceipt({merchant: 'ATELIER', total: 18, items: purchased, excludedZeroItems: [{item: 'By Appointment', amount: 0}]}, wrong);
+  assert.ok(flagged.flags.some(flag => flag.message === 'item_count_mismatch' && flag.field === 'receipt' && flagCategory(flag) === 'reading'));
+  const accepted = checkReceipt({merchant: 'ATELIER', total: 18, items: purchased, excludedZeroItems: bag}, makeOcr(['ATELIER', 'Scarf 18.00', 'Carrier bag 0.00', 'TOTAL (1 item) 18.00']));
+  assert.equal(accepted.flags.some(flag => flag.message === 'item_count_mismatch'), false);
 });
 test('identifiers: labels, priority, masks, count and untrusted text', () => {
   assert.equal(new Set(identifierClasses).size, identifierClasses.length);

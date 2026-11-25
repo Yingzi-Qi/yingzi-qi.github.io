@@ -234,18 +234,16 @@ export function printedItemCount(lines) {
   return null;
 }
 
-function zeroServiceLine(item) {
-  if (Number(item?.amount) !== 0) return false;
-  return /\b(?:by\s+appointment|appointment|carrier\s+bag|gift\s*wrap|wrapping|sample|tester|complimentary|packaging|consultation)\b/i.test(String(item?.item || ''));
-}
-
-export function itemCountCheck(lines, items) {
+export function itemCountCheck(lines, items, excludedZeroItems = []) {
   const printed = printedItemCount(lines);
-  const counted = (items || []).filter(item => !zeroServiceLine(item)).length;
+  const purchased = (items || []).length;
+  const withExcludedZeros = purchased + (excludedZeroItems || []).length;
   return {
     printed,
-    counted,
-    matches: printed == null ? null : printed === counted,
+    counted: purchased,
+    purchased,
+    withExcludedZeros,
+    matches: printed == null ? null : printed === purchased || printed === withExcludedZeros,
     evidence: printed == null ? 'No TOTAL (n items) heading was printed.' : 'TOTAL (' + printed + (printed === 1 ? ' item' : ' items') + ')',
   };
 }
@@ -339,7 +337,7 @@ export function applyItemIdentifiers(data, ocr) {
     }
   }
   source.identifiers = identifiers.concat(extra);
-  source.itemCountCheck = itemCountCheck(lines, source.items);
+  source.itemCountCheck = itemCountCheck(lines, source.items, source.excludedZeroItems);
   if (source.card) source.card = maskCardField(source.card);
   return source;
 }
