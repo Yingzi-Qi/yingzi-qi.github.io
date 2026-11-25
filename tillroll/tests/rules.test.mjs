@@ -29,6 +29,17 @@ test('time: 24-hour HH:MM:SS, seconds default to :00, am/pm converted', () => {
   assert.equal(normalizePurchaseTime('13:10 pm'), null);
   assert.equal(normalizePurchaseTime(''), null);
 });
+test('a dotted clock ignores dates, amounts, and an existing colon time', () => {
+  assert.equal(readPurchaseTime('Date 15.11.26').time, null);
+  const clock = readPurchaseTime('15/11/2026 14:03 £14.50');
+  assert.equal(clock.time, '14:03:00');
+  assert.equal(clock.issue, null);
+  assert.equal(readPurchaseTime('Date 15/11/2026 Total 14.50').time, null);
+  const street = read(['12 Baker Street / London', '15/11/2026 14:03', 'Wool coat 80.00', 'TOTAL 80.00']);
+  assert.notEqual(street.data.merchant, '12 Baker Street');
+  const road = read(['High Street / London', '15/11/2026 14:03', 'Wool coat 80.00', 'TOTAL 80.00']);
+  assert.notEqual(road.data.merchant, 'High Street');
+});
 test('boutique header: brand before a city, dotted time, and receipt number', () => {
   const shop = read(['THE ROW / PARIS', '15/11/2026 14.03', 'Wool coat 80.00', 'Receipt # TR-9', 'TOTAL 80.00']);
   assert.equal(shop.data.merchant, 'THE ROW');

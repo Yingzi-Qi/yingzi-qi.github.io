@@ -139,9 +139,11 @@ function findMerchant(lines, text) {
   const top=lines.slice(0,4).map(line=>line.text.trim()).find(line=>/\bN\.?\s*PEAL\b/i.test(line) && /\/|\blondon\b/i.test(line));
   if(top) return 'N.Peal';
   const city=/^(?:london|paris|manchester|edinburgh|glasgow|dublin|birmingham|bristol|leeds|liverpool|cambridge|oxford|chelsea|mayfair|knightsbridge|westminster|soho|england|scotland|wales|great britain|united kingdom)$/i;
+  const addressLike=value=>/^\d|\b(?:street|st\.?|road|rd\.?|avenue|ave\.?|lane|ln\.?|square|place|drive|terrace|gardens|wharf|broadway|floor|level|unit|suite)\b/i.test(value);
   for (const line of lines.slice(0, 6)) {
     const parts = line.text.split(/\s*\/\s*/);
-    if (parts.length === 2 && city.test(parts[1].trim()) && /\p{L}{2}/u.test(parts[0])) return parts[0].trim();
+    const brand = parts[0].trim();
+    if (parts.length === 2 && city.test(parts[1].trim()) && /\p{L}{2}/u.test(brand) && !addressLike(brand)) return brand;
   }
   const header=[];
   for(const line of lines.slice(0,8)) {
