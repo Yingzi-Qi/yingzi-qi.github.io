@@ -209,8 +209,10 @@ export async function buildV2XlsxBlob(input, { exportKey = (globalThis.crypto?.r
   const legacy = comments.length ? `<legacyDrawing r:id="rIdVml"/>` : '';
   const worksheet = sheetDocument(header, body, { hiddenFrom: VISIBLE_COLUMNS.length, legacy });
   const excluded = Array.isArray(input?.excludedZero) ? input.excludedZero : [];
-  const zeroHeaders = ['Tillroll receipt key', 'Line', '品名', 'Qty', '采购商品原价', '采购商品金额', 'Reason'].map(title => textCell(title, STYLE.header));
+  const zeroHeaders = ['采购小票id', '采购时间', 'Tillroll receipt key', 'Line', '品名', 'Qty', '采购商品原价', '采购商品金额', 'Reason'].map(title => textCell(title, STYLE.header));
   const zeroRows = excluded.map(z => [
+    textCell(z.receiptId || z['采购小票id']),
+    textCell(z.purchaseTime || z['采购时间']),
     textCell(z.receiptKey), textCell(z.lineIndex), textCell(z.name), textCell(z.qty),
     moneyCell(z.unitPrice, null), moneyCell(z.amount, null), textCell(z.reason || 'Confirmed printed zero.'),
   ]);
@@ -435,6 +437,8 @@ async function readExcludedZeros(zip) {
     const unit = at(cells, '采购商品原价'), amount = at(cells, '采购商品金额'), qty = at(cells, 'Qty');
     out.push({
       receiptKey: at(cells, 'Tillroll receipt key'),
+      receiptId: at(cells, '采购小票id'),
+      purchaseTime: at(cells, '采购时间'),
       lineIndex: Number(at(cells, 'Line')),
       name, qty: qty === null || qty === '' ? null : Number(qty),
       unitPrice: unit === null || unit === '' ? null : Number(unit),

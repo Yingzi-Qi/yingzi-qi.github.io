@@ -341,3 +341,37 @@ test('flags persist on an untouched Refresh, and both renders write the extra sh
   const header2 = (await packed.zip.file('xl/worksheets/sheet3.xml').async('string')).match(/<row r="1"[\s\S]*?<\/row>/)[0];
   assert.equal(/s="[3456]"/.test(header2), false);
 });
+
+test('excluded zero sheet keeps 采购小票id and 采购时间 in Sheet 1 format', async () => {
+  const env = makeEnv();
+  const round1 = await runSanity(env, { batchId: 'zero-cols', mode: 'round1', receipts: [{
+    receiptKey: 'syn-z', merchant: 'Synthetic Store', receiptReference: 'SYN-ZERO-9',
+    date: '2026-06-15', time: '7:05 pm', payment: 'Cash',
+    items: [
+      { brand: 'Synthetic', item: 'Pencil', itemId: 'SYN-P', qty: 1, unitPrice: 3, amount: 3 },
+      { brand: 'Synthetic', item: 'Paper bag', qty: 1, unitPrice: 0, amount: 0, zeroConfirmed: true },
+    ],
+  }] });
+  const packed1 = await sheetXml(await buildV2XlsxBlob(round1.result));
+  const zeros1 = await packed1.zip.file('xl/worksheets/sheet2.xml').async('string');
+  const flags1 = await packed1.zip.file('xl/worksheets/sheet3.xml').async('string');
+  assert.match(zeros1, /采购小票id/);
+  assert.match(zeros1, /采购时间/);
+  assert.match(zeros1, /SYN-ZERO-9/);
+  assert.match(zeros1, /2026-06-15 19:05:00/);
+  assert.match(zeros1, /Paper bag/);
+  assert.match(flags1, /Tillroll receipt key/);
+  assert.match(flags1, />Value</);
+  const planned = await readV2Workbook(await buildV2XlsxBlob(round1.result));
+  const zero = planned.excludedZero.find(z => z.name === 'Paper bag');
+  assert.equal(zero.receiptId, 'SYN-ZERO-9');
+  assert.equal(zero.purchaseTime, '2026-06-15 19:05:00');
+  const round2 = await runSanity(env, round2Body(planned, 'zero-cols'));
+  const zeros2 = await (await sheetXml(await buildV2XlsxBlob(round2.result))).zip.file('xl/worksheets/sheet2.xml').async('string');
+  assert.match(zeros2, /SYN-ZERO-9/);
+  assert.match(zeros2, /2026-06-15 19:05:00/);
+  const again = await readV2Workbook(await buildV2XlsxBlob(round2.result));
+  const zero2 = again.excludedZero.find(z => z.name === 'Paper bag');
+  assert.equal(zero2.receiptId, 'SYN-ZERO-9');
+  assert.equal(zero2.purchaseTime, '2026-06-15 19:05:00');
+});

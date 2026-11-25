@@ -85,7 +85,7 @@ function readerStage(receipt, rIndex, state) {
     // Zero-price exclusion: only a confirmed true printed 0 is dropped.
     const zeroUnit = unit === 0, zeroAmt = amount === 0;
     const confirmedZero = (it.zeroConfirmed === true && (zeroUnit || zeroAmt)) || (zeroUnit && zeroAmt && it.zeroConfirmed !== false);
-    if (confirmedZero) { state.excludedZero.push({ receiptKey: receipt.receiptKey, lineIndex, name: str(it.item) }); return; }
+    if (confirmedZero) { state.excludedZero.push(zeroRecord(receipt.receiptKey, it, lineIndex, receipt)); return; }
     const brandRaw = str(it.brand);
     const row = { rowId: it.rowId || `${receipt.receiptKey}:${lineIndex}:u0`, receiptKey: receipt.receiptKey, lineIndex, unitIndex: it.unitIndex ?? 0, flags: {}, notes: [], _reading: [], _lookup: [], _alternates: {}, _comments: {}, _candidates: null, _officialBranch: null, lookup: null, discountKind: it.discountKind || 'none',
       cells: { '采购小票id': receiptId, '采购时间': ts, '供应商': merchant, '品牌': brandRaw, '品名': str(it.item), '品牌货号': stripBrandFromItemId(it.itemId ?? it.sku, brandRaw),
@@ -267,11 +267,17 @@ function restoreBaselineFlags(row, ctx) {
   }
 }
 
-function zeroRecord(receiptKey, it, i) {
+function zeroRecord(receiptKey, it, i, receipt) {
+  const printedId = str(it?.receiptId) || str(it?.['采购小票id']) || str(receipt?.receiptReference) || str(receipt?.orderNumber) || str(receipt?.orderId);
+  const printedTime = str(it?.purchaseTime) || str(it?.['采购时间']);
+  const purchaseTime = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(printedTime || '')
+    ? printedTime
+    : normaliseTimestamp(printedTime || receipt?.date, printedTime ? null : receipt?.time);
   return {
     receiptKey: it.receiptKey || receiptKey, lineIndex: it.lineIndex ?? i, name: str(it.item) || str(it.name),
     qty: num(it.qty), unitPrice: num(it.unitPrice), amount: num(it.amount),
     reason: it.reason || 'Confirmed printed zero.',
+    receiptId: printedId, purchaseTime,
   };
 }
 function dedupeZero(list) {
@@ -333,8 +339,8 @@ export async function runSanity(env, input, deps = {}) {
       const src = (source.items || []).find((line, i) => (line.lineIndex ?? i) === it.lineIndex);
       if (src?.flagReasons) it.flagReasons = { ...src.flagReasons, ...it.flagReasons };
     }
-    const fromItems = settled ? [] : (source.items || []).flatMap((it, i) => isConfirmedZero(it) ? [zeroRecord(receiptKey, it, i)] : []);
-    const fromPayload = Array.isArray(source.excludedZero) ? source.excludedZero.map(z => zeroRecord(z.receiptKey || receiptKey, z, z.lineIndex ?? 0)) : [];
+    const fromItems = settled ? [] : (source.items || []).flatMap((it, i) => isConfirmedZero(it) ? [zeroRecord(receiptKey, it, i, source)] : []);
+    const fromPayload = Array.isArray(source.excludedZero) ? source.excludedZero.map(z => zeroRecord(z.receiptKey || receiptKey, z, z.lineIndex ?? 0, source)) : [];
     receipts.push({ ...source, receiptKey, items: expanded.items, _unitAudit: expanded.audit, _excludedBySplit: expanded.excludedZero, _carriedZero: fromItems.length ? fromItems : fromPayload });
   }
   const rowIds = receipts.flatMap(r => (r.items || []).map(it => it.rowId).filter(Boolean));
