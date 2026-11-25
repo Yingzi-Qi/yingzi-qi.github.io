@@ -310,6 +310,12 @@ export function nonItemName(value) {
   if (/^[\d\s.,'£$€¥%#*+-]+$/.test(text)) return 'The item name is only a number (' + clean(value) + ').';
   const words = text.replace(/[\s:]+(?:GBP|EUR|USD|[£$€])?\s*[\d.,]+\s*%?$/i, '').replace(/[\s:#*.=-]+$/g, '');
   if (nonItemWords.test(words)) return 'The item name is a receipt label, not a product (' + clean(value) + ').';
+  if (/^(?:salesperson|sales\s*person|served\s+by|cashier|associate|staff)\b/i.test(text))
+    return 'The item name is a staff line, not a product (' + clean(value) + ').';
+  if (/^(?:visa|master\s*card|maestro|amex|american\s+express|union\s*pay|alipay|we\s*chat|apple\s+pay|google\s+pay|cash|tender(?:ed)?|auth(?:\s+code)?|aid|cryptogram|pan\s*seq|terminal|merchant\s+id|card\s*number|approved)\b/i.test(text))
+    return 'The item name is a payment line, not a product (' + clean(value) + ').';
+  if (/^(?:40|80)\//.test(text))
+    return 'The item name is a payment line, not a product (' + clean(value) + ').';
   return null;
 }
 
