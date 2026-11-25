@@ -38,6 +38,7 @@ test('#v2-run is in the workspace actions row and v2.js binds it', () => {
   const hideRules = [...css.matchAll(/[^{}]*\.v2-only[^{]*\{[^}]*\}/g)].map(m => m[0].trim());
   assert.deepEqual(hideRules, ['.v2-static .v2-only{display:none!important}']);
   const v2 = read('v2.js');
+  assert.match(v2, /date: d\.date, dateIssue: d\.dateIssue, time: d\.time/);
   assert.match(v2, /function init\(\) \{\s*\$\('#v2-run'\)\?\.addEventListener\('click',\s*runSanity\);/s);
   assert.match(v2, /if \(hasDom && location\.protocol\.startsWith\('http'\) && !location\.hostname\.endsWith\('github\.io'\)\) init\(\);\s*else if \(hasDom\) document\.documentElement\.classList\.add\('v2-static'\);/);
   assert.equal(/tillroll-v2\.pages\.dev/.test('tillroll-v2.pages.dev') && !'tillroll-v2.pages.dev'.endsWith('github.io'), true);

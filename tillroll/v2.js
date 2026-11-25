@@ -67,7 +67,7 @@ export function receiptsFromBatch(batch) {
       id: r.id,
       receiptKey: r.hash ? 'sha:' + r.hash.slice(0, 16) : undefined, sha256: r.hash, filename: r.filename,
       merchant: d.merchant, receiptReference: d.receiptReference, orderNumber: d.orderNumber, orderId: d.orderId,
-      date: d.date, time: d.time, payment: d.payment, currency: d.currency, discount: d.discount,
+      date: d.date, dateIssue: d.dateIssue, time: d.time, payment: d.payment, currency: d.currency, discount: d.discount,
       storeClues: d.storeClues || deriveStoreClues(r.ocr),
       items: (d.items || []).map((it, i) => ({ ...it, lineIndex: i, readingFlags: [...(flagsByLine.get(i) || [])] })),
     };

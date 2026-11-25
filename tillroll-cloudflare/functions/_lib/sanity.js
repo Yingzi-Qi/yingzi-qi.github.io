@@ -467,7 +467,7 @@ function readerStage(receipt, rIndex, state, ctx) {
       raw: { printedBrand: brandRaw, style: str(it.styleRef) || (str(it.sku) !== str(it.itemId) ? str(it.sku) : null), colour: str(it.colour), size: str(it.size), qty, currency: str(receipt.currency) || 'GBP', storeCodes: picked.storeCodes, idClass: picked.idClass, builder, itemLabels: { concessionCode: it.concessionCode ?? null, internalCode: it.internalCode ?? null, ean: it.ean ?? null, itemId: it.itemId ?? null, sku: it.sku ?? null, styleRef: it.styleRef ?? null }, invalidPrices, printedItemId: replacedUnfitting ? itemCell : ((picked.idClass === 'ean' || picked.idClass === 'concession' || picked.idClass === 'unlabelled10') ? picked.lookupId : (itemCell || picked.lookupId)), extraUrls: builderUrls(it, builder) },
       storeClues: receipt.storeClues || null };
     if (!receiptId) addFlag(row, '采购小票id', PINK, /selfridges/i.test(merchant || '') ? 'Selfridges receipt number (below the barcode) not read.' : /harrods/i.test(merchant || '') ? 'Harrods receipt number (right of date/time) not read.' : 'Receipt ID not read.');
-    if (!ts) addFlag(row, '采购时间', PINK, 'Date/time missing or not a valid date.');
+    if (!ts) addFlag(row, '采购时间', PINK, receipt.dateIssue || 'Date/time missing or not a valid date.');
     if (!merchant) addFlag(row, '供应商', PINK, 'Supplier not read.');
     if (!tender || !ALLOWED_TENDERS.includes(tender)) {
       addFlag(row, '采购商品方法', PINK, TENDER_REASON);

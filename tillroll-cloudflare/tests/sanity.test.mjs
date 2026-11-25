@@ -65,6 +65,20 @@ test('timestamps: 24h, 00 seconds, am/pm converted', () => {
   assert.equal(normaliseTimestamp('2025-13-40', '10:00'), null);
 });
 
+test('sanity keeps the reader date issue as the purchase-time reason', async () => {
+  const env = makeEnv();
+  const { result } = await runSanity(env, { batchId: 'date-issue', mode: 'round1', receipts: [{
+    receiptKey: 'date-issue', merchant: 'Shop', receiptReference: 'D1',
+    date: null, dateIssue: 'Day and month are ambiguous in the printed date (05/10/2024).',
+    time: '17:27:00', payment: 'Card', currency: 'EUR',
+    items: [{ brand: 'Books', item: 'Cookbook', itemId: '9781785038914', unitPrice: 41.95, amount: 41.95 }],
+  }] });
+  const row = result.agreedRows[0];
+  assert.equal(row.cells['采购时间'], null);
+  assert.equal(row.flags['采购时间'], PINK);
+  assert.match(result.readingErrors.find(e => e.col === '采购时间').reason, /Day and month are ambiguous/);
+});
+
 test('P7: unclear UK dates are DD/MM; 03/04/2026 is 3 April and there is no MM/DD fallback', () => {
   assert.equal(normaliseTimestamp('03/04/2026', null), '2026-04-03 00:00:00');
   assert.equal(normaliseTimestamp('03/04/2026', '9:15 am'), '2026-04-03 09:15:00');
