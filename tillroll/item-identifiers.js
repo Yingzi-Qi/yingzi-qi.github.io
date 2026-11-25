@@ -234,9 +234,9 @@ export function printedItemCount(lines) {
   return null;
 }
 
-export function itemCountCheck(lines, items) {
+export function itemCountCheck(lines, items, excludedZeros = []) {
   const printed = printedItemCount(lines);
-  const counted = (items || []).length;
+  const counted = (items || []).length + (excludedZeros || []).length;
   return {
     printed,
     counted,
@@ -334,7 +334,14 @@ export function applyItemIdentifiers(data, ocr) {
     }
   }
   source.identifiers = identifiers.concat(extra);
-  source.itemCountCheck = itemCountCheck(lines, source.items);
+  source.itemCountCheck = itemCountCheck(lines, source.items, source.excludedZeroItems);
+  if (source.itemCountCheck.matches === false && !(source.fieldIssues || []).some(issue => issue.reason === 'item_count_mismatch')) {
+    source.fieldIssues = [...(source.fieldIssues || []), {
+      field: 'receipt',
+      reason: 'item_count_mismatch',
+      evidence: 'TOTAL (' + source.itemCountCheck.printed + ') does not match ' + source.itemCountCheck.counted + ' counted lines, including excluded true-zero lines.',
+    }];
+  }
   if (source.card) source.card = maskCardField(source.card);
   return source;
 }

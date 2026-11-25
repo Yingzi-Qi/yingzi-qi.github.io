@@ -8,7 +8,7 @@ import {
 } from '../receipt-rules.js';
 import {extractLocal, cleanReceipt, geminiSchema, geminiPrompt, prepareModelReading, reconcileReadings} from '../extract.js';
 import {sortItemFields} from '../field-sorter.js';
-import {identifierClasses} from '../item-identifiers.js';
+import {identifierClasses, itemCountCheck} from '../item-identifiers.js';
 import {checkReceipt, flagCategory, verifyImportedItemIds} from '../checks.js';
 
 const today = new Date('2026-11-25T12:00:00Z');
@@ -566,6 +566,16 @@ test('residuals: noisy total, footer lines, zeros, phones, missing items and a b
   assert.equal(shop.data.items.length, 1);
   assert.equal(shop.data.items[0].qty, 1);
   assert.equal(shop.data.total, 40);
+});
+test('TOTAL count includes excluded true-zero lines', () => {
+  const lines = makeOcr(['ATELIER', 'Scarf 18.00', 'By Appointment 0.00', 'TOTAL (2 items) 18.00']).lines;
+  const check = itemCountCheck(lines, [{item: 'Scarf', amount: 18}], [{item: 'By Appointment', amount: 0}]);
+  assert.equal(check.printed, 2);
+  assert.equal(check.counted, 2);
+  assert.equal(check.matches, true);
+  const mismatch = read(['ATELIER', '12/11/2026 11:00', 'Scarf 18.00', 'By Appointment 0.00', 'TOTAL (3 items) 18.00']);
+  assert.equal(mismatch.data.itemCountCheck.matches, false);
+  assert.ok(mismatch.review.flags.some(flag => flag.message === 'item_count_mismatch' && flagCategory(flag) === 'reading'));
 });
 test('identifiers: labels, priority, masks, count and untrusted text', () => {
   assert.equal(new Set(identifierClasses).size, identifierClasses.length);
