@@ -80,6 +80,43 @@ test('UK dates: ambiguous day-month is read, then a month outlier is still flagg
   assert.match(flag.reason, /possible DD\/MM swap; would be 2026-11-04/);
 });
 
+test('batch dates: the month majority is counted once per receipt', () => {
+  const flags = batchDateFlags([
+    {id: 'u1', receiptKey: 'one', date: '2026-04-11'},
+    {id: 'u2', receiptKey: 'one', date: '2026-04-11'},
+    {id: 'u3', receiptKey: 'one', date: '2026-04-11'},
+    {id: 'a', receiptKey: 'a', date: '2026-11-02'},
+    {id: 'b', receiptKey: 'b', date: '2026-11-03'},
+  ], {uploadTime: '2026-11-25T12:00:00Z'});
+  assert.match(flags.find(entry => entry.id === 'u1').message, /possible DD\/MM swap; would be 2026-11-04/);
+  assert.equal(flags.filter(entry => /DD\/MM swap/.test(entry.message)).length, 3);
+  assert.equal(flags.some(entry => (entry.id === 'a' || entry.id === 'b') && /DD\/MM swap/.test(entry.message)), false);
+  const repeated = batchDateFlags([
+    {id: 'u1', receiptKey: 'one', date: '2026-04-11'},
+    {id: 'u2', receiptKey: 'one', date: '2026-04-11'},
+    {id: 'u3', receiptKey: 'one', date: '2026-04-11'},
+  ], {uploadTime: '2026-11-25T12:00:00Z'});
+  assert.equal(repeated.some(entry => /DD\/MM swap/.test(entry.message)), false);
+  const tied = batchDateFlags([
+    {id: 'n1', receiptKey: 'n1', date: '2026-11-02'},
+    {id: 'n2', receiptKey: 'n2', date: '2026-11-03'},
+    {id: 'd1', receiptKey: 'd1', date: '2026-12-02'},
+    {id: 'd2', receiptKey: 'd2', date: '2026-12-03'},
+  ], {uploadTime: '2026-12-20T12:00:00Z'});
+  assert.deepEqual(tied, []);
+});
+
+test('batch dates: a same-day London receipt is not a future date', () => {
+  const quiet = batchDateFlags([
+    {id: 'today', date: '2026-06-15'},
+  ], {uploadTime: '2026-06-15T00:30:00+01:00'});
+  assert.equal(quiet.some(entry => /future date/.test(entry.message)), false);
+  const next = batchDateFlags([
+    {id: 'tomorrow', date: '2026-06-16'},
+  ], {uploadTime: '2026-06-15T00:30:00+01:00'});
+  assert.match(next.find(entry => entry.id === 'tomorrow').message, /future date/);
+});
+
 test('batch dates: a cleared purchaseTime lock is not flagged again', () => {
   const flags = batchDateFlags([
     ...nov,
