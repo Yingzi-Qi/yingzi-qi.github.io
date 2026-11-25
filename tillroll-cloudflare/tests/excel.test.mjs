@@ -811,6 +811,26 @@ test('short brand aliases pink only at the start or end, and not inside the look
   assert.doesNotMatch(String(official.flagReasons['品名'] || ''), /Name needs checking/);
 });
 
+test('cd is a Dior alias only as its own token at the start or end of a non-official name', async () => {
+  const env = makeEnv();
+  const { result } = await runSanity(env, { batchId: 'cd', mode: 'round1', receipts: [{
+    receiptKey: 'cd', merchant: 'Synthetic Store', receiptReference: 'CD-1', date: '2026-07-15', time: '10:00', payment: 'Card', currency: 'GBP',
+    items: [
+      { rowId: 'cd-start', brand: null, item: 'CD saddle bag', itemId: 'CDSADDLE', unitPrice: 20, amount: 20 },
+      { rowId: 'cd-inside', brand: null, item: 'ABCD bag', itemId: 'ABCDBAG', unitPrice: 20, amount: 20 },
+    ],
+  }] }, { lookup: noLookup });
+  const start = result.agreedRows.find(r => r.rowId === 'cd-start');
+  const inside = result.agreedRows.find(r => r.rowId === 'cd-inside');
+  assert.equal(start.cells['品名'], 'CD saddle bag');
+  assert.equal(start.cells['品牌'], null);
+  assert.equal(start.flags['品名'], PINK);
+  assert.match(start.flagReasons['品名'], /Name needs checking/);
+  assert.equal(inside.cells['品名'], 'ABCD bag');
+  assert.notEqual(inside.flags['品名'], PINK);
+  assert.doesNotMatch(String(inside.flagReasons['品名'] || ''), /Name needs checking/);
+});
+
 test('a gate Pink keeps the look-up Amber reason and candidates in the comment and hidden metadata', async () => {
   const env = makeEnv();
   const lookup = async () => ({
