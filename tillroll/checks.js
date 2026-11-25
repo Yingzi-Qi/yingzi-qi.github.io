@@ -3,6 +3,7 @@ import {isPrintedItemNumber,parsePrintedItemId,printedBarcodeDetail,barcodesBelo
 import {referenceFormat} from './retail-rules.js?v=6';
 import {validCalendarDate} from './purchase-date.js?v=6';
 import {inspectReference} from './reference.js?v=6';
+import {normalizeTender,cleanProductCode,nonItemName,storeReceiptId} from './receipt-rules.js?v=1';
 // Geometry is normalized to the upright photo, with the origin at its top left.
 const PHOTO_CONFIDENCE = 0.8;
 const ID_LABEL = /^order\s+i\.?d\.?\s*[:#]?$/i;
@@ -291,7 +292,8 @@ function verifyProductCode(observations, item, field, index) {
   const printed=unique(known.map(hit=>name(hit.value)));
   if (field==='itemId' && printed.length>1) return {issue:'Several item IDs could belong to this product line.',evidence:unique(known.map(hit=>hit.text)).join(' | ')};
   const observed=field==='itemId' && printed.length===1 ? {printedItemId:known[0].value} : {};
-  if (!value && observed.printedItemId) return {...observed,issue:'The printed item ID '+observed.printedItemId+' is missing from the record.',evidence:known[0].text};
+  const keptAside=field==='itemId' && [item.concessionCode,item.internalCode,item.ean].some(code=>name(code) && name(code)===name(observed.printedItemId));
+  if (!value && observed.printedItemId && !keptAside) return {...observed,issue:'The printed item ID '+observed.printedItemId+' is missing from the record.',evidence:known[0].text};
   const hits=value ? (observations.byValue.get(value)||[]).filter(hit=>hit.kind===field || (!hit.kind && field==='sku')) : [];
   const own=hits.find(hit=>hit.owner===index);
   if (own) return {...observed,found:true,evidence:own.text};
@@ -403,6 +405,10 @@ function verifyPhoto(data, ocr, independent, reference) {
   return result;
 }
 
+function withoutCardRuns(message, card) {
+  const runs=[...String(card??'').matchAll(/\d{4,}/g)].map(match=>match[0]).sort((a,b)=>b.length-a.length);
+  return runs.reduce((text,run)=>text.split(run).join(''), String(message??''));
+}
 function inspectDate(value, issue, now, flag) {
   if (issue) flag('date',issue,value ? 'check' : 'fix');
   if (!text(value)) {
@@ -427,7 +433,16 @@ function arithmetic(data, items, flag, repeats) {
   const amounts = items.map(i => number(i.amount)), total = number(data.total);
   const sum = amounts.reduce((a, b) => a + (b || 0), 0), tax = number(data.tax);
   const alreadyApplied = items.reduce((value,item)=>value+includedLineDiscount(item),0);
-  const discount = Math.max(0,(number(data.discount) ?? 0)-alreadyApplied);
+  // A saving kept beside the product's own price is not already inside that amount.
+  const outsideLine = items.reduce((value, item) => {
+    const discount = number(item.lineDiscount), amount = number(item.amount), unit = number(item.unitPrice), qty = number(item.qty) ?? 1;
+    if (discount === null || discount <= 0 || amount === null || includedLineDiscount(item)) return value;
+    return unit == null || near(qty * unit, amount) ? value + discount : value;
+  }, 0);
+  // receiptDiscount is only the saving that is not already inside a line amount.
+  // Older readings that lack the field still use the printed discount minus line discounts.
+  const listedReceiptDiscount = number(data.receiptDiscount);
+  const discount = (listedReceiptDiscount !== null ? Math.max(0, listedReceiptDiscount) : Math.max(0,(number(data.discount) ?? 0)-alreadyApplied)) + outsideLine;
   const balances = beforeDiscount => total !== null && (
     near(beforeDiscount - discount, total) || (tax !== null && near(beforeDiscount - discount + tax, total)));
   const repeated = new Map();
@@ -495,14 +510,65 @@ function printedOrderNumbers(ocr) {
   return printedNumbers;
 }
 
+// Flag categories: 'reading' (Pink #FECDD3: OCR doubt, pass mismatch, sanity failure),
+// 'lookup' (Amber #FDE68A: comparison with an order list, catalogue or imported format)
+// and 'info' (no colour).
+export function flagCategory(flag) {
+  if (!flag || flag.severity === 'info') return 'info';
+  return flag.category === 'lookup' ? 'lookup' : 'reading';
+}
+
+// Field issues raised by the readers that always need a reading check.
+const readerIssueMessages = {
+  rejected_code:'This value is not a product code and was cleared',
+  doubtful_code:'Check the printed product code',
+  doubtful_zero_price:'Check this zero price',
+  channel_not_tender:'Payment must be the tender, not the purchase channel',
+  unreadable_time:'Purchase time is unreadable',
+  ambiguous_time:'Purchase time is ambiguous',
+  discount_line_unclear:'discount line unclear',
+  receipt_id_pass_conflict:'receipt id pass conflict',
+  payment_method:'Payment method must be UnionPay, Card, Alipay or WeChat',
+  unreadable_price:'The price is not a number',
+  item_name_missing:'item-name-missing',
+  tendered_mismatch:'TOTAL does not match the tendered amount',
+};
+
+// A line amount must be printed on the item's own row or its short detail block.
+// Only clear, unique matches are compared; missing evidence is neutral.
+function rowAlignment(items, ocr, add) {
+  const lines = visualLines(ocr);
+  if (lines.length < 3) return;
+  const words = value => ' '+itemWording(value)+' ';
+  const moneyForms = value => {
+    const fixed = Math.abs(value).toFixed(2);
+    return [fixed, fixed.replace('.', ','), Number(fixed).toLocaleString('en-GB',{minimumFractionDigits:2})];
+  };
+  items.forEach((item, i) => {
+    const wanted = itemWording(item.item), amount = number(item.amount);
+    if (wanted.length < 4 || !/\p{L}{3}/u.test(wanted) || amount === null || amount === 0) return;
+    const nameRows = lines.map((line, j) => words(line.text).includes(' '+wanted+' ') ? j : -1).filter(j => j >= 0);
+    const forms = moneyForms(amount);
+    const priceRows = lines.map((line, j) => forms.some(f => new RegExp('(?<![\\d.,])'+f.replace(/[.,]/g, '[.,]')+'(?![\\d])').test(line.text)) ? j : -1).filter(j => j >= 0);
+    if (nameRows.length !== 1 || !priceRows.length) return;
+    const at = nameRows[0];
+    if (priceRows.some(j => j >= at - 1 && j <= at + 3)) return;
+    add('items.'+i+'.amount', 'The line amount is printed on a row that does not align with this item.', 'check');
+  });
+}
+
 export function checkReceipt(data, ocr, previous = null, {independentPhoto = false, today = new Date(), orders = null, demoFormats = false, reference = inspectReference(data,ocr)} = {}) {
   const items = data.items || [], flags = [], confirmedFields = [];
   const repeats = Array(items.length).fill(null);
-  const add = (field, message, severity, escalate = severity !== 'info') => {
-    if (!flags.some(flag => flag.field === field && flag.message === message))
-      flags.push({field, message, severity, escalate});
+  const add = (field, message, severity, escalate = severity !== 'info', category = severity === 'info' ? 'info' : 'reading') => {
+    if (!flags.some(flag => flag.field === field && flag.message === message)) {
+      const flag = {field, message, severity, escalate, category};
+      if (category === 'reading' || category === 'lookup') flag.kind = category;
+      flags.push(flag);
+    }
   };
   if (!items.length) add('receipt','No line items were read.', 'fix');
+  if (!items.length && number(data.total) !== null) add('receipt','items-missing', 'check');
   if (!text(data.merchant)) add('merchant','Retailer is missing.', 'fix');
   if (number(data.total) === null) add('total','Receipt total is missing or unreadable.', 'fix');
   inspectDate(data.date, data.dateIssue, today, add);
@@ -513,14 +579,19 @@ export function checkReceipt(data, ocr, previous = null, {independentPhoto = fal
     if (!rule || !value) continue;
     const matches=rule.test(value);
     const description=rule.source+' format for '+text(data.merchant)+' ('+rule.description+').';
-    add(key,label+(matches?' matches the ':' does not match the ')+description,matches?'info':'check');
+    add(key,label+(matches?' matches the ':' does not match the ')+description,matches?'info':'check',!matches,matches?'info':'lookup');
   }
   const printedNumbers = printedOrderNumbers(ocr);
-  if(reference.status==='found' && data[reference.kind] && name(data[reference.kind])!==name(reference.value)) {
+  const storeId = storeReceiptId(data.merchant, ocr);
+  // A store rule owns 采购小票id, so a generic heuristic is not the photo value to confirm.
+  const genericReceipt = storeId && reference.kind==='receiptReference';
+  const storeRuleId = storeId && (storeId.status==='found' || storeId.status==='unclear') && storeId.value
+    && name(data.receiptReference)===name(storeId.value);
+  if(!genericReceipt && reference.status==='found' && data[reference.kind] && name(data[reference.kind])!==name(reference.value)) {
     add(reference.kind,reference.label+' differs from the value on the photo ('+reference.value+').','check');
-  } else if(reference.requiresReview && reference.suggestion) {
+  } else if(reference.requiresReview && reference.suggestion && !storeRuleId) {
     add('receipt','Check the suggested reference '+reference.suggestion.value+' against the other possible numbers.','check');
-  } else if(reference.reasonCode==='conflict') {
+  } else if(!storeRuleId && reference.reasonCode==='conflict') {
     add('receipt',reference.reason,'check');
   }
   const orderNumber = text(data.orderNumber);
@@ -539,20 +610,57 @@ export function checkReceipt(data, ocr, previous = null, {independentPhoto = fal
 
   items.forEach((item,i) => {
     const path = 'items.'+i+'.';
-    if (!text(item.item)) add(path+'item',text(item.sku) ? 'Only the product code was read.' : 'Item description is missing.', 'fix');
+    const nameMissing=(data.fieldIssues||[]).some(issue=>issue.field===path+'item' && issue.reason==='item_name_missing');
+    if (!text(item.item)) add(path+'item', nameMissing ? 'item-name-missing' : (text(item.sku) ? 'Only the product code was read.' : 'Item description is missing.'), 'fix');
     else if ((text(item.sku) && name(item.item) === name(item.sku)) || /^(?:\d{4,}|[A-Z]{1,6}[-/.]?\d{3,}[A-Z0-9]*(?:[-/.][A-Z0-9]+)*)$/i.test(text(item.item)))
       add(path+'item','The item description looks like a product code.', 'check');
+    const blocked = text(item.item) && nonItemName(item.item);
+    if (blocked) add(path+'item', blocked, 'fix');
     if (text(item.item) && !text(item.brand)) add(path+'brand','No brand was read for this item.', 'info');
+    for (const key of ['itemId','sku']) {
+      if (!text(item[key])) continue;
+      const code = cleanProductCode(item[key], {brand:item.brand, card:data.card, phone:data.storeClues?.phone, date:data.date});
+      if (code.rejected) add(path+key, withoutCardRuns(code.issue, data.card), 'fix');
+      else if (code.issue) add(path+key, withoutCardRuns(code.issue, data.card), 'check');
+      else if (code.code !== text(item[key])) add(path+key, 'The product code repeats the brand name ('+text(item[key])+'). Use '+code.code+'.', 'check');
+    }
+    if (number(item.amount) === 0 && !(data.fieldIssues || []).some(f => f.field === path+'amount'))
+      add(path+'amount', 'A zero price was kept because it could not be confirmed as printed. Check this line.', 'check');
     const amount = number(item.amount), qty = number(item.qty), unit = number(item.unitPrice);
     if (amount === null) add(path+'amount','Line amount is missing or unreadable.', 'fix');
     else if (qty !== null && unit !== null && !near(qty*unit-includedLineDiscount(item), amount)) add(path+'amount','Quantity multiplied by unit price differs from the line amount.', 'fix');
   });
   arithmetic(data, items, add, repeats);
+  rowAlignment(items, ocr, add);
+  if (text(data.time) && !/^(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d$/.test(text(data.time)))
+    add('time','Purchase time must be HH:MM:SS in 24-hour format.', 'check');
+  if (text(data.payment)) {
+    const tender = normalizeTender(data.payment);
+    if (tender.channel) add('payment','“'+text(data.payment)+'” is a purchase channel, not a payment tender.', 'fix');
+    else if (!tender.known) add('payment','The payment tender “'+text(data.payment)+'” is not recognised.', 'check');
+  }
+  // Store-specific 采购小票id layouts. The store rule decides the id.
+  // Missing or unclear is a reading error even when a generic heuristic also found a number.
+  const passConflict = (data.fieldIssues||[]).some(issue => issue?.field==='receiptReference' && issue.reason==='receipt_id_pass_conflict');
+  if (storeId && ocr?.lines?.length && !passConflict) {
+    const recorded = text(data.receiptReference);
+    if (storeId.status === 'found') {
+      if (recorded && name(recorded) !== name(storeId.value))
+        add('receiptReference', storeId.reason+' The photo shows '+storeId.value+'.', 'check');
+    } else add('receiptReference', storeId.reason, 'check');
+  }
   for (const issue of Array.isArray(data.fieldIssues) ? data.fieldIssues : []) {
     const field = text(issue?.field);
-    if (!/^(merchant|orderId|orderNumber|date|total|items\.\d+\.(item|amount))$/.test(field) || issue.reason === 'missing_on_receipt') continue;
+    if (!/^(merchant|orderId|orderNumber|receiptReference|date|time|payment|total|items\.\d+\.(item|amount|itemId|sku))$/.test(field) || issue.reason === 'missing_on_receipt' || issue.reason === 'item_name_missing') continue;
+    if (issue.reason === 'printed_footer') { add(field, text(issue.evidence), 'info'); continue; }
+    if (issue.reason === 'item_name_filled_from_block') { add(field, 'item-name-filled-from-block', 'check'); continue; }
+    const known = readerIssueMessages[issue.reason];
+    if (known) {
+      add(field, withoutCardRuns(known + (issue.evidence ? '. '+text(issue.evidence) : '.'), data.card), issue.reason === 'rejected_code' || issue.reason === 'channel_not_tender' ? 'fix' : 'check');
+      continue;
+    }
     if (!(reference.basis==='user-confirmed' && reference.kind===field) && !flags.some(f => f.field === field && f.severity !== 'info'))
-      add(field,'Hard to read' + (issue.evidence ? '. '+text(issue.evidence) : '.') , 'check');
+      add(field, withoutCardRuns('Hard to read' + (issue.evidence ? '. '+text(issue.evidence) : '.'), data.card), 'check');
   }
   if (name(data.imageQuality) === 'poor' && !flags.some(f => f.escalate)) add('receipt','Image quality is poor.', 'check');
   const ocrData=reference.basis==='user-confirmed' ? {...data,[reference.kind]:null} : data;
