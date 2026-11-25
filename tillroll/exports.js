@@ -125,8 +125,6 @@ function exportData(receipts,includeRefresh=false) {
           const saved=numeric ? value : value.slice(0,32767).replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]/g,'');
           baseline[source][key]=saved==='' ? null : saved;
         }
-        // 采购商品方法 is the four-value method. The refresh baseline keeps the raw tender.
-        if (key==='payment' && source==='receipt') value = sources.receipt?.paymentMethod ?? '';
         const field = source === 'line' ? prefix+key : key;
         const fieldFlags=flags.filter(f=>f.field===field);
         if (imported && fieldFlags.length && (source==='receipt' || source==='line')) {
@@ -252,7 +250,7 @@ function chinaExportData(receipts) {
         else if(scope==='line') value=line[key]??'';
         if(key==='payment') value=withoutCardDigits(value);
         if(key==='card') value=safeCardValue(value);
-        else if(scope==='derived' && key==='saleAmount') value=saleAmountValue(line);
+        if(scope==='derived' && key==='saleAmount') value=saleAmountValue(line);
         const numeric=type && value!=='' && Number.isFinite(Number(value));
         return {value:numeric?Number(value):String(value),numeric,style:type==='money'?3:0};
       });

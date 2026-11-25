@@ -405,6 +405,10 @@ function verifyPhoto(data, ocr, independent, reference) {
   return result;
 }
 
+function withoutCardRuns(message, card) {
+  const runs=[...String(card??'').matchAll(/\d{4,}/g)].map(match=>match[0]).sort((a,b)=>b.length-a.length);
+  return runs.reduce((text,run)=>text.split(run).join(''), String(message??''));
+}
 function inspectDate(value, issue, now, flag) {
   if (issue) flag('date',issue,value ? 'check' : 'fix');
   if (!text(value)) {
@@ -613,8 +617,8 @@ export function checkReceipt(data, ocr, previous = null, {independentPhoto = fal
     for (const key of ['itemId','sku']) {
       if (!text(item[key])) continue;
       const code = cleanProductCode(item[key], {brand:item.brand, card:data.card, phone:data.storeClues?.phone, date:data.date});
-      if (code.rejected) add(path+key, code.issue, 'fix');
-      else if (code.issue) add(path+key, code.issue, 'check');
+      if (code.rejected) add(path+key, withoutCardRuns(code.issue, data.card), 'fix');
+      else if (code.issue) add(path+key, withoutCardRuns(code.issue, data.card), 'check');
       else if (code.code !== text(item[key])) add(path+key, 'The product code repeats the brand name ('+text(item[key])+'). Use '+code.code+'.', 'check');
     }
     if (number(item.amount) === 0 && !(data.fieldIssues || []).some(f => f.field === path+'amount'))
@@ -649,11 +653,11 @@ export function checkReceipt(data, ocr, previous = null, {independentPhoto = fal
     if (issue.reason === 'item_name_filled_from_block') { add(field, 'item-name-filled-from-block', 'check'); continue; }
     const known = readerIssueMessages[issue.reason];
     if (known) {
-      add(field, known + (issue.evidence ? '. '+text(issue.evidence) : '.'), issue.reason === 'rejected_code' || issue.reason === 'channel_not_tender' ? 'fix' : 'check');
+      add(field, withoutCardRuns(known + (issue.evidence ? '. '+text(issue.evidence) : '.'), data.card), issue.reason === 'rejected_code' || issue.reason === 'channel_not_tender' ? 'fix' : 'check');
       continue;
     }
     if (!(reference.basis==='user-confirmed' && reference.kind===field) && !flags.some(f => f.field === field && f.severity !== 'info'))
-      add(field,'Hard to read' + (issue.evidence ? '. '+text(issue.evidence) : '.') , 'check');
+      add(field, withoutCardRuns('Hard to read' + (issue.evidence ? '. '+text(issue.evidence) : '.'), data.card), 'check');
   }
   if (name(data.imageQuality) === 'poor' && !flags.some(f => f.escalate)) add('receipt','Image quality is poor.', 'check');
   const ocrData=reference.basis==='user-confirmed' ? {...data,[reference.kind]:null} : data;

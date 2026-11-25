@@ -267,8 +267,8 @@ export function cleanProductCode(value, {brand = null, card = null, phone = null
     return isGtin(compact)
       ? {code, issue: 'The product code could also be read as a date (' + raw + '). Check the printed code.', rejected: false}
       : {code: null, issue: 'The product code looks like a date (' + raw + ').', rejected: true};
-  if (card && /^\d{4}$/.test(compact) && compact === digitsOf(card))
-    return {code: null, issue: 'The product code matches the card ending (' + raw + ').', rejected: true};
+  if (card && /^\d{4}$/.test(compact) && compact === digitsOf(card).slice(-4))
+    return {code: null, issue: 'The product code matches the card and was cleared.', rejected: true};
   if (phone && digitsOf(phone).length >= 7 && digitsOf(code) === digitsOf(phone))
     return {code: null, issue: 'The product code is the store telephone number (' + raw + ').', rejected: true};
   if (/^\+\d/.test(code) || /^\(?0\d{2,4}\)?[\s-]\d{3,4}[\s-]?\d{3,4}$/.test(code))

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {makeOcr} from './ocr-fixture.mjs';
-import {extractLocal} from '../extract.js';
+import {extractLocal, cleanReceipt, geminiPrompt} from '../extract.js';
 import {checkReceipt, flagCategory} from '../checks.js';
 import {sortItemFields} from '../field-sorter.js';
 import {buildCsvBlob, buildXlsxBlob, buildChinaXlsxBlob} from '../exports.js';
@@ -142,6 +142,30 @@ test('card output has no digits in the reading or the export row', async () => {
     assert.equal(row.includes(pan), false, row.slice(0, 80));
     assert.equal(row.includes('1234'), false);
   }
+});
+
+test('a model card number does not survive normalisation, flags or exports', async () => {
+  const pan = '4000000000009753';
+  assert.doesNotMatch(geminiPrompt, /last four card digits/i);
+  assert.match(geminiPrompt, /Never record any card digits/);
+  const data = cleanReceipt({
+    merchant: 'Atelier', date: '2026-11-25', time: '11:40:00', total: 12, payment: 'Visa', card: pan,
+    items: [{item: 'Bowl', itemId: '9753', qty: 1, unitPrice: 12, amount: 12, brand: null, sku: null, colour: null, size: null, lineDiscount: null, lineDiscountLabel: null, lineDiscounts: []}],
+    fieldIssues: [{field: 'card', reason: 'noted', evidence: 'Printed card ' + pan}],
+  });
+  const review = checkReceipt(data, makeOcr(['ATELIER', 'Bowl 12.00', 'TOTAL 12.00']), null, {today});
+  const leaked = {...data, card: pan, payment: 'Visa ' + pan};
+  const receipt = {data: leaked, record: leaked, review, filename: 'synthetic.jpg', origin: ''};
+  const csv = await buildCsvBlob([receipt]).text();
+  const JSZip = zipPackage.default ?? globalThis.JSZip;
+  const english = await (await JSZip.loadAsync(await (await buildXlsxBlob([receipt])).arrayBuffer())).file('xl/worksheets/sheet1.xml').async('string');
+  const chinese = await (await JSZip.loadAsync(await (await buildChinaXlsxBlob([receipt])).arrayBuffer())).file('xl/worksheets/sheet1.xml').async('string');
+  const packed = [JSON.stringify(data), JSON.stringify(data.fieldIssues), JSON.stringify(review.flags), csv, english, chinese].join('\n');
+  assert.equal(packed.includes(pan), false);
+  assert.equal(packed.includes('9753'), false);
+  assert.equal(data.card, '[card]');
+  assert.equal(data.items[0].itemId, null);
+  assert.match(JSON.stringify(data.fieldIssues), /matches the card and was cleared/);
 });
 
 test('filled item names skip labels and staff, then go through the sorter', () => {
