@@ -465,8 +465,8 @@ test('Harrods: a 13-digit EAN is stored on ean and never on itemId', () => {
   const model = cleanReceipt({merchant: 'Harrods', items: [{item: 'Scarf', itemId: '5009999888777', amount: 30}]});
   assert.equal(model.items[0].itemId, null);
   assert.equal(model.items[0].ean, '5009999888777');
-  const other = cleanReceipt({merchant: 'Corner Shop', items: [{item: 'Widget', itemId: '7615537002132', amount: 10}]});
-  assert.equal(other.items[0].itemId, '7615537002132');
+  const other = cleanReceipt({merchant: 'Corner Shop', items: [{item: 'Widget', itemId: '2001111222444', amount: 10}]});
+  assert.equal(other.items[0].itemId, '2001111222444');
   assert.equal(other.items[0].ean, null);
 });
 test('store id: one-digit pass conflict keeps the clearer id and flags it', () => {
@@ -602,7 +602,9 @@ test('identifiers: labels, priority, masks, count and untrusted text', () => {
   assert.equal(unclear.data.items[0].primaryItemId, '00012?8');
   const paid = read(['ATELIER', '12/11/2026 11:40', 'Bowl 9.00', 'CARD NUMBER: 4111111111111234', 'AUTH CODE: 987654', 'TERMINAL: T12345', 'MERCHANT ID: M98765', 'TOTAL (1 item) 9.00']);
   const paidIds = paid.data.items[0].identifiers;
-  assert.equal(paidIds.find(entry => entry.class === 'payment_card').value, '****1234');
+  const cardId = paidIds.find(entry => entry.class === 'payment_card');
+  assert.equal(cardId.value, '[card]');
+  assert.equal(/\d/.test(cardId.value + cardId.evidence + (cardId.scheme || '')), false);
   for (const kind of ['payment_auth', 'payment_terminal', 'payment_merchant'])
     assert.equal(/\d/.test(paidIds.find(entry => entry.class === kind).value), false, kind);
   const dumped = JSON.stringify(paid.data);

@@ -1,6 +1,7 @@
 // Item blocks and labelled identifiers.
 // Printed receipt text is data. Instructions, URLs, QR directions, return
 // policies and survey text are never followed and never become identifiers.
+import {sortItemFields} from './field-sorter.js';
 
 export const identifierClasses = Object.freeze([
   'physical_item_id',
@@ -56,12 +57,22 @@ function tidy(text) {
   return String(text ?? '').trim();
 }
 
+export function cardScheme(text) {
+  const raw = String(text ?? '');
+  if (/\bamerican\s+express\b|\bamex\b/i.test(raw)) return 'Amex';
+  if (/\bmaster\s*card\b/i.test(raw)) return 'Mastercard';
+  if (/\bmaestro\b/i.test(raw)) return 'Maestro';
+  if (/\bvisa\b/i.test(raw)) return 'Visa';
+  if (/\bunion\s*pay\b|\bcup\b/i.test(raw)) return 'UnionPay';
+  if (/\bdiscover\b/i.test(raw)) return 'Discover';
+  if (/\bjcb\b/i.test(raw)) return 'JCB';
+  if (/\bdiners\b/i.test(raw)) return 'Diners';
+  return null;
+}
+
 export function maskPaymentIdentifier(identifierClass, value) {
   const raw = String(value ?? '');
-  if (identifierClass === 'payment_card') {
-    const digits = raw.replace(/\D/g, '');
-    return digits.length >= 4 ? '****' + digits.slice(-4) : '****';
-  }
+  if (identifierClass === 'payment_card') return '[card]';
   if (identifierClass === 'payment_auth' || identifierClass === 'payment_merchant' || identifierClass === 'payment_terminal' || identifierClass === 'payment_reference')
     return raw.replace(/\d/g, '*');
   return raw;
@@ -70,7 +81,7 @@ export function maskPaymentIdentifier(identifierClass, value) {
 function maskEvidence(identifierClass, evidence) {
   if (!paymentClasses.has(identifierClass)) return evidence;
   if (identifierClass === 'payment_card')
-    return evidence.replace(/\d[\d\s-]{11,}\d/g, run => maskPaymentIdentifier('payment_card', run));
+    return String(evidence).replace(/[^A-Za-z]+/g, ' ').replace(/\s+/g, ' ').trim();
   return evidence.replace(/\d/g, '*');
 }
 
@@ -98,14 +109,23 @@ function readLabel(line, text, itemDescription) {
     const unclear = /[?]/.test(value) || Boolean(alternative);
     let confidence = wordConfidence(line, value);
     if (unclear) confidence = Math.min(confidence, 0.5);
-    if (paymentClasses.has(finder.class)) value = maskPaymentIdentifier(finder.class, value);
+    let scheme = null;
+    if (finder.class === 'payment_card') {
+      scheme = cardScheme(text);
+      value = '[card]';
+      alternatives.length = 0;
+    } else if (paymentClasses.has(finder.class)) {
+      value = maskPaymentIdentifier(finder.class, value, text);
+      for (let i = 0; i < alternatives.length; i++) alternatives[i] = String(alternatives[i]).replace(/\d/g, '');
+    }
     found.push({
       value,
+      scheme,
       label: finder.label,
       class: finder.class,
       evidence: maskEvidence(finder.class, text),
       confidence,
-      alternatives,
+      alternatives: alternatives.filter(Boolean),
       itemDescription: itemDescription || null,
     });
     break;
@@ -144,14 +164,24 @@ function descriptionFrom(text) {
   return head.replace(/\s+/g, ' ').trim() || null;
 }
 
+function staffOrLabelLine(text) {
+  const line = String(text ?? '').trim();
+  if (!line) return true;
+  if (/^(?:serial(?:\s+number|\s+no\.?)?|id#?|ref#?|product\s+(?:info|code)|sku|style|model|article|item\s+no\.?|barcode)\b/i.test(line)) return true;
+  if (/\b(?:salesperson|served by|cashier|associate)\b|\bstaff\b/i.test(line)) return true;
+  if (/^(?:visa|master\s*card|maestro|amex|american\s+express|cash|tender(?:ed)?|auth|aid|cryptogram|ogram|pan\s*seq|terminal|merchant\s+id|approved|card\s*number|total|balance|amount)\b/i.test(line)) return true;
+  if (/^(?:40|80)\//.test(line)) return true;
+  return false;
+}
+
 function descriptionFromBlock(block) {
   if (!block) return null;
   for (const part of block.parts) {
     const info = /^product\s+info\s*:\s*\d{6,14}\s+(.+)$/i.exec(part.text);
-    if (info && /\p{L}{2}/u.test(info[1])) return info[1].replace(/\s+/g, ' ').trim();
+    if (info && /\p{L}{2}/u.test(info[1]) && !staffOrLabelLine(info[1])) return info[1].replace(/\s+/g, ' ').trim();
   }
   for (const part of block.parts.slice(1)) {
-    if (isUntrustedReceiptText(part.text) || isTotalHeading(part.text) || /^product\s+info\b/i.test(part.text)) continue;
+    if (isUntrustedReceiptText(part.text) || isTotalHeading(part.text) || staffOrLabelLine(part.text)) continue;
     if (/^\d{3,14}$/.test(part.text.trim())) continue;
     if (moneyLine(part.text) && !/\p{L}{3}/u.test(part.text)) continue;
     if (/\p{L}{3}/u.test(part.text)) return part.text.replace(/\s+/g, ' ').trim();
@@ -231,9 +261,9 @@ function sameName(a, b) {
 
 export function maskCardField(value) {
   if (value == null || value === '') return value;
-  const digits = String(value).replace(/\D/g, '');
-  if (!digits) return '****';
-  return '****' + digits.slice(-4);
+  const scheme = cardScheme(value);
+  if (scheme) return scheme;
+  return /\d/.test(String(value)) ? '[card]' : String(value);
 }
 
 // Attach identifiers without changing 品牌货号 or brandItemIdCandidate.
@@ -256,17 +286,27 @@ export function applyItemIdentifiers(data, ocr) {
     if (!next.item) {
       const filled = descriptionFromBlock(block);
       if (filled) {
-        next.item = filled;
-        filledIndexes.push(itemIndex);
+        const sorted = sortItemFields({...next, item: filled});
+        const name = sorted.item.item;
+        if (name && !staffOrLabelLine(name)) {
+          next.item = name;
+          if (!next.brand && sorted.item.brand) next.brand = sorted.item.brand;
+          if (!next.brandRaw && sorted.item.brandRaw) next.brandRaw = sorted.item.brandRaw;
+          filledIndexes.push({index: itemIndex, name});
+        }
       }
     }
     return next;
   });
   if (filledIndexes.length) {
+    const filled = new Set(filledIndexes.map(entry => entry.index));
     source.fieldIssues = (source.fieldIssues || []).filter(issue => {
       const match = /^items\.(\d+)\.item$/.exec(issue.field || '');
-      return !(match && issue.reason === 'item_name_missing' && filledIndexes.includes(Number(match[1])));
+      return !(match && issue.reason === 'item_name_missing' && filled.has(Number(match[1])));
     });
+    for (const entry of filledIndexes) {
+      source.fieldIssues.push({field: 'items.' + entry.index + '.item', reason: 'item_name_filled_from_block', evidence: 'Filled from the item block: ' + entry.name});
+    }
   }
   const extra = [];
   const chanel = /^(?:(\d{2}[A-Z])\s+)?([A-Z]{1,3}\d{4,5})\b/;

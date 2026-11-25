@@ -5,7 +5,7 @@ import {readPurchaseDate} from './purchase-date.js?v=8';
 import {comparePhotoFields,mergeReadings} from './reading-comparison.js?v=discounts1';
 import {readPurchaseTime,normalizePurchaseTime,readTender,normalizeTender,toPaymentMethod,dropCardDigits,brandItemIdCandidate,readPrintedStyleRef,readStoreClues,mergeStoreClues,storeReceiptId,cleanProductCode,applyZeroPriceExclusion,isUkPurchase} from './receipt-rules.js?v=1';
 import {sortItemFields} from './field-sorter.js';
-import {applyItemIdentifiers, isUntrustedReceiptText, maskCardField} from './item-identifiers.js';
+import {applyItemIdentifiers, isUntrustedReceiptText, maskCardField, cardScheme} from './item-identifiers.js';
 // OCR assets resolve on this site. Receipt images remain in the tab unless the
 // caller explicitly starts the optional Gemini reader using a supplied API key.
 const asset = name => new URL(`./ocr/${name}`, import.meta.url).href;
@@ -813,7 +813,8 @@ export function extractLocal(ocr) {
   references(lines,result);
   result.currency=receiptCurrency(lines.map(line=>line.text));
   result.payment=readTender(text);
-  result.card=text.match(/(?:ending(?:\s+in)?\s*|[*•]{2,}\s*)(\d{4})\b/i)?.[1] || null;
+  const cardHit=/(?:ending(?:\s+in)?\s*|[*•]{2,}\s*)\d{4}\b|\b(?:card\s*number|pan)\b[^\n]*\d/i.exec(text);
+  result.card=cardHit ? (cardScheme(text.slice(Math.max(0, cardHit.index-40), cardHit.index+cardHit[0].length)) || '[card]') : null;
   const totals=new Set();
   const printedDiscounts=[];
   const merchandiseTotal=lines.some(line=>{
@@ -981,8 +982,10 @@ export function normalizeReading(data) {
     out.paymentMethod=null;
     issue('payment','payment_method','No payment tender was read.');
   }
+  const cardDigits=String(out.card??'').replace(/\D/g,'');
+  const cardForCodes=cardDigits.length>=4 ? cardDigits.slice(-4) : null;
   if(out.card) out.card=maskCardField(out.card);
-  const context={card:out.card,phone:out.storeClues?.phone,date:out.date};
+  const context={card:cardForCodes,phone:out.storeClues?.phone,date:out.date};
   const harrodsMerchant=/harrods/i.test(out.merchant||'');
   out.items=(out.items||[]).map((item,i)=>{
     const sorted=sortItemFields(item);
@@ -1059,7 +1062,7 @@ export function cleanReceipt(raw) {
   const num=v=>typeof v==='number' && Number.isFinite(v)?v:null;
   for(const key of stringFields) out[key]=str(raw[key]);
   for(const key of numberFields) out[key]=num(raw[key]);
-  out.card=out.card?.match(/\d{4}$/)?.[0] || null;
+  out.card=out.card ? (cardScheme(out.card) || (/\d/.test(out.card) ? '[card]' : out.card.replace(/\d/g, '') || null)) : null;
   const discountList=value=>Array.isArray(value)?value.filter(entry=>entry && typeof entry==='object').map(entry=>{
     const amount=num(entry.amount);
     if(amount==null) return null;

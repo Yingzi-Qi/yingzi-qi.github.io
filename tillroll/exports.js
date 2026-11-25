@@ -2,6 +2,7 @@ import {orderNeedsReview} from './orders.js?v=lineverify1';
 import {reviewForLine} from './checks.js?v=productcodes3';
 import {validateOrderPatterns} from './retail-rules.js?v=6';
 import {parsePrintedItemId} from './product-code.js?v=productcodes3';
+import {maskCardField} from './item-identifiers.js';
 import * as zipPackage from './export-vendor/jszip.min.js';
 
 const JSZip = zipPackage.default ?? globalThis.JSZip;
@@ -96,13 +97,13 @@ function exportData(receipts,includeRefresh=false) {
         let value = sources[source]?.[key] ?? '';
         const numeric = type && value !== '' && Number.isFinite(Number(value));
         value = numeric ? Number(value) : String(value);
+        if (key==='card') value = String(maskCardField(value) ?? '').replace(/\d/g, '');
         if (baseline && (source==='receipt' || source==='line')) {
           const saved=numeric ? value : value.slice(0,32767).replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]/g,'');
           baseline[source][key]=saved==='' ? null : saved;
         }
         // 采购商品方法 is the four-value method. The refresh baseline keeps the raw tender.
         if (key==='payment' && source==='receipt') value = sources.receipt?.paymentMethod ?? '';
-        if (key==='card') value = String(value).replace(/\d/g, '•');
         const field = source === 'line' ? prefix+key : key;
         const fieldFlags=flags.filter(f=>f.field===field);
         if (imported && fieldFlags.length && (source==='receipt' || source==='line')) {

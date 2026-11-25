@@ -4,6 +4,8 @@ import {makeOcr} from './ocr-fixture.mjs';
 import {extractLocal} from '../extract.js';
 import {checkReceipt, flagCategory} from '../checks.js';
 import {sortItemFields} from '../field-sorter.js';
+import {buildCsvBlob, buildXlsxBlob} from '../exports.js';
+import * as zipPackage from '../export-vendor/jszip.min.js';
 
 const today = new Date('2026-11-25T12:00:00Z');
 const read = rows => {
@@ -115,4 +117,40 @@ test('boutique: merchant, receipt number, and the printed footer', () => {
   assert.equal(data.date, '2026-11-16');
   assert.equal(data.time, '09:15:00');
   assert.ok(review.flags.some(flag => /Printed footer/i.test(flag.message) && flagCategory(flag) === 'info'));
+});
+
+test('card output has no digits in the reading or the export row', async () => {
+  const pan = '4111111111111234';
+  const {data, review} = read(['ATELIER', '25/11/2026 11:40', 'Bowl 9.00', 'Visa CARD NUMBER: ' + pan, 'TOTAL 9.00']);
+  const card = [...(data.identifiers || []), ...data.items.flatMap(item => item.identifiers || [])].find(entry => entry.class === 'payment_card');
+  assert.equal(card.value, '[card]');
+  assert.equal(card.scheme, 'Visa');
+  assert.equal(/\d/.test(JSON.stringify({value: card.value, scheme: card.scheme, evidence: card.evidence})), false);
+  assert.equal(data.card, 'Visa');
+  assert.equal(/\d/.test(String(data.card)), false);
+  const reading = JSON.stringify(data);
+  assert.equal(reading.includes(pan), false);
+  assert.equal(reading.includes('1234'), false);
+  const receipt = {data, record: data, review, filename: 'synthetic.jpg', origin: ''};
+  const csv = await buildCsvBlob([receipt]).text();
+  const book = await buildXlsxBlob([receipt]);
+  const zip = await (zipPackage.default ?? globalThis.JSZip).loadAsync(await book.arrayBuffer());
+  const sheet = await zip.file('xl/worksheets/sheet1.xml').async('string');
+  for (const row of [csv, sheet]) {
+    assert.equal(row.includes(pan), false);
+    assert.equal(row.includes('1234'), false);
+  }
+});
+
+test('filled item names skip labels and staff, then go through the sorter', () => {
+  const serial = read(['HARRODS', '25/11/2026 10:00', 'CHANEL 80.00', 'SERIAL NUMBER SN-100', 'TOTAL 80.00']);
+  assert.equal(serial.data.items[0].item, null);
+  assert.notEqual(serial.data.items[0].item, 'SERIAL NUMBER SN-100');
+  const staff = read(['HARRODS', '25/11/2026 10:00', 'CHANEL 80.00', 'Salesperson: Alex', 'TOTAL 80.00']);
+  assert.notEqual(staff.data.items[0].item, 'Alex');
+  assert.equal(JSON.stringify(staff.data.items).includes('Alex'), false);
+  const named = read(['HARRODS', '25/11/2026 10:00', 'CHANEL 80.00', 'CHANEL WOOL CREW SZ 36', 'TOTAL 80.00']);
+  assert.equal(named.data.items[0].brand, 'Chanel');
+  assert.equal(named.data.items[0].item, 'WOOL CREW SZ 36');
+  assert.ok(named.review.flags.some(flag => flag.field === 'items.0.item' && flag.message === 'item-name-filled-from-block' && flagCategory(flag) === 'reading'));
 });
