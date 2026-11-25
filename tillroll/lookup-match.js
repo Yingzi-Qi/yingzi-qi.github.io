@@ -78,7 +78,7 @@ function priceGap(candidate, query) {
 }
 
 function rankingGap(candidate, query) {
-  if (query?.brand && officialSource(candidate, query.brand, query.officialMirrors).mirrorOnly) return null;
+  if (query?.brand && fallbackPriceOnly(candidate, query.brand, query.officialFallbacks)) return null;
   return priceGap(candidate, query);
 }
 
@@ -128,17 +128,17 @@ export function rankPriceFallback(candidates, query, closeGap = CLOSE_GAP) {
   return { winner: null, tie: true, tier, weightUnresolved: true };
 }
 
-function countedFields(candidate, brand, mirrors) {
+function countedFields(candidate, brand, fallbacks) {
   const fields = candidate.matchedFields || [];
-  if (brand && officialSource(candidate, brand, mirrors).mirrorOnly) return fields.filter(field => field !== 'price');
+  if (brand && fallbackPriceOnly(candidate, brand, fallbacks)) return fields.filter(field => field !== 'price');
   return fields;
 }
 
-function rankByFields(candidates, brand, mirrors) {
+function rankByFields(candidates, brand, fallbacks) {
   if (!candidates.length) return { winner: null, tie: false };
   const scored = candidates.map(candidate => ({
     candidate,
-    fields: countedFields(candidate, brand, mirrors).length,
+    fields: countedFields(candidate, brand, fallbacks).length,
     confidence: typeof candidate.confidence === 'number' ? candidate.confidence : 0,
   }));
   scored.sort((a, b) => b.fields - a.fields || b.confidence - a.confidence);
@@ -216,10 +216,12 @@ export function mergeMismatches(...groups) {
   return merged;
 }
 
-// Provisional. chanel.com answers 403 to bots, so a listed mirror can stand in for
-// the primary official domain. A mirror-only confirmation stays Amber.
-export const DEFAULT_OFFICIAL_MIRRORS = { Chanel: ['chanel.cn'] };
-const PRIMARY_DOMAINS = { Chanel: ['chanel.com'] };
+// Primary official domain first. A listed fallback (chanel.cn) is used only when
+// that look-up's primary domain was blocked or errored. A fallback page confirms
+// existence, name and ref. Its price is never used for matching or ranking.
+export const DEFAULT_OFFICIAL_FALLBACKS = {
+  Chanel: { primary: ['chanel.com'], fallbacks: ['chanel.cn'] },
+};
 
 function hostOf(url) {
   try { return new URL(url).hostname.toLowerCase().replace(/^www\./, ''); }
@@ -232,18 +234,73 @@ function matchesDomain(host, domain) {
   return host === bare || host.endsWith('.' + bare);
 }
 
-export function officialSource(candidate, brand, mirrors = DEFAULT_OFFICIAL_MIRRORS) {
+function fallbackSpec(brand, table = DEFAULT_OFFICIAL_FALLBACKS) {
   const name = canonicalBrand(brand) || String(brand || '').trim();
-  const hosts = (candidate?.sourceUrls || []).map(hostOf).filter(Boolean);
-  const primary = PRIMARY_DOMAINS[name] || [];
-  const listed = mirrors?.[name] || [];
-  const onPrimary = hosts.some(host => primary.some(domain => matchesDomain(host, domain)));
-  const mirrorDomains = listed.filter(domain => hosts.some(host => matchesDomain(host, domain)));
-  const mirrorOnly = mirrorDomains.length > 0 && !onPrimary;
+  const spec = table?.[name] || {};
   return {
-    acceptable: candidate?.onOfficialSite === true || mirrorOnly,
-    mirrorOnly,
-    mirrorNote: mirrorOnly ? mirrorDomains.map(domain => `official mirror ${domain}`).join(' ') : '',
+    primary: (spec.primary || []).map(domain => String(domain).toLowerCase()),
+    fallbacks: (spec.fallbacks || []).map(domain => String(domain).toLowerCase()),
+  };
+}
+
+function placeOf(url, domains) {
+  const host = hostOf(url);
+  const domain = domains.find(name => matchesDomain(host, name)) || host;
+  let locale = '';
+  try {
+    const segment = new URL(url).pathname.split('/').filter(Boolean)[0] || '';
+    if (/^[a-z]{2}$/i.test(segment)) locale = `/${segment.toLowerCase()}`;
+  } catch { /* a host without a path still names the fallback */ }
+  return `${domain}${locale}`;
+}
+
+function mentionsBlocked(entry, domain) {
+  if (entry == null || entry === false) return false;
+  if (entry === true) return true;
+  const text = typeof entry === 'string' ? entry : JSON.stringify(entry);
+  if (!text.toLowerCase().includes(String(domain).toLowerCase())) return false;
+  if (typeof entry === 'object' && (entry.blocked === true || entry.status === 403 || Number(entry.status) >= 500)) return true;
+  return /403|blocked|denied|timeout|failed|error/i.test(text);
+}
+
+function accessSignals(response) {
+  const bags = [response, response?.extra].filter(entry => entry && typeof entry === 'object');
+  const signals = [];
+  for (const bag of bags) {
+    signals.push(bag.unavailableReason, bag.primaryBlocked);
+    for (const key of ['sourceErrors', 'blockedDomains', 'officialErrors']) {
+      if (Array.isArray(bag[key])) signals.push(...bag[key]);
+    }
+  }
+  return signals;
+}
+
+export function primaryAccess(response, brand, table = DEFAULT_OFFICIAL_FALLBACKS) {
+  const { primary } = fallbackSpec(brand, table);
+  const signals = accessSignals(response);
+  const domain = primary.find(name => signals.some(entry => mentionsBlocked(entry, name))) || null;
+  return { blocked: Boolean(domain), domain };
+}
+
+function fallbackPriceOnly(candidate, brand, table) {
+  return officialSource(candidate, brand, table, { primaryBlocked: true }).fallbackOnly;
+}
+
+export function officialSource(candidate, brand, table = DEFAULT_OFFICIAL_FALLBACKS, access = {}) {
+  const spec = fallbackSpec(brand, table);
+  const urls = candidate?.sourceUrls || [];
+  const onPrimaryUrl = urls.some(url => spec.primary.some(domain => matchesDomain(hostOf(url), domain)));
+  const fallbackUrl = urls.find(url => spec.fallbacks.some(domain => matchesDomain(hostOf(url), domain)));
+  const fallbackUrlsOnly = Boolean(fallbackUrl) && !onPrimaryUrl;
+  const serverPrimary = candidate?.onOfficialSite === true && !fallbackUrlsOnly;
+  const allowed = onPrimaryUrl || serverPrimary || (fallbackUrlsOnly && access.primaryBlocked);
+  const blockedName = access.blockedDomain || spec.primary[0] || 'official site';
+  const place = fallbackUrl ? placeOf(fallbackUrl, spec.fallbacks) : '';
+  return {
+    acceptable: allowed,
+    onPrimary: onPrimaryUrl || serverPrimary,
+    fallbackOnly: Boolean(fallbackUrlsOnly && access.primaryBlocked && allowed),
+    fallbackNote: fallbackUrlsOnly && access.primaryBlocked ? `${blockedName} blocked; confirmed on ${place}` : '',
   };
 }
 
@@ -254,30 +311,39 @@ function idMatch(candidate, itemId) {
 }
 
 function describeSelection(ranked, extra) {
-  const source = ranked.winner ? officialSource(ranked.winner, extra.brand, extra.mirrors) : { mirrorOnly: false, mirrorNote: '' };
-  return { ...ranked, mirrorOnly: source.mirrorOnly, mirrorNote: source.mirrorNote, ...extra.rest };
+  const source = ranked.winner
+    ? officialSource(ranked.winner, extra.brand, extra.fallbacks, extra.access)
+    : { onPrimary: false, fallbackOnly: false, fallbackNote: '' };
+  return {
+    ...ranked,
+    onPrimary: Boolean(source.onPrimary),
+    fallbackOnly: source.fallbackOnly,
+    fallbackNote: source.fallbackNote,
+    ...extra.rest,
+  };
 }
 
-export function selectCandidate(candidates, query, { partial = false, closeGap = CLOSE_GAP, officialMirrors = DEFAULT_OFFICIAL_MIRRORS } = {}) {
-  const judged = (candidates || []).map(candidate => ({ candidate, ...officialSource(candidate, query.brand, officialMirrors) }));
+export function selectCandidate(candidates, query, { partial = false, closeGap = CLOSE_GAP, officialFallbacks = DEFAULT_OFFICIAL_FALLBACKS, primaryBlocked = false, blockedDomain = null } = {}) {
+  const access = { primaryBlocked, blockedDomain };
+  const judged = (candidates || []).map(candidate => ({ candidate, ...officialSource(candidate, query.brand, officialFallbacks, access) }));
   const official = judged.filter(item => item.acceptable).map(item => item.candidate);
   const corroboration = judged.filter(item => !item.acceptable).map(item => item.candidate);
   const idMatches = query.itemId ? official.filter(candidate => idMatch(candidate, query.itemId)) : [];
-  const attach = (ranked, rest) => describeSelection(ranked, { brand: query.brand, mirrors: officialMirrors, rest });
+  const attach = (ranked, rest) => describeSelection(ranked, { brand: query.brand, fallbacks: officialFallbacks, access, rest });
   if (idMatches.length) {
-    const ranked = rankByFields(idMatches, query.brand, officialMirrors);
+    const ranked = rankByFields(idMatches, query.brand, officialFallbacks);
     return attach(ranked, { matchType: ranked.winner ? 'id' : null, fallback: false, corroboration, considered: idMatches });
   }
   const multi = official.filter(candidate => candidate.matchType !== 'price-fallback');
   const fallbackPool = official.filter(candidate => candidate.matchType === 'price-fallback');
   if (!query.itemId && multi.length) {
-    const ranked = rankByFields(multi, query.brand, officialMirrors);
+    const ranked = rankByFields(multi, query.brand, officialFallbacks);
     return attach(ranked, { matchType: ranked.winner ? (ranked.winner.matchType || 'multi-field') : null, fallback: false, corroboration, considered: multi });
   }
   if (partial || !fallbackPool.length) {
     return attach({ winner: null, tie: false }, { matchType: null, fallback: false, corroboration, considered: fallbackPool, weightUnresolved: false });
   }
-  const ranked = rankPriceFallback(fallbackPool, { ...query, officialMirrors }, closeGap);
+  const ranked = rankPriceFallback(fallbackPool, { ...query, officialFallbacks }, closeGap);
   return attach(ranked, {
     matchType: ranked.winner ? 'price-fallback' : null,
     fallbackTier: ranked.tier,

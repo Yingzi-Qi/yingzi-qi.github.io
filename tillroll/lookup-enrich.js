@@ -1,7 +1,9 @@
 // Turns receipt lines into one unit row each and fills official brand, name and supplier.
 // The receipt stays the source of truth for price and item id. Brand and name take
-// the official value when an official-site candidate is accepted. Every difference
-// is Amber, with both values kept on the row.
+// the official value when an official-site candidate is accepted. An exact item-id
+// and price match on the primary domain fills the official name with no colour.
+// Anything else that differs, or that was only confirmed on a blocked-site
+// fallback, is Amber, with both values kept on the row.
 
 import { canonicalBrand, fold, normaliseItemId } from './brand-aliases.js';
 import { resolveSupplier } from './uk-branches.js';
@@ -10,11 +12,23 @@ import {
   prepareUnitRows, round2Changed, roundMoney, shouldLookup,
 } from './lookup-policy.js';
 import {
-  CLOSE_GAP, computeMismatches, flagColour, mergeMismatches, selectCandidate,
+  CLOSE_GAP, computeMismatches, flagColour, mergeMismatches, primaryAccess, selectCandidate,
 } from './lookup-match.js';
 import { recordLookupRun } from './review-loop.js';
 
 export { createLookupClient } from './lookup-client.js';
+
+function sameCode(left, right) {
+  return Boolean(normaliseItemId(left)) && normaliseItemId(left) === normaliseItemId(right);
+}
+
+function samePrice(row, candidate) {
+  if (roundMoney(row?.price) == null || roundMoney(candidate?.price) == null) return false;
+  const left = String(row.currency || '').toUpperCase();
+  const right = String(candidate.currency || '').toUpperCase();
+  if (left && right && left !== right) return false;
+  return roundMoney(row.price) === roundMoney(candidate.price);
+}
 
 function differs(field, receipt, official) {
   if (official == null || official === '') return false;
@@ -30,7 +44,7 @@ function mirrorPriceRecord(candidate) {
   return { amount, currency: currency ? currency.toUpperCase() : null };
 }
 
-function cell(field, receiptValue, officialValue, { locked, colour, forceAmber = false, keepReceipt = false, informational = null } = {}) {
+function cell(field, receiptValue, officialValue, { locked, colour, forceAmber = false, keepReceipt = false, informational = null, plain = false } = {}) {
   if (informational) {
     return {
       value: receiptValue ?? '',
@@ -44,7 +58,7 @@ function cell(field, receiptValue, officialValue, { locked, colour, forceAmber =
   const hasOfficial = officialValue != null && officialValue !== '';
   const changed = hasOfficial && differs(field, receiptValue, officialValue);
   const value = locked || keepReceipt || !hasOfficial ? (receiptValue ?? '') : officialValue;
-  const amber = !locked && (changed || forceAmber);
+  const amber = !locked && !plain && (changed || forceAmber);
   return {
     value,
     receiptValue: receiptValue ?? '',
@@ -78,7 +92,7 @@ function baseFields(row, colour) {
 
 function noteFor(result) {
   const parts = [];
-  if (result.mirrorNote) parts.push(result.mirrorNote);
+  if (result.fallbackNote) parts.push(result.fallbackNote);
   if (result.reason) parts.push(result.reason);
   for (const mismatch of result.mismatches) {
     parts.push(`${mismatch.field}: receipt “${mismatch.receiptValue}”, official “${mismatch.officialValue}”.`);
@@ -96,9 +110,14 @@ function finish(result, row, { response = null, selection = null, orders = null,
     || result.skipped === 'reading-error'
     || result.skipped === 'doubtful-zero';
   const accepted = selection?.winner || null;
-  const mirrorOnly = Boolean(selection?.mirrorOnly);
+  const fallbackOnly = Boolean(selection?.fallbackOnly);
+  const exactPrimary = Boolean(
+    accepted && selection?.onPrimary && !selection?.fallback && !fallbackOnly
+    && sameCode(row.itemId, accepted.itemId)
+    && samePrice(row, accepted),
+  );
   const reportedAll = mergeMismatches(response?.mismatches, accepted?.mismatches);
-  const reported = mirrorOnly
+  const reported = fallbackOnly
     ? reportedAll.filter(entry => entry.field !== '采购商品原价' && entry.field !== '采购商品金额')
     : reportedAll;
   const reportedBrand = reported.find(entry => entry.field === '品牌')?.officialValue;
@@ -117,12 +136,14 @@ function finish(result, row, { response = null, selection = null, orders = null,
     storeClues: row.storeClues,
     branch: response?.branch || null,
   });
-  const mirrorPrice = mirrorOnly ? mirrorPriceRecord(accepted) : null;
-  const forceName = Boolean(selection?.fallback) || mirrorOnly || result.flag === 'amber' && !accepted && result.queried;
+  const mirrorPrice = fallbackOnly ? mirrorPriceRecord(accepted) : null;
+  const unidentified = Boolean(result.queried && !accepted && !lockedSkip && (result.candidates || []).length && !result.deferred);
+  if (unidentified && !result.reason) result.reason = 'unidentified';
+  const forceName = !exactPrimary && (Boolean(selection?.fallback) || fallbackOnly || unidentified || (result.flag === 'amber' && !accepted && result.queried));
   const fields = {
     '供应商': cell('供应商', row.supplier, supplier.supplier, { locked: fieldLocked(row.locks, '供应商'), colour }),
-    '品牌': cell('品牌', row.brand, officialBrand, { locked: fieldLocked(row.locks, '品牌'), colour, forceAmber: mirrorOnly && !fieldLocked(row.locks, '品牌') }),
-    '品名': cell('品名', row.name, officialName, { locked: fieldLocked(row.locks, '品名'), colour, forceAmber: forceName && !fieldLocked(row.locks, '品名') }),
+    '品牌': cell('品牌', row.brand, officialBrand, { locked: fieldLocked(row.locks, '品牌'), colour, forceAmber: fallbackOnly && !fieldLocked(row.locks, '品牌') }),
+    '品名': cell('品名', row.name, officialName, { locked: fieldLocked(row.locks, '品名'), colour, forceAmber: forceName && Boolean(officialName) && !fieldLocked(row.locks, '品名'), plain: exactPrimary }),
     '品牌货号': cell('品牌货号', row.itemId, officialId, {
       locked: fieldLocked(row.locks, '品牌货号'), colour, keepReceipt: true,
     }),
@@ -147,7 +168,7 @@ function finish(result, row, { response = null, selection = null, orders = null,
         officialName,
         price: accepted?.price,
         currency: accepted?.currency,
-        ignorePrice: mirrorOnly,
+        ignorePrice: fallbackOnly,
         itemId: accepted?.itemId,
       },
     ));
@@ -156,7 +177,7 @@ function finish(result, row, { response = null, selection = null, orders = null,
     computed.push({ field: '供应商', receiptValue: row.supplier, officialValue: supplier.supplier });
   }
   result.fields = fields;
-  result.mismatches = mergeMismatches(reported, computed);
+  result.mismatches = mergeMismatches(reported, computed).filter(entry => !(exactPrimary && entry.field === '品名'));
   result.accepted = accepted;
   result.supplierResolution = supplier;
   result.catalogue = catalogueNote(merchant || row.supplier, row, orders);
@@ -164,10 +185,11 @@ function finish(result, row, { response = null, selection = null, orders = null,
   result.weightUnresolved = Boolean(selection?.weightUnresolved);
   result.fallbackTier = selection?.fallbackTier || null;
   result.matchType = selection?.matchType || null;
-  result.mirrorNote = selection?.mirrorNote || '';
-  if (mirrorOnly || selection?.fallback || result.mismatches.length || Object.values(fields).some(entry => entry.flag === 'amber') || forceName) {
+  result.fallbackNote = selection?.fallbackNote || '';
+  result.exactPrimary = exactPrimary;
+  if (fallbackOnly || selection?.fallback || unidentified || result.mismatches.length || Object.values(fields).some(entry => entry.flag === 'amber') || forceName) {
     if (!(lockedSkip)) {
-      const anyAmber = mirrorOnly || forceName || result.mismatches.some(entry => !fieldLocked(row.locks, entry.field)) || Object.values(fields).some(entry => entry.flag === 'amber');
+      const anyAmber = fallbackOnly || forceName || result.mismatches.some(entry => !fieldLocked(row.locks, entry.field)) || Object.values(fields).some(entry => entry.flag === 'amber');
       if (anyAmber) {
         result.flag = 'amber';
         result.flagColour = colour;
@@ -244,7 +266,7 @@ export async function enrichLines({
   editedItemIds = {},
   priceFieldOrder,
   closeGap = CLOSE_GAP,
-  officialMirrors,
+  officialFallbacks,
 } = {}) {
   const prepared = prepareUnitRows(items, {
     currency, merchant, storeClues, ocrText, priceFieldOrder, reading, locks, editedItemIds,
@@ -346,7 +368,10 @@ export async function enrichLines({
     const partial = Array.isArray(response?.quotaGuard) && response.quotaGuard.length > 0;
     let selection = null;
     if (!failed && !pausedNow) {
-      selection = selectCandidate(response.candidates, primary, { partial, closeGap, officialMirrors });
+      const access = primaryAccess(response, primary.brand, officialFallbacks);
+      selection = selectCandidate(response.candidates, primary, {
+        partial, closeGap, officialFallbacks, primaryBlocked: access.blocked, blockedDomain: access.domain,
+      });
     }
     indexes.forEach((index, offset) => {
       const result = results[index];

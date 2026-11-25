@@ -3,6 +3,7 @@
 // price and is matched first. 采购商品金额 (paid unit) is used only when 原价 is missing.
 
 import { canonicalBrand, fold, normaliseItemId } from './brand-aliases.js';
+import { brandHasItemIdFormat, chooseItemId, isConcessionCode, isEan } from './brand-item-ids.js';
 import { extractStoreClues } from './uk-branches.js';
 
 export const AMBER = '#FDE68A';
@@ -44,6 +45,31 @@ export function chooseUnitPrice(item, order = PRICE_FIELD_ORDER) {
     }
   }
   return { price: null, field: null, listUnit, paidUnit, qty };
+}
+
+function printedItemId(item) {
+  const raw = String(item?.itemId ?? item?.['品牌货号'] ?? '').trim();
+  const brand = String(item?.receiptBrand ?? item?.brand ?? item?.['品牌'] ?? '').trim();
+  const chosen = chooseItemId({
+    brand,
+    fields: {
+      itemId: raw,
+      sku: item?.sku ?? item?.style,
+      item: item?.item ?? item?.name ?? item?.['品名'],
+      name: item?.name,
+      codes: item?.codes,
+    },
+  });
+  if (chosen) return chosen;
+  if (isConcessionCode(raw) || (isEan(raw) && brandHasItemIdFormat(brand))) return '';
+  return raw;
+}
+
+function printedStyle(item, itemId) {
+  const raw = String(item?.sku ?? item?.style ?? '').trim();
+  if (!raw || isConcessionCode(raw) || isEan(raw)) return '';
+  if (normaliseItemId(raw) === normaliseItemId(itemId)) return '';
+  return raw;
 }
 
 function wholeUnits(value) {
@@ -95,14 +121,15 @@ export function prepareUnitRows(items, { currency = '', merchant = '', storeClue
     const edit = editedItemIds[sourceIndex] || null;
     const rowLocks = locks[sourceIndex] || item?.locks || null;
     for (let unitIndex = 0; unitIndex < copies; unitIndex++) {
+      const itemId = printedItemId(item);
       const row = {
         sourceIndex,
         unitIndex,
         unitCount: copies,
         brand: String(item?.receiptBrand ?? item?.brand ?? item?.['品牌'] ?? '').trim(),
         name: String(item?.receiptItem ?? item?.item ?? item?.name ?? item?.['品名'] ?? '').trim(),
-        itemId: String(item?.itemId ?? item?.['品牌货号'] ?? '').trim(),
-        style: String(item?.sku ?? item?.style ?? '').trim(),
+        itemId,
+        style: printedStyle(item, itemId),
         currency: String(item?.currency ?? currency ?? '').trim().toUpperCase(),
         supplier: String(item?.supplier ?? item?.['供应商'] ?? merchant ?? '').trim(),
         storeClues: clues,
