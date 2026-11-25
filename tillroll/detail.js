@@ -1,5 +1,6 @@
 import {purchaseDateText} from './receipt-date-display.js?v=8';
 import {orderNeedsReview} from './orders.js?v=lineverify1';
+import {kindForFlag,kindForVerification,referenceHint,reviewKinds} from './receipt-policy.js?v=policy1';
 // Receipt data and OCR are untrusted strings. Only write them through DOM text/value APIs.
 function element(tag, content, className) {
   const node = document.createElement(tag);
@@ -185,6 +186,7 @@ function showReference(pictureLink, panel, reference, onConfirm) {
     }
   }
   let reason=shared ? 'The readings point to the same place and disagree on the characters.' : reference.reason;
+  if (!reason && !found) reason=referenceHint(reference.merchant || '');
   if (!reason && !found) reason=reference.status==='ambiguous' ? 'The photo contains an uncertain reference.' : 'No reliable order reference was found.';
   if (reason) block.append(element('p',reason,'hint'));
   panel.append(block);
@@ -259,11 +261,12 @@ function showProof(panel, r) {
       if (verification.source) result.append(document.createTextNode(' '+verification.source));
       audit.append(result);
       if (verification.reason) audit.append(element('p',verification.reason,'hint'));
+      if (verification.storeAddress) audit.append(element('p','Official branch · '+verification.storeAddress,'hint'));
       line.append(audit);
     }
     if (receipt) {
       const summary = element('p');
-      summary.append(element('span',receipt.status, 'status'+(receipt.status==='Needs review'?' warn':receipt.status==='Not verified'?' muted':'')),document.createTextNode(' '+receipt.reason));
+      summary.append(element('span',receipt.status, 'status '+(receipt.status==='Needs review'?'warn reading-error':receipt.status==='Not verified'?'muted reading-error':'reading-error')),document.createTextNode(' '+receipt.reason));
       line.append(summary);
       const evidence = [...new Set([receipt.idEvidence, receipt.brandEvidence, receipt.itemEvidence,receipt.itemIdEvidence,receipt.skuEvidence].filter(Boolean))];
       if (evidence.length) line.append(element('blockquote',evidence.join('\n')));
@@ -300,7 +303,10 @@ function showFlags(panel, r, act, callbacks) {
     parent.append(list);
   };
   const issues = ordinary.filter(f=>f.severity!=='info');
-  if (issues.length) { const s = section('Needs checking'); include(issues,s); panel.append(s); }
+  const reading = issues.filter(f=>kindForFlag(f)===reviewKinds.reading);
+  const lookup = issues.filter(f=>kindForFlag(f)===reviewKinds.lookup);
+  if (reading.length) { const s = section('Reading errors'); include(reading,s); panel.append(s); }
+  if (lookup.length) { const s = section('Lookup uncertainty'); include(lookup,s); panel.append(s); }
   const info = ordinary.filter(f=>f.severity==='info');
   if (info.length) { const box = disclosure('Other checks'); include(info,box); panel.append(box); }
 }
@@ -371,7 +377,7 @@ export function showDetail(r, callbacks={}, focusPath='') {
   const close=()=>{if(dialog.open)dialog.close();};
   const act=(name,...args)=>{if(typeof callbacks[name]==='function'){close();callbacks[name](...args);}};
   const title=element('div',undefined,'dialog-title');
-  const heading=element('div'), h=element('h2','Receipt '+r.id+(r.data?.merchant?' · '+r.data.merchant:''));
+  const heading=element('div'), h=element('h2','Receipt '+r.id+(r.data?.merchant?' · '+(r.data.merchantDisplay||r.data.merchant):''));
   h.id='receipt-detail-title';dialog.setAttribute('aria-labelledby',h.id);
   heading.append(h,element('small',r.filename));
   if(r.data)heading.append(element('small',['Purchase date · '+purchaseDateText(r.data),r.data.time].filter(Boolean).join(' · ')));
@@ -398,7 +404,7 @@ export function showDetail(r, callbacks={}, focusPath='') {
     heading.append(element('small',['Receipt total',r.data.currency,amount].filter(Boolean).join(' ')));
   }
   const panel=element('div',undefined,'review-panel');
-  if (r.state==='done' && r.origin!=='achung') showReference(pictureLink,panel,r.reference,
+  if (r.state==='done' && r.origin!=='achung') showReference(pictureLink,panel,{...r.reference,merchant:r.data?.merchant},
     callbacks.onConfirmReference && ((candidate,kind)=>act('onConfirmReference',candidate,kind)));
   if (r.useSaved && r.demo?.note) panel.append(element('p',r.demo.note,'hint'));
   if (r.duplicateOf || r.exactOf) {

@@ -92,6 +92,15 @@ function agreedList(input) {
   return [];
 }
 
+// Card guard (local merge resolution): no card digits in 采购商品方法, its baseline or
+// any other cell. TODO(#1): switch to maskCardField from item-identifiers.js once
+// PR #1 is on main.
+function maskPaymentRow(row) {
+  const v = row?.cells?.['采购商品方法'];
+  if (typeof v !== 'string' || !/\d/.test(v)) return row;
+  return { ...row, cells: { ...row.cells, '采购商品方法': v.replace(/\d/g, '*') } };
+}
+
 function receiptToRows(receipt) {
   const data = receipt.data || receipt;
   const expanded = expandReceipt({ ...data, receiptKey: receipt.receiptKey || receipt.hash || data.receiptKey || 'receipt' });
@@ -181,7 +190,7 @@ function moneyCell(value, colour) {
 }
 
 export async function buildV2XlsxBlob(input, { exportKey = (globalThis.crypto?.randomUUID?.() || `exp-${Date.now()}`) } = {}) {
-  const rows = agreedList(input);
+  const rows = agreedList(input).map(maskPaymentRow);
   if (rows.length > 1048575) throw new Error('This batch exceeds the number of item rows allowed in one Excel worksheet.');
   const comments = [];
   const body = rows.map((row, i) => {
@@ -365,6 +374,11 @@ export async function readV2Workbook(file) {
   const headers = new Map();
   headerCells.forEach(cell => { if (cell.col !== null && cell.value) headers.set(cell.col, String(cell.value).trim()); });
   if (![...headers.values()].includes('采购小票id')) {
+    return { kind: 'legacy' };
+  }
+  // Main's pre-v2 中文 Excel (Chinese columns + hidden English detailed columns with
+  // 'Tillroll line key'): keep it on the legacy refresh path (clearedFields/manualClears).
+  if (!new Set(headers.values()).has('Tillroll row id') && new Set(headers.values()).has('Tillroll line key')) {
     return { kind: 'legacy' };
   }
   for (const title of VISIBLE_COLUMNS) {

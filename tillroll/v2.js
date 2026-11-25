@@ -183,13 +183,18 @@ async function openWorkbooks() {
     } catch (e) { btn.disabled = false; btn.textContent = e.message || 'Refresh failed'; }
   };
 }
-async function openHistory() {
-  const d = $('#v2-history-dialog'), list = $('#v2-history-list');
-  list.innerHTML = '<p>Loading…</p>'; d.showModal();
-  const r = await api('/api/history?limit=100');
-  const data = await r.json().catch(() => ({}));
-  if (!r.ok) { list.innerHTML = `<p class="v2-error">${esc(data.error || 'Could not load history.')}</p>`; return; }
-  list.innerHTML = data.entries.length ? '<ul class="v2-list">' + data.entries.map(e => `<li><span><b>${esc(e.kind)}</b> · ${esc(e.summary)}<br><small>${esc(new Date(e.created_at).toLocaleString('en-GB', { timeZone: 'Europe/London' }))}${e.batch_id ? ' · ' + esc(e.batch_id) : ''}</small></span></li>`).join('') + '</ul>' : '<p>No history yet.</p>';
+// Reading History: the single #history-dialog lives in app.js. When signed in,
+// app.js asks this hook for the server-backed history (/api/history); on 401,
+// a locked session or any error it gets {ok:false} and falls back to the
+// browser-local history (reading-history.js). No unlock prompt from here.
+async function serverHistory(limit = 100) {
+  try {
+    const r = await fetch(`/api/history?limit=${encodeURIComponent(limit)}`, { credentials: 'same-origin' });
+    if (!r.ok) return { ok: false, status: r.status };
+    const data = await r.json().catch(() => null);
+    if (!data || !Array.isArray(data.entries)) return { ok: false, status: r.status };
+    return { ok: true, entries: data.entries };
+  } catch { return { ok: false, status: 0 }; }
 }
 
 function init() {
@@ -198,10 +203,10 @@ function init() {
     lastResult: () => lastResult,
     showResult: out => { lastResult = out; const panel = $('#v2-panel'); if (panel) panel.hidden = false; renderResult(out); },
     driveReplace: () => driveReplace,
+    serverHistory,
   });
   $('#v2-run')?.addEventListener('click', runSanity);
   $('#v2-workbooks')?.addEventListener('click', openWorkbooks);
-  $('#v2-history')?.addEventListener('click', openHistory);
   for (const b of document.querySelectorAll('[data-v2-close]')) b.onclick = () => document.getElementById(b.dataset.v2Close).close();
   const p = new URLSearchParams(location.search).get('drive');
   if (p === 'connected') note('Google Drive connected.'); else if (p === 'denied') note('Google Drive was not connected.');

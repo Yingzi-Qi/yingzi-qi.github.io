@@ -35,8 +35,38 @@ const verificationColumns = [
   ['Item verification','status','verification'], ['Verification source','source','verification'],
   ['Verification detail','reason','verification']
 ];
+// A compact, Chinese-language export for the operational workbook. The
+// detailed Tillroll columns remain hidden in this workbook so it stays linked
+// to the same refresh and audit machinery.
+const chinaColumns = [
+  ['采购小票id','orderNumber','receipt'],
+  ['采购时间','purchaseTime','receipt'],
+  ['供应商','merchant','receipt'],
+  ['品牌','brand','line'],
+  ['品名','item','line'],
+  ['品牌货号','itemId','line'],
+  ['采购商品原价','unitPrice','line','money'],
+  ['采购商品金额','amount','line','money'],
+  ['采购商品方法','payment','receipt'],
+  ['销售金额','saleAmount','derived','money']
+];
 const refreshReceiptHeader='Tillroll receipt key', refreshLineHeader='Tillroll line key';
 const baselineHeader='Tillroll original values';
+// Card guard (local merge resolution). No exported cell, hidden English
+// detailed column, baseline JSON or CSV field may carry card digits.
+// TODO(#1): switch to maskCardField from item-identifiers.js once PR #1 is on main,
+// and drop this local helper.
+const CARD_FIELDS=new Set(['card','payment']);
+export function maskCardDigits(value) {
+  if (value===null || value===undefined || value==='') return value;
+  return String(value).replace(/\d/g,'*');
+}
+function maskedReceiptData(data) {
+  if (!data || typeof data!=='object') return data;
+  const out={...data};
+  for (const key of CARD_FIELDS) if (key in out) out[key]=maskCardDigits(out[key]);
+  return out;
+}
 const editableColumns=receiptColumns.filter(([, ,scope='receipt'])=>scope==='receipt' || scope==='line');
 function baselineParts(baseline) {
   const parts=[];
@@ -64,7 +94,8 @@ function exportData(receipts,includeRefresh=false) {
       const photo = r.review?.photo?.[i] ?? {};
       const order = r.orders?.[i] ?? {};
       const verification=r.verification?.[i] ?? {};
-      const verificationMismatch=verification.status==='Verification error' || verification.status==='Previously flagged';
+      const verificationMismatch=verification.status!=='Manually cleared' &&
+        (verification.status==='Verification error' || verification.status==='Previously flagged' || (verification.kind==='lookup' && !verification.skipped));
       const imported=r.origin==='achung';
       const originalNote=imported ? r.sourceNotes?.[i] : undefined;
       const orderIssue=orderNeedsReview(order) ? order.reason || order.status : '';
@@ -81,12 +112,13 @@ function exportData(receipts,includeRefresh=false) {
         proposal:{suggested,alternatives},
         review:{message:note}
       };
-      const baseline=includeRefresh ? {receipt:{},line:{},emptyReceipt:!r.data.items?.length,exportKey} : null;
+      const baseline=includeRefresh ? {receipt:{},line:{},review:{},emptyReceipt:!r.data.items?.length,exportKey} : null;
       const cells=columns.map(([,key,source='receipt',type]) => {
         let value = sources[source]?.[key] ?? '';
+        if (source==='receipt' && CARD_FIELDS.has(key)) value=maskCardDigits(value) ?? '';
         const numeric = type && value !== '' && Number.isFinite(Number(value));
         value = numeric ? Number(value) : String(value);
-        if (baseline && (source==='receipt' || source==='line')) {
+      if (baseline && (source==='receipt' || source==='line')) {
           const saved=numeric ? value : value.slice(0,32767).replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]/g,'');
           baseline[source][key]=saved==='' ? null : saved;
         }
@@ -105,7 +137,17 @@ function exportData(receipts,includeRefresh=false) {
           || (source==='proposal' && value!=='')
           || (source==='photo' && ['status','reason'].includes(key) && photo.status === 'Needs review')
           || (source==='order' && ['status','reason'].includes(key) && orderNeedsReview(order));
+        if (baseline) {
+          const reviewKey=source==='line' ? prefix+key : source==='verification' ? prefix+'verification.'+key : key;
+          if (source==='receipt' || source==='line' || source==='verification') baseline.review[reviewKey]=Boolean(flagged);
+        }
         return {value,numeric,style:flagged ? (type==='money' ? 5 : 4) : type==='money' ? 3 : 0};
+      });
+      if (baseline) columns.forEach(([,key,source='receipt'],index)=>{
+        if (source==='receipt' || source==='line' || source==='verification') {
+          const reviewKey=source==='line' ? prefix+key : source==='verification' ? prefix+'verification.'+key : key;
+          if (!Object.hasOwn(baseline.review,reviewKey)) baseline.review[reviewKey]=cells[index]?.style>=4;
+        }
       });
       if (includeRefresh) {
         const receiptKey=r.refreshKey??=crypto.randomUUID();
@@ -143,7 +185,102 @@ export function buildCsvBlob(receipts) {
 // readers below still recognise the historical English headers so older workbooks open.
 export async function buildXlsxBlob(receipts) {
   const { buildV2XlsxBlob } = await import('./v2-excel.js');
-  return buildV2XlsxBlob(receipts);
+  // Mask card digits before the v2 writer sees them (采购商品方法 comes from payment).
+  const safe=Array.isArray(receipts) ? receipts.map(r=>r?.data ? {...r,data:maskedReceiptData(r.data),record:r.record ? maskedReceiptData(r.record) : r.record} : r) : receipts;
+  return buildV2XlsxBlob(safe);
+}
+
+// LEGACY_CHINA_WRITER: main's compact Chinese writer (chinaExportData/buildChinaXlsxBlob,
+// hidden English detailed columns, #FFEDC0). Kept but OFF: '中文 Excel' now delegates to
+// the v2 writer above (the one binding export). Removal is prepared separately on
+// local/merge-main-into-4-remove-china-writer.
+const LEGACY_CHINA_WRITER=false;
+// ---- LEGACY_CHINA_WRITER helpers (main fdf6475) -------------------------------
+// #4 removed these when .xlsx moved to v2-excel.js; the auto-merge kept main's
+// buildChinaXlsxBlob but not its helpers. Restored verbatim so the flagged-off writer
+// still works; they go away together with it on the -remove-china-writer branch.
+const MAIN = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
+const PACKAGE = 'http://schemas.openxmlformats.org/package/2006/relationships';
+const XML = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+const WORKBOOK_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+const excelColumnWidth = 28;
+const excelRowHeight = 32;
+const esc = value => String(value ?? '').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]/g,'')
+  .replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
+const colName = n => n > 26 ? colName(Math.floor((n-1)/26)) + colName((n-1)%26+1) : String.fromCharCode(64+n);
+function cellXml(row,col,{value,numeric,style}) {
+  const attrs = ' r="'+colName(col)+row+'" s="'+style+'"';
+  if (numeric) return '<c'+attrs+'><v>'+value+'</v></c>';
+  if (value==='') return '<c'+attrs+'/>';
+  return '<c'+attrs+' t="inlineStr"><is><t xml:space="preserve">'+esc(String(value).slice(0,32767))+'</t></is></c>';
+}
+const styles = XML + `<styleSheet xmlns="${MAIN}">
+  <fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><color rgb="FFFFFFFF"/><sz val="11"/><name val="Calibri"/></font></fonts>
+  <fills count="6"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>${['FF1E4946','FFFFEDC0','FFFDE68A','FFFECDD3'].map(rgb=>'<fill><patternFill patternType="solid"><fgColor rgb="'+rgb+'"/><bgColor indexed="64"/></patternFill></fill>').join('')}</fills>
+  <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+  <cellXfs count="10">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf>
+    <xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment wrapText="1" vertical="center"/></xf>
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf>
+    <xf numFmtId="4" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyAlignment="1"><alignment vertical="top"/></xf>
+    ${[3,4,5].map(fill=>'<xf numFmtId="0" fontId="0" fillId="'+fill+'" borderId="0" xfId="0" applyFill="1" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf><xf numFmtId="4" fontId="0" fillId="'+fill+'" borderId="0" xfId="0" applyNumberFormat="1" applyFill="1" applyAlignment="1"><alignment vertical="top"/></xf>').join('')}
+  </cellXfs>
+  <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`;
+// ---- end LEGACY_CHINA_WRITER helpers -------------------------------------------
+
+function purchaseTimeValue(data) {
+  return [data.date,data.time].filter(Boolean).join(' ');
+}
+function saleAmountValue(line) {
+  const unit=Number(line.unitPrice);
+  if (Number.isFinite(unit)) return Math.round(unit*0.88*100)/100;
+  const amount=Number(line.amount), qty=Number(line.qty);
+  if (Number.isFinite(amount) && Number.isFinite(qty) && qty>0)
+    return Math.round((amount/qty)*0.88*100)/100;
+  return '';
+}
+function chinaExportData(receipts) {
+  const detailed=exportData(receipts,true);
+  const rows=[];
+  let detailIndex=0;
+  for (const r of receipts) {
+    if (!r.data) continue;
+    const lines=r.data.items?.length ? r.data.items : [{}];
+    for (const line of lines) {
+      const detail=detailed.rows[detailIndex++];
+      const merchant=r.data.merchantDisplay||r.data.merchant||'';
+      const receiptId=r.data.orderNumber||r.data.orderId||r.data.receiptReference||r.filename||'';
+      const visible=chinaColumns.map(([title,key,scope,type])=>{
+        let value='';
+        if(scope==='receipt') value=key==='purchaseTime' ? purchaseTimeValue(r.data) : (key==='orderNumber' ? receiptId : r.data[key]??'');
+        if(scope==='receipt' && CARD_FIELDS.has(key)) value=maskCardDigits(value) ?? '';
+        else if(scope==='line') value=line[key]??'';
+        else if(scope==='derived' && key==='saleAmount') value=saleAmountValue(line);
+        const numeric=type && value!=='' && Number.isFinite(Number(value));
+        return {value:numeric?Number(value):String(value),numeric,style:type==='money'?3:0};
+      });
+      rows.push([...visible,...detail]);
+    }
+  }
+  return {columns:[...chinaColumns,...detailed.columns],rows,visibleCount:chinaColumns.length};
+}
+export async function buildChinaXlsxBlob(receipts) {
+  const {columns,rows,visibleCount}=chinaExportData(receipts);
+  const range='A1:'+colName(columns.length)+(rows.length+1);
+  const rowXml=(number,cells)=>`<row r="${number}" ht="${excelRowHeight}" customHeight="1">${cells.map((cell,i)=>cellXml(number,i+1,cell)).join('')}</row>`;
+  const header=rowXml(1,columns.map(([title])=>({value:title,style:1})));
+  const contents=rows.map((row,i)=>rowXml(i+2,row)).join('');
+  const widths=columns.map((_,i)=>`<col min="${i+1}" max="${i+1}" width="${excelColumnWidth}" customWidth="1"${i>=visibleCount?' hidden="1"':''}/>`).join('');
+  const worksheet=XML+`<worksheet xmlns="${MAIN}"><dimension ref="${range}"/><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" state="frozen" topLeftCell="A2" activePane="bottomLeft"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="${excelRowHeight}" defaultColWidth="${excelColumnWidth}"/><cols>${widths}</cols><sheetData>${header}${contents}</sheetData><autoFilter ref="${range}"/></worksheet>`;
+  const zip=new JSZip();
+  zip.file('[Content_Types].xml',XML+`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`);
+  zip.file('_rels/.rels',XML+`<Relationships xmlns="${PACKAGE}"><Relationship Id="rId1" Type="${REL}/officeDocument" Target="xl/workbook.xml"/></Relationships>`);
+  zip.file('xl/workbook.xml',XML+`<workbook xmlns="${MAIN}" xmlns:r="${REL}"><sheets><sheet name="Line items" sheetId="1" r:id="rId1"/></sheets></workbook>`);
+  zip.file('xl/_rels/workbook.xml.rels',XML+`<Relationships xmlns="${PACKAGE}"><Relationship Id="rId1" Type="${REL}/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="${REL}/styles" Target="styles.xml"/></Relationships>`);
+  zip.file('xl/worksheets/sheet1.xml',worksheet);
+  zip.file('xl/styles.xml',styles);
+  return new Blob([await zip.generateAsync({type:'uint8array',compression:'DEFLATE'})],{type:WORKBOOK_MIME});
 }
 function download(blob,extension) {
   const url=URL.createObjectURL(blob);
@@ -155,6 +292,7 @@ function download(blob,extension) {
 }
 export function exportCSV(receipts) { return download(buildCsvBlob(receipts),'csv'); }
 export async function exportExcel(receipts) { return download(await buildXlsxBlob(receipts),'xlsx'); }
+export async function exportChinaExcel(receipts) { return download(await (LEGACY_CHINA_WRITER ? buildChinaXlsxBlob : buildXlsxBlob)(receipts),'xlsx'); }
 
 const aliases = {
   retailer:['retailer','source','merchant','store','mall','issuer'], order_id:['orderid','orderidentifier'],
@@ -165,7 +303,9 @@ const aliases = {
   unit_price:['unitprice','priceperitem','priceperunit','unitamount'],
   amount:['amount','lineamount','linetotal','itemamount','extendedamount'],
   total:['purchasetotal','purchaseamount','receipttotal','ordertotal','totalpaid','amountpaid'],
-  currency:['currency','currencycode'], order_id_pattern:['orderidpattern','orderidformat'],
+  currency:['currency','currencycode'], weight:['weight','weightg','grams','grammes'],
+  store_address:['storeaddress','branchaddress','address','location'], official_name:['officialname','officialitemname'],
+  order_id_pattern:['orderidpattern','orderidformat'],
   order_number_pattern:['ordernumberpattern','ordernumberformat']
 };
 const keys = new Map(Object.entries(aliases).flatMap(([key,names])=>names.map(name=>[name,key])));
@@ -375,15 +515,30 @@ function nativeValue(cell,column,book) {
 
 const refreshColumns=[...editableColumns,['File','filename','meta'],[refreshReceiptHeader,'receiptKey','meta'],
   [refreshLineHeader,'lineKey','meta']];
+// The compact export has editable Chinese labels. Its hidden detailed columns
+// still provide the complete Tillroll baseline, while these descriptors let a
+// user edit the visible operating table and have those values applied on
+// refresh.
+const chinaRefreshColumns = [
+  ['采购小票id','receiptId','china'], ['采购时间','purchaseTime','china'],
+  ['供应商','merchant','china'], ['品牌','brand','china'],
+  ['品名','item','china'], ['品牌货号','itemId','china'],
+  ['采购商品原价','unitPrice','china','money'],
+  ['采购商品金额','amount','china','money'],
+  ['采购商品方法','payment','china'], ['销售金额','saleAmount','derived','money']
+];
 const refreshUuid=/^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i;
 const tillrollHeaders=new Set(['photo check','verification detail','reference finding']);
+function plainReviewStyle(style,book){
+  return [0,2,3].includes(style) || (style>=10 && book.reviewStyles?.[style]===null);
+}
 
 function refreshBaseline(parts,rowNumber) {
   let snapshot;
   try { snapshot=JSON.parse(parts.join('')); } catch {}
   if (typeof snapshot?.emptyReceipt!=='boolean' || !refreshUuid.test(snapshot.exportKey))
     throw new Error('Missing original receipt information in row '+rowNumber+'. Export a fresh workbook.');
-  const baseline={receipt:{},line:{},emptyReceipt:snapshot.emptyReceipt,exportKey:snapshot.exportKey};
+  const baseline={receipt:{},line:{},review:snapshot.review && typeof snapshot.review==='object' ? snapshot.review : {},emptyReceipt:snapshot.emptyReceipt,exportKey:snapshot.exportKey};
   for (const [,key,scope='receipt',type] of editableColumns) {
     const fields=snapshot?.[scope];
     if (!fields || !Object.hasOwn(fields,key) || (fields[key]!==null &&
@@ -414,7 +569,7 @@ export async function readTillrollEdits(file) {
     const title=cellValue(cell,book.strings,book.formats,false).trim().toLowerCase();
     if (tillrollHeaders.has(title)) tillroll=true;
     const part=/^tillroll original values(?: (\d+))?$/.exec(title);
-    const column=part ? [title,Number(part[1]??1),'baseline'] : refreshColumns.find(c=>c[0].toLowerCase()===title);
+    const column=part ? [title,Number(part[1]??1),'baseline'] : refreshColumns.find(c=>c[0].toLowerCase()===title) || chinaRefreshColumns.find(c=>c[0].toLowerCase()===title);
     if (!column) continue;
     if (schema.has(i) || seen.has(title) || (part && parts.has(column[1])))
       throw new Error('Repeated column in the Line items worksheet: '+title+'.');
@@ -434,7 +589,7 @@ export async function readTillrollEdits(file) {
   let exportKey=null;
   for (const row of rows) {
     const rowNumber=Number(row.getAttribute('r')) || result.length+2;
-    const entry={rowNumber,filename:null,receiptKey:null,lineKey:null,receipt:{},line:{},baseline:null};
+    const entry={rowNumber,filename:null,receiptKey:null,lineKey:null,receipt:{},line:{},baseline:null,styles:{},clearedFields:[],china:{},chinaPresent:new Set()};
     const chunks=[], cells=new Map();
     next=0;
     for (const cell of children(row,'c')) {
@@ -448,7 +603,12 @@ export async function readTillrollEdits(file) {
       const value=cell ? nativeValue(cell,column,book) : null;
       if (scope==='baseline') chunks[key-1]=value??'';
       else if (scope==='meta') entry[key]=value;
-      else entry[scope][key]=value;
+      else if (scope==='china') { entry.china[key]=value; entry.chinaPresent.add(key); entry.styles['china.'+key]=Number(cell?.getAttribute('s')||0); }
+      else if (scope==='derived') { /* Recalculated on the next export. */ }
+      else {
+        entry[scope][key]=value;
+        entry.styles[scope+'.'+key]=Number(cell?.getAttribute('s')||0);
+      }
     }
     if (!entry.filename && !entry.receiptKey && !entry.lineKey && !chunks.some(Boolean) &&
         [...Object.values(entry.receipt),...Object.values(entry.line)].every(v=>v===null)) continue;
@@ -462,6 +622,52 @@ export async function readTillrollEdits(file) {
         throw new Error('Row '+rowNumber+' belongs to a different Excel export. Refresh one workbook at a time.');
       exportKey=entry.baseline.exportKey;
     }
+    if (entry.baseline?.review) {
+      for (const [reviewKey,wasFlagged] of Object.entries(entry.baseline.review)) {
+        if (!wasFlagged) continue;
+        const suffix=/^items\.\d+\.(.+)$/.exec(reviewKey)?.[1];
+        const style=entry.styles[reviewKey] ?? (suffix ? (entry.styles['line.'+suffix] ?? entry.styles[suffix]) : undefined);
+        if (style!==undefined && plainReviewStyle(style,book)) entry.clearedFields.push(reviewKey);
+      }
+    }
+    // Visible Chinese columns override hidden detailed values only when the
+    // user changed them from the original export. This keeps edits made in
+    // the hidden detailed columns intact and avoids converting a derived
+    // receipt ID into an order number on every refresh.
+    const originalReceipt=entry.baseline?.receipt||{};
+    const originalLine=entry.baseline?.line||{};
+    const originalId=originalReceipt.orderNumber||originalReceipt.orderId||originalReceipt.receiptReference||entry.filename||'';
+    for (const key of entry.chinaPresent) {
+      const value=entry.china[key];
+      if (key==='receiptId') {
+        if (String(value??'')!==String(originalId??'')) entry.receipt.orderNumber=value;
+      } else if (key==='purchaseTime') {
+        const originalTime=[originalReceipt.date,originalReceipt.time].filter(Boolean).join(' ');
+        if (String(value??'').trim()!==String(originalTime??'').trim()) {
+          const text=String(value??'').trim(), match=/^(\d{4}-\d\d-\d\d)(?:[ T]+(\d\d:\d\d(?::\d\d)?))?$/.exec(text);
+          entry.receipt.date=match?.[1]??(text?'':null);
+          entry.receipt.time=match?.[2]??(text?'':null);
+        }
+      } else if (key==='merchant' || key==='payment') {
+        if (String(value??'')!==String(originalReceipt[key]??'')) entry.receipt[key]=value;
+      } else if (['brand','item','itemId','unitPrice','amount'].includes(key)) {
+        if (String(value??'')!==String(originalLine[key]??'')) entry.line[key]=value;
+      }
+    }
+    if (entry.baseline?.review) {
+      for (const key of entry.chinaPresent) {
+        const style=entry.styles['china.'+key];
+        if (style===undefined || !plainReviewStyle(style,book)) continue;
+        const fields=key==='receiptId'?['orderNumber']:key==='purchaseTime'?['date','time']:
+          key==='merchant'?['merchant']:key==='payment'?['payment']:
+          ['brand','item','itemId','unitPrice','amount'].includes(key)
+            ? Object.keys(entry.baseline.review).filter(field=>new RegExp('^items\\.\\d+\\.'+key+'$').test(field)) : [];
+        for (const field of fields) if (entry.baseline.review[field]) entry.clearedFields.push(field);
+      }
+    }
+    entry.clearedFields=[...new Set(entry.clearedFields)];
+    delete entry.styles;
+    delete entry.china; delete entry.chinaPresent;
     result.push(entry);
   }
   if (!result.length) throw new Error('The workbook has no receipt rows to refresh.');

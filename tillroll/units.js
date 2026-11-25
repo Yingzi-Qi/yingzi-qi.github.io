@@ -203,6 +203,7 @@ export function expandReceipt(receipt, { settled = false } = {}) {
       const lineIndex = line.lineIndex ?? i;
       const figs = lineFigures({ ...line, qty: 1 });
       const list = figs.list, paid = figs.each !== null && list !== null ? round2(list - figs.each) : (num(line.amount) ?? list);
+      const kind = line.discountKind || (list !== null && paid !== null && Math.abs(list - paid) > 0.001 ? 'printed' : 'none');
       return {
         ...line,
         ...copyRound2(line),
@@ -213,7 +214,8 @@ export function expandReceipt(receipt, { settled = false } = {}) {
         unitPrice: list,
         amount: paid,
         discount: list !== null && paid !== null ? round2(list - paid) : (num(line.discount) || 0),
-        discountKind: line.discountKind || (list !== null && paid !== null && Math.abs(list - paid) > 0.001 ? 'printed' : 'none'),
+        discountKind: kind,
+        estimated: kind === 'estimated',
         unitSettled: true,
       };
     });
@@ -291,6 +293,7 @@ export function expandReceipt(receipt, { settled = false } = {}) {
       amount: paid,
       discount: list !== null && paid !== null ? round2(list - paid) : 0,
       discountKind: d.kind,
+      estimated: d.kind === 'estimated',
       currency: d.line.currency,
       zeroConfirmed: d.line.zeroConfirmed,
       fieldIssues: d.line.fieldIssues,

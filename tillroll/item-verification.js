@@ -1,4 +1,5 @@
 import {currencyCode,readMoney} from './orders.js?v=lineverify1';
+import {officialBrand} from './receipt-policy.js?v=policy1';
 
 const text = value => String(value ?? '').trim();
 const words = value => text(value).normalize('NFKC').toLowerCase().replace(/\s+/g,' ');
@@ -84,7 +85,7 @@ function compareField(key,item,currency,rows,source,purchase) {
   const conflict=rows.some(row=>row.conflicts?.some(k=>conflictKeys.includes(k)));
   const evidence=rows.map(row=>{
     if (key==='amount') return priceObservation(item,currency,row,purchase);
-    const expected=text(row[key]);
+    const expected=key==='brand' ? officialBrand(row[key]) : text(row[key]);
     return expected ? {actual,expected,signature:productName(expected),agrees:productName(expected)===productName(actual)} : null;
   });
   const observed=evidence.filter(Boolean);
@@ -99,10 +100,11 @@ function compareField(key,item,currency,rows,source,purchase) {
 
 function summarize(fields,notes) {
   const differences=fields.filter(f=>f.status==='mismatch');
+  const lookupMissing=fields.some(f=>['item','brand'].includes(f.key) && !f.actual && f.expected);
   const keys=['item','brand','amount'];
   const missing=keys.filter(key=>fields.some(f=>f.key===key && f.ambiguous) || !fields.some(f=>f.key===key && f.status==='match'));
   const sources=unique(fields.map(f=>f.source));
-  const status=differences.length?'mismatch':!missing.length?'verified':fields.some(f=>f.status==='match')?'partial':'unchecked';
+  const status=differences.some(f=>f.actual)?'mismatch':lookupMissing?'partial':!missing.length?'verified':fields.some(f=>f.status==='match')?'partial':'unchecked';
   const reasons=differences.map(f=>{
     const corroborated=unique(fields.filter(other=>other.key===f.key && other.status==='match').map(other=>other.source));
     const description=f.actual ? labels[f.key]+' differs. Output “'+f.actual+'”, '+f.source+' “'+f.expected+'”.'
@@ -113,9 +115,28 @@ function summarize(fields,notes) {
   if (status==='verified') reasons.push('Item ID, item name, brand and price agree.');
   if (status==='partial' || status==='unchecked') {
     reasons.push(...unique(fields.filter(f=>f.ambiguous).map(f=>f.reason)),...notes);
+    if(lookupMissing)reasons.push('The independent reference supplies a possible official '+fields.filter(f=>['item','brand'].includes(f.key)&&!f.actual&&f.expected).map(f=>labels[f.key].toLowerCase()).join(' and ')+'. Confirm it before replacing the receipt reading.');
     if (fields.length) reasons.push('Unverified fields: '+missing.map(k=>labels[k].toLowerCase()).join(', ')+'.');
   }
-  return {status,source:sources.join(' + '),reason:unique(reasons).join(' '),fields};
+  return {status,source:sources.join(' + '),reason:unique(reasons).join(' '),fields,kind:'lookup'};
+}
+
+function amountValue(item,row) {
+  const actual=Number(item.amount ?? item.unitPrice), candidate=Number(row.amount ?? row.unit_price ?? row.unitPrice);
+  return Number.isFinite(actual)&&Number.isFinite(candidate) ? {actual,candidate} : null;
+}
+function weightValue(row) {
+  const value=String(row.weight ?? '').replace(',','.').match(/\d+(?:\.\d+)?/);
+  return value ? Number(value[0]) : null;
+}
+function nearPriceCandidates(item,rows) {
+  const values=rows.map(row=>({row,amount:amountValue(item,row)})).filter(x=>x.amount);
+  if(!values.length)return [];
+  const tolerance=Math.max(.01,Math.abs(values[0].amount.actual)*.02);
+  const close=values.filter(x=>Math.abs(x.amount.actual-x.amount.candidate)<=tolerance);
+  if(!close.length)return [];
+  const weighted=close.filter(x=>weightValue(x.row)!==null).sort((a,b)=>weightValue(a.row)-weightValue(b.row));
+  return weighted.length ? [weighted[0].row] : [close[0].row];
 }
 
 // A supplied order can identify a different printed ID only when a separate
@@ -134,6 +155,15 @@ function differentOrderId(item,id,rows,source) {
 export function verifyOutputItems(receipt,orders=[],photoLines=[]) {
   const order=scopeOrders(receipt,orders || []);
   return (receipt.items || []).map(item=>{
+    // A complete receipt line does not need an independent product lookup.
+    // Keep the receipt values as the source of truth until a missing field is
+    // supplied in Excel or through the detail editor.
+    const actualPrice=item.amount ?? item.unitPrice;
+    if (text(item.brand) && text(item.item) && Number.isFinite(Number(actualPrice))) {
+      return {status:'verified',source:'Receipt reading',
+        reason:'Brand, item name and price are present on the receipt. Independent lookup skipped.',
+        fields:[],kind:'lookup',skipped:true};
+    }
     const id=text(item.itemId);
     if (!id) return summarize([],['The output has no item ID to look up.']);
     const orderRows=order.rows.filter(row=>text(row.item_id)===id);
@@ -152,7 +182,16 @@ export function verifyOutputItems(receipt,orders=[],photoLines=[]) {
       const mismatch=differentOrderId(item,id,order.rows,order.source);
       if (mismatch) fields.push(mismatch);
     }
-    if (!fields.length) notes.push(order.problem || 'No independent reference with the same item ID was available for this line.');
-    return summarize(fields,notes);
+    if (!fields.length) {
+      const candidates=nearPriceCandidates(item,[...order.rows,...order.catalogue]);
+      if(candidates.length) {
+        notes.push('The item ID was not found exactly. A candidate was selected by equal or near-equal price. This is a lookup guess.');
+        for(const key of ['item','brand','amount'])fields.push(compareField(key,item,receipt.currency,candidates,'Price lookup guess',false));
+      } else notes.push(order.problem || 'No independent reference with the same item ID was available for this line.');
+    }
+    const result=summarize(fields,notes);
+    const address=[...order.rows,...order.catalogue].map(row=>row.store_address).find(Boolean);
+    if(address)result.storeAddress=address;
+    return result;
   });
 }
