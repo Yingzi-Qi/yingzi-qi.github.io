@@ -84,6 +84,7 @@ button.review-reason{min-height:28px;border-color:transparent;font-weight:500}bu
 /* Review categories are deliberately distinct so reading corrections happen before lookup decisions. */
 .reading-error{--review-color:#a33f34;color:#8f342c!important;background:#f8e4df!important;border-color:#dca89f!important}.lookup-uncertainty{--review-color:#876313;color:#76540e!important;background:#fff0c7!important;border-color:#e1c47d!important}.review-count{border-radius:5px;padding:3px 7px}.cell.reading-error{box-shadow:inset 3px 0 #b74b3f}.cell.lookup-uncertainty{box-shadow:inset 3px 0 #b28a22}.line-verification.reading-error,.line-verification.lookup-uncertainty{margin-left:6px}
 .receipt-lines td button.cell.lookup-fill{background:#FDE68A}
+.receipt-lines td button.cell.lookup-reading{background:#FECDD3}
 .lookup-pill{display:inline-block;margin-top:.2rem;padding:.05rem .35rem;border-radius:4px;background:#FDE68A;color:#633806;font-size:.75rem;font-weight:650}
 .lookup-note{margin-top:8px;padding:8px 10px;border-radius:6px;background:#FDE68A;font-size:.88rem;line-height:1.4}
 .lookup-note p{margin:4px 0 0}

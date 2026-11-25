@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { canonicalBrand, normaliseItemId } from './brand-aliases.js';
+import { brandInLine, canonicalBrand, knownBrand, normaliseItemId } from './brand-aliases.js';
 import { chooseItemId } from './brand-item-ids.js';
 import { resolveSupplier } from './uk-branches.js';
 import { branchClue, cacheKeys, createLookupClient, parseLookupResponse } from './lookup-client.js';
@@ -53,6 +53,24 @@ describe('brand aliases', () => {
     assert.equal(canonicalBrand('CHANEL BOUTIQUE'), 'Chanel');
     assert.equal(canonicalBrand('Bvlgari'), 'Bulgari');
     assert.equal(canonicalBrand('Chanel Beauty UK'), 'Chanel');
+    assert.equal(canonicalBrand('Christian Dior'), 'Dior');
+    assert.equal(canonicalBrand('Dior'), 'Dior');
+    assert.equal(canonicalBrand('Dior Mens'), 'Dior');
+    assert.equal(canonicalBrand('Dior Homme'), 'Dior');
+    assert.equal(canonicalBrand('Dior Beauty'), 'Dior');
+    assert.equal(canonicalBrand('CD'), 'Dior');
+    assert.equal(canonicalBrand('LV'), 'Louis Vuitton');
+    assert.equal(canonicalBrand('BV'), 'Bottega Veneta');
+  });
+
+  it('matches CD, LV and BV only as whole tokens', () => {
+    assert.equal(canonicalBrand('CDG'), 'CDG');
+    assert.equal(knownBrand('CDG'), '');
+    assert.equal(brandInLine('CDG wallet'), '');
+    assert.equal(brandInLine('12LV34'), '');
+    assert.equal(brandInLine('M0LV45CBAA_M900'), '');
+    assert.equal(brandInLine('CD M0456CTZQ_M928'), 'Dior');
+    assert.equal(canonicalBrand('LV'), 'Louis Vuitton');
   });
 
   it('does not invent an expansion for an unknown brand', () => {
@@ -206,6 +224,25 @@ describe('brand item id', () => {
       brand: 'VCA',
       fields: { item: 'Alhambra VCARP7I200', itemId: '999999900111', sku: '3607670123456' },
     }), 'VCARP7I200');
+  });
+
+  it('picks a Dior reference and ignores the EAN and concession code', () => {
+    assert.equal(chooseItemId({
+      brand: 'Christian Dior',
+      fields: { item: 'Christian Dior 999999912345 3607670123456 M0456CTZQ_M928', itemId: '999999912345', sku: '3607670123456' },
+    }), 'M0456CTZQ_M928');
+    assert.equal(chooseItemId({
+      brand: 'Dior',
+      fields: { item: '2ESWS011YKY_H03E', sku: '3607670123456' },
+    }), '2ESWS011YKY_H03E');
+    assert.equal(chooseItemId({
+      brand: 'Dior',
+      fields: { itemId: '9999999001', sku: '3607670123456' },
+    }), '');
+    assert.equal(chooseItemId({
+      brand: 'Dior',
+      fields: { item: '3607670123456', allowEan: true },
+    }), '3607670123456');
   });
 
   it('does not use a concession code or an EAN as a Chanel item id', () => {
@@ -418,6 +455,104 @@ describe('official-site acceptance', () => {
     ], { brand: 'Chanel', itemId: 'A01112', name: 'Mini', price: 5200, currency: 'GBP' });
     assert.equal(selected.winner, null);
     assert.equal(selected.fallback, false);
+  });
+});
+
+describe('Dior name recovery', () => {
+  const ref = 'M0456CTZQ_M928';
+  const page = 'https://www.dior.com/en_gb/fashion/products/M0456CTZQ_M928';
+  const hit = (price = 3100) => ({
+    cacheHit: false,
+    candidates: [{
+      brand: 'Dior',
+      officialName: 'Mini Saddle Bag with Strap',
+      itemId: ref,
+      price,
+      currency: 'GBP',
+      weightGrams: 500,
+      sourceUrls: [page],
+      onOfficialSite: true,
+      matchedFields: ['itemId', 'price'],
+      confidence: 0.95,
+      matchType: 'id',
+    }],
+    flag: null,
+    canonicalBrand: 'Dior',
+    sourcesQueried: ['brave'],
+  });
+
+  async function recover(item, body) {
+    const { result, calls } = trackingClient(() => json(body));
+    const enriched = await enrichLines({ items: [line(item)], currency: 'GBP', client: result });
+    return { row: enriched.unitRows[0], calls };
+  }
+
+  it('fills the official name with no colour when an empty, brand-only or code-only name hits exactly', async () => {
+    const empty = await recover(
+      { brand: 'Christian Dior', item: '', itemId: ref, unitPrice: 3100, amount: 3100 },
+      hit(),
+    );
+    assert.equal(empty.calls[0].body.brand, 'Dior');
+    assert.equal(empty.calls[0].body.itemId, ref);
+    assert.equal(empty.calls[0].body.name, undefined);
+    assert.equal(empty.calls[0].body.price, 3100);
+    assert.equal(empty.row.fields['品名'].value, 'Mini Saddle Bag with Strap');
+    assert.equal(empty.row.fields['品名'].flag, null);
+    assert.equal(empty.row.flag, null);
+
+    const brandOnly = await recover(
+      { brand: '', item: `Christian Dior ${ref}`, itemId: '', sku: '3607670123456', unitPrice: 3100, amount: 3100 },
+      hit(),
+    );
+    assert.equal(brandOnly.calls[0].body.brand, 'Dior');
+    assert.equal(brandOnly.calls[0].body.itemId, ref);
+    assert.equal(brandOnly.calls[0].body.name, undefined);
+    assert.equal(brandOnly.row.fields['品牌'].value, 'Dior');
+    assert.equal(brandOnly.row.fields['品名'].value, 'Mini Saddle Bag with Strap');
+    assert.equal(brandOnly.row.fields['品名'].flag, null);
+    assert.equal(brandOnly.row.flagColour, null);
+
+    const codeOnly = await recover(
+      { brand: 'Dior Mens', item: ref, itemId: '999999912345', unitPrice: 3100, amount: 3100 },
+      hit(),
+    );
+    assert.equal(codeOnly.calls[0].body.brand, 'Dior');
+    assert.equal(codeOnly.calls[0].body.itemId, ref);
+    assert.equal(codeOnly.row.fields['品名'].flag, null);
+    assert.equal(codeOnly.row.fields['品名'].value, 'Mini Saddle Bag with Strap');
+  });
+
+  it('flags a partial official hit Amber', async () => {
+    const shapes = [
+      { brand: 'Dior', item: '', itemId: ref },
+      { brand: '', item: `CD ${ref}`, itemId: '' },
+      { brand: 'Dior Mens', item: ref, itemId: '' },
+    ];
+    for (const shape of shapes) {
+      const { row } = await recover({ ...shape, unitPrice: 3100, amount: 3100 }, hit(2900));
+      assert.equal(row.fields['品名'].value, 'Mini Saddle Bag with Strap');
+      assert.equal(row.fields['品名'].flag, 'amber');
+      assert.equal(row.fields['品名'].flagColour, '#FDE68A');
+      assert.equal(row.flag, 'amber');
+    }
+  });
+
+  it('leaves the name Pink when nothing official is found', async () => {
+    const miss = { cacheHit: false, candidates: [], flag: null, canonicalBrand: null, sourcesQueried: ['brave'] };
+    const shapes = [
+      { brand: 'Christian Dior', item: '', itemId: ref, printed: '' },
+      { brand: '', item: `Christian Dior ${ref}`, itemId: '', printed: `Christian Dior ${ref}` },
+      { brand: 'CD', item: ref, itemId: '999999912345', printed: ref },
+    ];
+    for (const shape of shapes) {
+      const { row } = await recover({ ...shape, unitPrice: 3100, amount: 3100 }, miss);
+      assert.equal(row.accepted, null);
+      assert.equal(row.fields['品牌'].value, 'Dior');
+      assert.equal(row.fields['品名'].value, shape.printed);
+      assert.equal(row.fields['品名'].officialValue, null);
+      assert.equal(row.fields['品名'].flag, 'pink');
+      assert.equal(row.fields['品名'].flagColour, '#FECDD3');
+    }
   });
 });
 

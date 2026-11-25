@@ -16,9 +16,16 @@ const ALIASES = {
   'van cleef': 'Van Cleef & Arpels',
   'van cleef and arpels': 'Van Cleef & Arpels',
   'lv': 'Louis Vuitton',
+  'cd': 'Dior',
   'ysl': 'Saint Laurent',
   'yves saint laurent': 'Saint Laurent',
   'bv': 'Bottega Veneta',
+  'dior mens': 'Dior',
+  'dior men': 'Dior',
+  'dior homme': 'Dior',
+  'dior femme': 'Dior',
+  'dior baby': 'Dior',
+  'dior kids': 'Dior',
   'hermes': 'Hermès',
   'tiffany': 'Tiffany & Co.',
   'tiffany and co': 'Tiffany & Co.',
@@ -37,7 +44,12 @@ const ALIASES = {
   'chrome hearts': 'Chrome Hearts',
 };
 
-const DEPARTMENT_SUFFIX = /\s+(accessory|accessories|beauty|fragrance|fragrances|parfums?|watches?|fine jewell?ery|jewell?ery|shoes|footwear|rtw|ready[- ]to[- ]wear|leather goods|boutique|cosmetics|uk|london)$/i;
+const DEPARTMENT_SUFFIX = /\s+(accessory|accessories|beauty|fragrance|fragrances|parfums?|watches?|fine jewell?ery|jewell?ery|shoes|footwear|rtw|ready[- ]to[- ]wear|leather goods|boutique|cosmetics|uk|london|mens|men|homme|femme|women|baby|kids)$/i;
+
+// CD, LV and BV are brands only as a whole token. They must not match inside
+// CDG, or inside a code that happens to contain those letters.
+const SHORT_BRAND = { cd: 'Dior', lv: 'Louis Vuitton', bv: 'Bottega Veneta' };
+const shortToken = () => /\b(CD|LV|BV)\b/gi;
 
 export const fold = value => String(value ?? '')
   .normalize('NFKD')
@@ -62,6 +74,48 @@ export function canonicalBrand(input) {
     folded = stripped;
   }
   return String(input).trim();
+}
+
+// A brand this table actually knows. An unknown name comes back empty, so a
+// code or a word such as CDG is not treated as a brand.
+export function knownBrand(input) {
+  if (input == null || !String(input).trim()) return '';
+  const canon = canonicalBrand(input);
+  const folded = fold(input);
+  if (CANON.has(folded) || ALIASES[folded]) return canon;
+  if (canon && fold(canon) !== folded && BRANDS.includes(canon)) return canon;
+  return '';
+}
+
+export function brandInLine(text) {
+  const direct = knownBrand(text);
+  if (direct) return direct;
+  const source = String(text ?? '');
+  const padded = ` ${fold(source)} `;
+  const phrases = [...BRANDS.map(fold), ...Object.keys(ALIASES)].sort((left, right) => right.length - left.length);
+  for (const phrase of phrases) {
+    if (padded.includes(` ${phrase} `)) return canonicalBrand(phrase);
+  }
+  const short = shortToken().exec(source);
+  return short ? SHORT_BRAND[short[1].toLowerCase()] : '';
+}
+
+const DEPARTMENT_WORD = /^(accessory|accessories|beauty|fragrance|fragrances|parfum|parfums|boutique|cosmetics|uk|london|mens|men|homme|femme|women|baby|kids)$/i;
+
+export function stripBrandWords(text) {
+  let raw = ` ${String(text ?? '')} `;
+  const phrases = [...BRANDS.map(fold), ...Object.keys(ALIASES)].sort((left, right) => right.length - left.length);
+  for (const phrase of phrases) {
+    const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    raw = raw.replace(new RegExp(`(^|[^A-Za-z0-9])${escaped}(?=[^A-Za-z0-9]|$)`, 'ig'), '$1 ');
+  }
+  return raw.replace(shortToken(), ' ');
+}
+
+export function productWords(text) {
+  return stripBrandWords(text)
+    .split(/[^A-Za-z0-9]+/)
+    .filter(word => word.length > 1 && /[A-Za-z]/.test(word) && !DEPARTMENT_WORD.test(word));
 }
 
 // Server cache identity: upper-case, spaces removed, leading zeros kept.

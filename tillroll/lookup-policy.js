@@ -2,11 +2,12 @@
 // Price is decided: one output row per unit. 采购商品原价 is the pre-discount unit
 // price and is matched first. 采购商品金额 (paid unit) is used only when 原价 is missing.
 
-import { canonicalBrand, fold, normaliseItemId } from './brand-aliases.js';
-import { brandHasItemIdFormat, chooseItemId, isConcessionCode, isEan } from './brand-item-ids.js';
+import { brandInLine, canonicalBrand, fold, knownBrand, normaliseItemId, productWords } from './brand-aliases.js';
+import { brandHasItemIdFormat, chooseItemId, isConcessionCode, isEan, stripProductCodes } from './brand-item-ids.js';
 import { extractStoreClues } from './uk-branches.js';
 
 export const AMBER = '#FDE68A';
+export const PINK = '#FECDD3';
 export const PRICE_FIELD_ORDER = ['listUnit', 'paidUnit'];
 export const OUTPUT_FIELDS = ['供应商', '品牌', '品名', '品牌货号', '采购商品原价', '采购商品金额'];
 
@@ -47,22 +48,42 @@ export function chooseUnitPrice(item, order = PRICE_FIELD_ORDER) {
   return { price: null, field: null, listUnit, paidUnit, qty };
 }
 
-function printedItemId(item) {
-  const raw = String(item?.itemId ?? item?.['品牌货号'] ?? '').trim();
-  const brand = String(item?.receiptBrand ?? item?.brand ?? item?.['品牌'] ?? '').trim();
+function hasProductWords(name) {
+  return productWords(stripProductCodes(name)).length > 0;
+}
+
+// A name that is empty, only a brand, or only a code is not a product name.
+// The brand moves to 品牌 and the code moves to the item id before lookup.
+function separateLine(item) {
+  const brandField = String(item?.receiptBrand ?? item?.brand ?? item?.['品牌'] ?? '').trim();
+  const nameField = String(item?.receiptItem ?? item?.item ?? item?.name ?? item?.['品名'] ?? '').trim();
+  const rawId = String(item?.itemId ?? item?.['品牌货号'] ?? '').trim();
+  const unresolved = !hasProductWords(nameField);
+  const recovered = unresolved ? (knownBrand(brandField) || brandInLine(nameField)) : '';
+  const brand = unresolved ? (recovered || brandField) : brandField;
   const chosen = chooseItemId({
-    brand,
+    brand: brand || brandInLine(nameField),
     fields: {
-      itemId: raw,
+      itemId: rawId,
       sku: item?.sku ?? item?.style,
-      item: item?.item ?? item?.name ?? item?.['品名'],
+      item: nameField,
       name: item?.name,
       codes: item?.codes,
+      allowEan: unresolved,
     },
   });
-  if (chosen) return chosen;
-  if (isConcessionCode(raw) || (isEan(raw) && brandHasItemIdFormat(brand))) return '';
-  return raw;
+  let itemId = chosen;
+  if (!itemId) {
+    const blockEan = isEan(rawId) && brandHasItemIdFormat(brand) && !unresolved;
+    itemId = isConcessionCode(rawId) || blockEan ? '' : rawId;
+  }
+  return {
+    brand,
+    name: unresolved ? '' : nameField,
+    printedName: nameField,
+    nameUnresolved: unresolved,
+    itemId,
+  };
 }
 
 function printedStyle(item, itemId) {
@@ -121,15 +142,17 @@ export function prepareUnitRows(items, { currency = '', merchant = '', storeClue
     const edit = editedItemIds[sourceIndex] || null;
     const rowLocks = locks[sourceIndex] || item?.locks || null;
     for (let unitIndex = 0; unitIndex < copies; unitIndex++) {
-      const itemId = printedItemId(item);
+      const separated = separateLine(item);
       const row = {
         sourceIndex,
         unitIndex,
         unitCount: copies,
-        brand: String(item?.receiptBrand ?? item?.brand ?? item?.['品牌'] ?? '').trim(),
-        name: String(item?.receiptItem ?? item?.item ?? item?.name ?? item?.['品名'] ?? '').trim(),
-        itemId,
-        style: printedStyle(item, itemId),
+        brand: separated.brand,
+        name: separated.name,
+        printedName: separated.printedName,
+        nameUnresolved: separated.nameUnresolved,
+        itemId: separated.itemId,
+        style: printedStyle(item, separated.itemId),
         currency: String(item?.currency ?? currency ?? '').trim().toUpperCase(),
         supplier: String(item?.supplier ?? item?.['供应商'] ?? merchant ?? '').trim(),
         storeClues: clues,

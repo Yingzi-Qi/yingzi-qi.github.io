@@ -8,7 +8,7 @@
 import { canonicalBrand, fold, normaliseItemId } from './brand-aliases.js';
 import { resolveSupplier } from './uk-branches.js';
 import {
-  AMBER, buildLookupRequest, canonicalDisplayBrand, distinctKey, fieldLocked,
+  AMBER, PINK, buildLookupRequest, canonicalDisplayBrand, distinctKey, fieldLocked,
   prepareUnitRows, round2Changed, roundMoney, shouldLookup,
 } from './lookup-policy.js';
 import {
@@ -44,7 +44,7 @@ function mirrorPriceRecord(candidate) {
   return { amount, currency: currency ? currency.toUpperCase() : null };
 }
 
-function cell(field, receiptValue, officialValue, { locked, colour, forceAmber = false, keepReceipt = false, informational = null, plain = false } = {}) {
+function cell(field, receiptValue, officialValue, { locked, colour, forceAmber = false, keepReceipt = false, informational = null, plain = false, pink = false } = {}) {
   if (informational) {
     return {
       value: receiptValue ?? '',
@@ -53,6 +53,16 @@ function cell(field, receiptValue, officialValue, { locked, colour, forceAmber =
       flag: null,
       flagColour: null,
       locked: Boolean(locked),
+    };
+  }
+  if (pink && !locked) {
+    return {
+      value: receiptValue ?? '',
+      receiptValue: receiptValue ?? '',
+      officialValue: null,
+      flag: 'pink',
+      flagColour: PINK,
+      locked: false,
     };
   }
   const hasOfficial = officialValue != null && officialValue !== '';
@@ -127,6 +137,7 @@ function finish(result, row, { response = null, selection = null, orders = null,
   const officialBrand = reportedBrand || (accepted
     ? (canonicalDisplayBrand(row.brand, response?.canonicalBrand || accepted.brand) || accepted.brand)
     : (lockedSkip ? row.brand : (canonicalBrand(row.brand) || row.brand)));
+  const printedName = row.nameUnresolved ? (row.printedName ?? '') : row.name;
   const officialName = reportedName || accepted?.officialName || '';
   const officialPrice = reportedPrice != null && reportedPrice !== '' ? reportedPrice : accepted?.price;
   const officialId = reportedId || accepted?.itemId || '';
@@ -143,7 +154,7 @@ function finish(result, row, { response = null, selection = null, orders = null,
   const fields = {
     '供应商': cell('供应商', row.supplier, supplier.supplier, { locked: fieldLocked(row.locks, '供应商'), colour }),
     '品牌': cell('品牌', row.brand, officialBrand, { locked: fieldLocked(row.locks, '品牌'), colour, forceAmber: fallbackOnly && !fieldLocked(row.locks, '品牌') }),
-    '品名': cell('品名', row.name, officialName, { locked: fieldLocked(row.locks, '品名'), colour, forceAmber: forceName && Boolean(officialName) && !fieldLocked(row.locks, '品名'), plain: exactPrimary }),
+    '品名': cell('品名', printedName, officialName, { locked: fieldLocked(row.locks, '品名'), colour, forceAmber: forceName && Boolean(officialName) && !fieldLocked(row.locks, '品名'), plain: exactPrimary }),
     '品牌货号': cell('品牌货号', row.itemId, officialId, {
       locked: fieldLocked(row.locks, '品牌货号'), colour, keepReceipt: true,
     }),
@@ -162,7 +173,7 @@ function finish(result, row, { response = null, selection = null, orders = null,
   const computed = [];
   if (!lockedSkip && (accepted || (officialBrand && fold(officialBrand) !== fold(row.brand)))) {
     computed.push(...computeMismatches(
-      { ...row, price: row.price, priceField: row.priceField },
+      { ...row, name: printedName, price: row.price, priceField: row.priceField },
       {
         brand: officialBrand,
         officialName,
@@ -198,6 +209,10 @@ function finish(result, row, { response = null, selection = null, orders = null,
   }
   if (round === 2) result.round2Changed = round2Changed(previous, fields);
   else delete result.round2Changed;
+  if (row.nameUnresolved && !accepted && !lockedSkip && !fieldLocked(row.locks, '品名')) {
+    result.fields['品名'] = cell('品名', printedName, null, { pink: true });
+    result.mismatches = result.mismatches.filter(entry => entry.field !== '品名');
+  }
   result.reviewNote = noteFor(result);
   return result;
 }

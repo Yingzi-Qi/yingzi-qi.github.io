@@ -300,10 +300,12 @@ function cell(r,path,txt,title,extraClass=''){
   const mismatch=product && r.verification?.[Number(product[1])]?.fields.some(f=>f.key===product[2] && f.status==='mismatch');
 const lookupField=/^items\.(\d+)\.(brand|item|amount|itemId)$/.exec(path);
   const lookupKey=lookupField && {brand:'品牌',item:'品名',amount:'采购商品原价',itemId:'品牌货号'}[lookupField[2]];
-  const lookupAmber=lookupKey && (r.lookup?.unitRows || []).some(row=>row.sourceIndex===Number(lookupField[1]) && row.fields?.[lookupKey]?.flag==='amber');
+  const lookupRow=(lookupKey && (r.lookup?.unitRows || []).find(row=>row.sourceIndex===Number(lookupField[1]) && (row.fields?.[lookupKey]?.flag==='amber' || row.fields?.[lookupKey]?.flag==='pink'))) || null;
+  const lookupAmber=lookupRow?.fields?.[lookupKey]?.flag==='amber';
+  const lookupPink=lookupRow?.fields?.[lookupKey]?.flag==='pink';
   const kinds=fieldReviewKinds(r,path,idLine?Number(idLine[1]):null);
   const warning=mismatch || kinds.size>0;
-  return `<button class="cell ${extraClass} ${warning?'marked':''} ${reviewKindClass(kinds)} ${lookupAmber?'lookup-fill':''}" data-id="${r.id}" data-path="${escape(path)}" title="${escape(title??txt??'Edit')}">${escape(txt??'')||'—'}</button>`;
+  return `<button class="cell ${extraClass} ${warning?'marked':''} ${reviewKindClass(kinds)} ${lookupAmber?'lookup-fill':''} ${lookupPink?'lookup-reading':''}" data-id="${r.id}" data-path="${escape(path)}" title="${escape(title??txt??'Edit')}">${escape(txt??'')||'—'}</button>`;
 }
 function orderNumberCell(r){
   const value=(r.record || r.data).orderNumber;
