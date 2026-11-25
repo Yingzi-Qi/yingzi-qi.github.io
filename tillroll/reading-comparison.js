@@ -70,6 +70,40 @@ function pairRows(left,right) {
     if([...remaining].some(k=>k!==i && anchorMatches(left[k],right[j])))continue;
     used.add(j);pairs.set(i,j);
   }
+  // If the two passes kept the same number and order of lines, use a guarded
+  // positional fallback for a single OCR name typo. Amount and quantity must
+  // agree, identifiers and brands must not contradict each other, and the
+  // item names must be equal or one edit apart. This narrows the review to the
+  // field that differs while leaving repeated or reordered lines unresolved.
+  const oneEditApart=(a,b)=>{
+    const leftName=normal(a), rightName=normal(b);
+    if(!leftName || !rightName || leftName===rightName)return leftName===rightName;
+    if(Math.abs(leftName.length-rightName.length)>1)return false;
+    let row=0, column=0, edits=0;
+    while(row<leftName.length && column<rightName.length){
+      if(leftName[row]===rightName[column]){row++;column++;continue;}
+      if(++edits>1)return false;
+      if(leftName.length>rightName.length)row++;
+      else if(rightName.length>leftName.length)column++;
+      else {row++;column++;}
+    }
+    return edits + (leftName.length-row) + (rightName.length-column) <= 1;
+  };
+  const compatible=(a,b)=>{
+    const both=(key)=>present(a[key]) && present(b[key]);
+    const equalWhenPresent=(key)=>!both(key) || same(key,a[key],b[key]);
+    const names=present(a.item) && present(b.item) && oneEditApart(a.item,b.item);
+    return names && equalWhenPresent('amount') && equalWhenPresent('qty') &&
+      equalWhenPresent('brand') && equalWhenPresent('itemId') && equalWhenPresent('sku');
+  };
+  if(left.length===right.length){
+    for(const i of [...remaining]){
+      const j=i;
+      if(!used.has(j) && compatible(left[i],right[j])){
+        used.add(j);pairs.set(i,j);remaining.delete(i);
+      }
+    }
+  }
   return pairs;
 }
 function rowsBalance(rows,data) {
