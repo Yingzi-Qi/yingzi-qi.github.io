@@ -110,16 +110,59 @@ export function matchesBrandItemId(brand, value) {
   return rule.test(text);
 }
 
-// chooseItemId returned nothing. Do not keep a store code, or a raw printed
-// id that misses the brand's own format. An EAN is still a P1 item id.
+// chooseItemId returned nothing. Do not keep a store code, a bare digit run,
+// or a raw printed id that misses the brand's own format.
 export function fallbackItemId(brand, raw) {
   const text = squash(raw);
   if (!text) return { itemId: '', rejected: false };
-  if (isEan(text)) return { itemId: compact(text), rejected: false };
-  if (isStoreCode(text) || (brandHasItemIdFormat(brand) && !matchesBrandItemId(brand, text))) {
+  if (isEan(text) || isStoreCode(text) || (brandHasItemIdFormat(brand) && !matchesBrandItemId(brand, text))) {
     return { itemId: '', rejected: true };
   }
   return { itemId: text, rejected: false };
+}
+
+/**
+ * GS1 check digit for a GTIN body, the code without its final digit.
+ * Weights alternate 3 then 1, counted from the right of the body.
+ * @param {string} body Digits only, without the check digit.
+ * @returns {number} The check digit, 0–9.
+ */
+export function gtinCheckDigit(body) {
+  let sum = 0;
+  const text = String(body ?? '');
+  for (let i = text.length - 1, pos = 0; i >= 0; i -= 1, pos += 1) {
+    sum += Number(text[i]) * (pos % 2 === 0 ? 3 : 1);
+  }
+  return (10 - (sum % 10)) % 10;
+}
+
+/**
+ * A GTIN-8, GTIN-12, GTIN-13 or GTIN-14 with a valid check digit.
+ * A 4-digit or 10-digit store code is not a GTIN.
+ * @param {unknown} value
+ * @returns {string} The compact digits, or '' when the value is not a valid GTIN.
+ */
+export function validGtin(value) {
+  const text = compact(value);
+  if (!/^(?:\d{8}|\d{12}|\d{13}|\d{14})$/.test(text)) return '';
+  if (isStoreCode(text)) return '';
+  return gtinCheckDigit(text.slice(0, -1)) === Number(text[text.length - 1]) ? text : '';
+}
+
+/**
+ * An official style reference from a look-up candidate.
+ * When the brand has a format in this table, only a value that fits it is returned.
+ * A store code or a GTIN is not a style reference.
+ * @param {string} brand Printed or canonical brand.
+ * @param {unknown} value Candidate item id.
+ * @returns {string} The style reference, or ''.
+ */
+export function officialStyleRef(brand, value) {
+  const text = String(value ?? '').trim();
+  if (!text || isStoreCode(text) || isConcessionCode(text)) return '';
+  if (brandHasItemIdFormat(brand)) return matchesBrandItemId(brand, text) ? text : '';
+  if (validGtin(text)) return '';
+  return text;
 }
 
 function ruleFor(brand) {
@@ -164,11 +207,37 @@ export function chooseItemId({ brand, fields = {} } = {}) {
     const best = branded.sort((left, right) => compact(right).length - compact(left).length)[0];
     return rule.normalise ? rule.normalise(best) : best;
   }
-  // A brand with its own format does not keep an unfitting code. The EAN is
-  // the fall-through. A concession code is never returned.
+  // A brand with its own format does not keep an unfitting code. A bare digit
+// run is not an EAN. Only a labelled GTIN with a valid check digit falls through.
   if (!rule) {
     const style = found.filter(value => looksLikeCode(value) && !isEan(value));
     if (style.length) return style.sort((left, right) => compact(right).length - compact(left).length)[0];
   }
-  return found.find(isEan) || '';
+  return labelledEan(fields);
+}
+
+const EAN_LABEL = /\b(?:EAN|Barcode|GTIN)\b[^0-9]{0,12}(\d{8}|\d{12}|\d{13}|\d{14})\b/gi;
+
+/**
+ * The labelled EAN for one line.
+ * `fields.ean` is the reader's labelled barcode. A value is also labelled when
+ * the words EAN, Barcode or GTIN sit next to a valid GTIN in the item id, style
+ * or name. Card, auth, merchant, terminal and approval text are not read.
+ * A bare digit run returns ''.
+ * @param {{ ean?: unknown, itemId?: unknown, sku?: unknown, styleRef?: unknown, style?: unknown, item?: unknown, name?: unknown, codes?: unknown[] }} [fields]
+ * @returns {string} Compact GTIN digits, or ''.
+ */
+export function labelledEan(fields = {}) {
+  const found = [];
+  const add = value => {
+    const code = validGtin(value);
+    if (code && !found.includes(code)) found.push(code);
+  };
+  add(fields.ean);
+  for (const blob of [fields.itemId, fields.sku, fields.styleRef, fields.style, fields.item, fields.name, ...(fields.codes || [])]) {
+    const text = String(blob ?? '');
+    EAN_LABEL.lastIndex = 0;
+    for (const match of text.matchAll(EAN_LABEL)) add(match[1]);
+  }
+  return found[0] || '';
 }

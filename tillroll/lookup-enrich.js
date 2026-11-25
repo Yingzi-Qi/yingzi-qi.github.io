@@ -6,7 +6,7 @@
 // fallback, is Amber, with both values kept on the row.
 
 import { canonicalBrand, fold, normaliseItemId } from './brand-aliases.js';
-import { ITEM_ID_GUARD_NOTE } from './brand-item-ids.js';
+import { ITEM_ID_GUARD_NOTE, officialStyleRef } from './brand-item-ids.js';
 import { resolveSupplier } from './uk-branches.js';
 import {
   AMBER, PINK, buildLookupRequest, canonicalDisplayBrand, distinctKey, fieldLocked,
@@ -100,6 +100,18 @@ function baseFields(row, colour) {
     '采购商品原价': cell('采购商品原价', row.listUnit, null, { colour, keepReceipt: true }),
     '采购商品金额': cell('采购商品金额', row.paidUnit, null, { colour, keepReceipt: true }),
   };
+}
+
+function officialFromLookup(brand, response, accepted) {
+  const list = [];
+  if (accepted?.itemId) list.push(accepted);
+  for (const candidate of response?.candidates || []) list.push(candidate);
+  for (const candidate of list) {
+    if (candidate?.onOfficialSite === false) continue;
+    const id = officialStyleRef(brand, candidate?.itemId);
+    if (id) return id;
+  }
+  return '';
 }
 
 function noteFor(result) {
@@ -213,6 +225,20 @@ function finish(result, row, { response = null, selection = null, orders = null,
   }
   if (round === 2) result.round2Changed = round2Changed(previous, fields);
   else delete result.round2Changed;
+  if (row.itemIdFromEan && result.fields['品牌货号'] && !fieldLocked(row.locks, '品牌货号')) {
+    const official = officialFromLookup(row.brand, response, accepted);
+    const note = official && !sameCode(official, row.itemId)
+      ? 'Style reference used instead of an EAN.'
+      : 'Only an EAN is available; the brand item id was not found.';
+    if (official && !sameCode(official, row.itemId)) result.fields['品牌货号'].value = official;
+    else result.fields['品牌货号'].value = row.itemId;
+    result.fields['品牌货号'].flag = 'amber';
+    result.fields['品牌货号'].flagColour = AMBER;
+    result.fields['品牌货号'].comment = note;
+    result.fields['品牌货号'].note = note;
+    result.flag = 'amber';
+    result.flagColour = AMBER;
+  }
   if (row.itemIdRejected && result.fields['品牌货号'] && !fieldLocked(row.locks, '品牌货号')) {
     result.fields['品牌货号'].value = '';
     result.fields['品牌货号'].flag = 'pink';

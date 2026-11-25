@@ -40,20 +40,19 @@ test('an unfitting item code falls through to the official style ref, or the EAN
   const { result } = await runSanity(env, { batchId: 'fit', mode: 'round1', receipts: [{
     receiptKey: 'fit', merchant: 'Boutique', receiptReference: 'F1', date: '2026-11-20', time: '12:00', payment: 'Visa', currency: 'GBP',
     items: [
-      { brand: 'Chanel', item: 'Tote', itemId: 'NOT-A-REF', sku: '3607670123456', qty: 1, unitPrice: 100, amount: 100 },
-      { brand: 'Chanel', item: 'Scarf', itemId: 'ALSO-NOT', sku: '3607670654321', qty: 1, unitPrice: 80, amount: 80 },
+      { brand: 'Chanel', item: 'Tote', itemId: 'NOT-A-REF', ean: '4000000000013', qty: 1, unitPrice: 100, amount: 100 },
+      { brand: 'Chanel', item: 'Scarf', itemId: 'ALSO-NOT', ean: '4000000000020', qty: 1, unitPrice: 80, amount: 80 },
     ],
   }] }, { lookup: lookupStub });
-  // #20: an unfitting printed code does not occupy 品牌货号. The look-up uses the
-  // reader-chosen EAN; the official style may appear after settle, but the printed
-  // unfitting token is never auto-corrected into the cell.
+// An unfitting printed token never occupies 品牌货号. A labelled EAN is what the
+// look-up receives; an official style reference may replace it afterwards.
   const first = result.agreedRows[0].cells['品牌货号'];
   const second = result.agreedRows[1].cells['品牌货号'];
   assert.notEqual(first, 'NOT-A-REF');
   assert.notEqual(second, 'ALSO-NOT');
-  assert.ok(first === '3607670123456' || first === 'AS44010', `row0 品牌货号 should be EAN or official style, got ${first}`);
-  assert.ok(second === '3607670654321' || second == null || second === '', `row1 品牌货号 should be EAN or empty, got ${second}`);
-  assert.deepEqual(seen, ['3607670123456', '3607670654321']);
+  assert.equal(first, 'AS44010');
+  assert.equal(second, '4000000000020');
+  assert.deepEqual(seen, ['4000000000013', '4000000000020']);
 });
 
 test('timestamps: 24h, 00 seconds, am/pm converted', () => {

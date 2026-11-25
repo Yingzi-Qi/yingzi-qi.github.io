@@ -443,14 +443,14 @@ test('P5: exact item id and price leave 品名 unfilled; partial and fallback st
 test('P1: 品牌货号 prefers a style reference over an EAN or concession code', async () => {
   const env = makeEnv();
   const lookup = async (_env, body) => {
-    if (body.itemId === '5012345678901') return { candidates: [{ brand: 'Synthetic', officialName: 'Style Bag', itemId: 'ST-88', price: 20, currency: 'GBP', matchType: 'multi-field', confidence: 0.7, sourceUrls: ['https://synthetic.example/st'], matchedFields: ['name'], onOfficialSite: true, weightGrams: null }], cacheHit: false, cacheKey: 'ean', sourcesQueried: ['brave'], printedItemId: body.itemId, canonicalBrand: 'Synthetic' };
+    if (body.itemId === '5012345678900') return { candidates: [{ brand: 'Synthetic', officialName: 'Style Bag', itemId: 'ST-88', price: 20, currency: 'GBP', matchType: 'multi-field', confidence: 0.7, sourceUrls: ['https://synthetic.example/st'], matchedFields: ['name'], onOfficialSite: true, weightGrams: null }], cacheHit: false, cacheKey: 'ean', sourcesQueried: ['brave'], printedItemId: body.itemId, canonicalBrand: 'Synthetic' };
     if (body.itemId === '9999999001') return { candidates: [{ brand: 'Synthetic', officialName: 'Concession Scarf', itemId: '9999999001', price: 15, currency: 'GBP', matchType: 'price-fallback', confidence: 0.4, sourceUrls: ['https://synthetic.example/cc'], matchedFields: [], onOfficialSite: false, weightGrams: null }], cacheHit: false, cacheKey: 'cc', sourcesQueried: ['brave'], printedItemId: body.itemId, canonicalBrand: 'Synthetic' };
     return { candidates: [], cacheHit: false, cacheKey: 'none', sourcesQueried: [] };
   };
   const { result } = await runSanity(env, { batchId: 'p1', mode: 'round1', receipts: [{
     receiptKey: 'p1', merchant: 'Synthetic Store', receiptReference: 'P1-1', date: '2026-07-03', time: '12:00', payment: 'Card', currency: 'GBP',
     items: [
-      { brand: 'Synthetic', item: 'Bag', itemId: '5012345678901', ean: '5012345678901', sku: 'ST-88', unitPrice: 20, amount: 20 },
+      { brand: 'Synthetic', item: 'Bag', itemId: '5012345678900', ean: '5012345678900', sku: 'ST-88', unitPrice: 20, amount: 20 },
       { brand: 'Synthetic', item: 'Scarf', itemId: '9999999001', unitPrice: 15, amount: 15 },
     ],
   }] }, { lookup });
@@ -458,9 +458,9 @@ test('P1: 品牌货号 prefers a style reference over an EAN or concession code'
   const concession = result.agreedRows.find(r => r.cells['品名'] === 'Concession Scarf');
   assert.equal(ean.cells['品牌货号'], 'ST-88');
   assert.equal(ean.flags['品牌货号'], AMBER);
-  assert.match(ean.exportMeta.comments['品牌货号'], /5012345678901/);
+  assert.match(ean.exportMeta.comments['品牌货号'], /5012345678900/);
   assert.equal(ean.exportMeta.alternates['品牌货号'].official, 'ST-88');
-  assert.equal(ean.exportMeta.alternates['品牌货号'].receipt, '5012345678901');
+  assert.equal(ean.exportMeta.alternates['品牌货号'].receipt, '5012345678900');
   assert.equal(concession.cells['品牌货号'], null);
   assert.equal(concession.flags['品牌货号'], PINK);
   assert.equal(concession.flagReasons['品牌货号'], 'no brand item ID printed');
@@ -667,14 +667,14 @@ test('gate (b): a name that still holds a brand, a code, or no product word is P
       { rowId: 'gb-alias', brand: 'Dior', item: 'Christian Dior Saddle', itemId: 'SYN-GB1', unitPrice: 10, amount: 10 },
       { rowId: 'gb-empty', brand: null, item: 'Christian Dior Book', itemId: 'SYN-GB2', unitPrice: 10, amount: 10 },
       { rowId: 'gb-cc', brand: 'Dior', item: 'Saddle 9999999001', itemId: 'SYN-GB3', unitPrice: 10, amount: 10 },
-      { rowId: 'gb-ean', brand: 'Dior', item: 'Saddle 5012345678901', itemId: 'SYN-GB4', unitPrice: 10, amount: 10 },
+      { rowId: 'gb-ean', brand: 'Dior', item: 'Saddle 5012345678900', itemId: 'SYN-GB4', unitPrice: 10, amount: 10 },
       { rowId: 'gb-digits', brand: 'Dior', item: 'Saddle 123456', itemId: 'SYN-GB5', unitPrice: 10, amount: 10 },
       { rowId: 'gb-only', brand: 'Dior', item: 'Christian Dior', itemId: 'SYN-GB6', unitPrice: 10, amount: 10 },
       { rowId: 'gb-ok', brand: 'Dior', item: 'Saddle bag', itemId: 'SYN-GB7', unitPrice: 10, amount: 10 },
     ],
   }] }, { lookup: noLookup });
   const by = Object.fromEntries(result.agreedRows.map(r => [r.rowId, r]));
-  for (const [id, name] of [['gb-alias', 'Christian Dior Saddle'], ['gb-empty', 'Christian Dior Book'], ['gb-cc', 'Saddle 9999999001'], ['gb-ean', 'Saddle 5012345678901'], ['gb-digits', 'Saddle 123456'], ['gb-only', 'Christian Dior']]) {
+  for (const [id, name] of [['gb-alias', 'Christian Dior Saddle'], ['gb-empty', 'Christian Dior Book'], ['gb-cc', 'Saddle 9999999001'], ['gb-ean', 'Saddle 5012345678900'], ['gb-digits', 'Saddle 123456'], ['gb-only', 'Christian Dior']]) {
     assert.equal(by[id].cells['品名'], name);
     assert.equal(by[id].flags['品名'], PINK);
     assert.match(by[id].flagReasons['品名'], /Name needs checking/);
