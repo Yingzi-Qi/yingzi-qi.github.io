@@ -87,7 +87,7 @@ const tenders = [
   ['Carte Bancaire', /\b(?:carte\s+bleue|carte\s+bancaire|carte\s+cb)\b/i, 2],
   ['Gift Card', /\b(?:gift\s*card|gift\s*voucher|carte\s+cadeau)\b/i, 3],
   ['Cash', /\b(?:cash|esp[eè]ces|bargeld|contanti|efectivo|tunai)\b/i, 3],
-  ['Card', /\b(?:card\s+(?:sales?|payment|tender)|credit\s+card|debit\s+card|contactless|chip\s*(?:&|and)\s*pin|eftpos)\b/i, 4],
+  ['Card', /\b(?:card\s+(?:sales?|payment|tender)|credit\s+card|debit\s+card|contactless|chip\s*(?:&|and)\s*pin|eftpos)\b|^(?:debit|credit)$/i, 4],
 ];
 const channelTerms = /^(?:online|on-?line\s+(?:order|purchase|shop)|in[-\s]?store|store|shop|website|web(?:\s*shop|\s*order)?|app|mobile\s+app|e-?commerce|mail\s+order|phone\s+order|telephone\s+order|click\s*(?:&|and)\s*collect|delivery|home\s+delivery|boutique|concession|marketplace|instore|retail|duty\s*free|tax\s*free)$|\.com\b/i;
 const tenderNames = new Map(tenders.map(([name]) => [loose(name), name]));
@@ -102,12 +102,13 @@ export function normalizeTender(value) {
   const hits = tenders.filter(([, pattern]) => pattern.test(text));
   if (hits.length) return {tender: hits.sort((a, b) => a[2] - b[2])[0][0], channel: false, known: true};
   if (/^cb$/i.test(text)) return {tender: 'Carte Bancaire', channel: false, known: true};
-  if (/^(?:carte|card)$/i.test(text)) return {tender: 'Card', channel: false, known: true};
+  if (/^(?:carte|card|debit|credit)$/i.test(text)) return {tender: 'Card', channel: false, known: true};
   return {tender: text, channel: false, known: false};
 }
 
 // 采购商品方法 is exactly one of these four spellings. UnionPay is matched before
-// any generic card scheme. Cash, gift cards, wallets and anything unreadable stay null.
+// any generic card scheme. Cash and gift cards stay null. A wallet, or a bare
+// Debit or Credit tender, is Card.
 const paymentMethodNames = new Map([
   ['unionpay', 'UnionPay'], ['alipay', 'Alipay'], ['wechat', 'WeChat'],
   ['visa', 'Card'], ['mastercard', 'Card'], ['maestro', 'Card'], ['amex', 'Card'],
@@ -122,7 +123,7 @@ export function toPaymentMethod(value) {
   if (/\b(?:gift\s*card|gift\s*voucher|cash|pay\s*pal|klarna)\b/i.test(text))
     return {method: null, reason: 'The tender “' + text + '” is not UnionPay, Card, Alipay or WeChat.'};
   // A wallet with no card scheme is still a card payment. Cash and gift cards stay null.
-  if (paymentMethodNames.get(loose(text)) === 'Card' || /\b(?:visa|master\s*card|maestro|amex|american\s+express|discover|jcb|diners|carte\s+(?:bleue|bancaire)|\bcb\b|credit\s+card|debit\s+card|contactless|chip(?:\s*(?:&|and)\s*pin)?|eftpos|apple\s*pay|google\s*pay|g\s*pay|samsung\s*pay)\b/i.test(text))
+  if (/^(?:debit|credit)$/i.test(text) || paymentMethodNames.get(loose(text)) === 'Card' || /\b(?:visa|master\s*card|maestro|amex|american\s+express|discover|jcb|diners|carte\s+(?:bleue|bancaire)|\bcb\b|credit\s+card|debit\s+card|contactless|chip(?:\s*(?:&|and)\s*pin)?|eftpos|apple\s*pay|google\s*pay|g\s*pay|samsung\s*pay)\b/i.test(text))
     return {method: 'Card', reason: null};
   return {method: null, reason: 'The tender “' + text + '” is not UnionPay, Card, Alipay or WeChat.'};
 }
