@@ -3,6 +3,7 @@
 // Excel Sync audit) and iterates until the audit converges. Only the final
 // agreed version leaves this module; the internal trail is stored in D1 only.
 import { canonicalBrand } from './brands.js';
+import { brandHasItemIdFormat, chooseItemId, isConcessionCode, matchesBrandItemId } from '../../../tillroll/brand-item-ids.js';
 import { lookup as defaultLookup, invalidate, priceFallbackIsTie, priceTolerance } from './lookup.js';
 import { nowIso, sha256Hex } from './http.js';
 import { expandReceipt, isConfirmedZero, joinPurchaseTime, supplierVisibleName } from '../../../tillroll/units.js';
@@ -55,6 +56,14 @@ function priceReading(raw) {
 function idsMatch(a, b) {
   const n = v => String(v ?? '').replace(/[\s-]/g, '').toUpperCase();
   return Boolean(n(a)) && n(a) === n(b);
+}
+// Format answers come from brand-item-ids.js. A code taken from an unconfirmed
+// product name is not written over the printed 品牌货号.
+function brandItemFormat(brand, value) {
+  if (isConcessionCode(value)) return 'no match';
+  const chosen = chooseItemId({ brand, fields: { itemId: value, sku: value } });
+  if (chosen && matchesBrandItemId(brand, chosen) && idsMatch(chosen, value)) return 'match';
+  return matchBrandIdFormat(brand, value);
 }
 function exactIdAndPrice(top, row) {
   const price = row.cells['采购商品原价'];
@@ -127,8 +136,22 @@ function readerStage(receipt, rIndex, state, ctx) {
     const builder = builderBrandItem(it);
     const picked = builder
       ? { cell: builder.id == null || String(builder.id).trim() === '' ? null : String(builder.id).trim(), storeCodes: [], lookupId: builder.id == null ? null : String(builder.id).trim(), idClass: 'builder', builder }
-      : selectBrandItem({ brand: brandRaw, concessionCode: it.concessionCode, internalCode: it.internalCode, ean: it.ean, itemId: it.itemId, sku: it.sku, styleRef: it.styleRef }, ctx?.brandIdFormat || matchBrandIdFormat);
-    const itemCell = builder ? picked.cell : stripBrandFromItemId(picked.cell, brandRaw);
+      : selectBrandItem({ brand: brandRaw, concessionCode: it.concessionCode, internalCode: it.internalCode, ean: it.ean, itemId: it.itemId, sku: it.sku, styleRef: it.styleRef }, ctx?.brandIdFormat || brandItemFormat);
+    let itemCell = builder ? picked.cell : stripBrandFromItemId(picked.cell, brandRaw);
+    if (itemCell && isConcessionCode(itemCell)) itemCell = null;
+    // An unfitting printed code yields to a format match, or to the EAN
+    // fall-through, from the labelled fields only. A printed value with no
+    // better match is left as printed, and a code is not taken from the name.
+    let replacedUnfitting = false;
+    if (!builder && brandHasItemIdFormat(brandRaw) && itemCell && !matchesBrandItemId(brandRaw, itemCell)) {
+      const chosen = chooseItemId({ brand: brandRaw, fields: { itemId: it.itemId, sku: it.sku, styleRef: it.styleRef, ean: it.ean } });
+      if (chosen && !isConcessionCode(chosen) && !idsMatch(chosen, itemCell)) {
+        itemCell = chosen;
+        replacedUnfitting = true;
+        if (/^\d{8,14}$/.test(String(chosen).replace(/\s/g, ''))) picked.idClass = 'ean';
+        else if (matchesBrandItemId(brandRaw, chosen)) picked.idClass = 'style';
+      }
+    }
     const unitRead = priceReading(it.rawUnitPrice !== undefined ? it.rawUnitPrice : it.unitPrice);
     const amountRead = priceReading(it.rawAmount !== undefined ? it.rawAmount : it.amount);
     const unitCell = unitRead.invalid ? null : unit;
@@ -141,7 +164,7 @@ function readerStage(receipt, rIndex, state, ctx) {
     const row = { rowId: it.rowId || `${receipt.receiptKey}:${lineIndex}:u0`, receiptKey: receipt.receiptKey, lineIndex, unitIndex: it.unitIndex ?? 0, unitCount, estimated, flags: {}, notes: [], _reading: [], _lookup: [], _alternates: {}, _comments: {}, _candidates: null, _officialBranch: null, lookup: null, mismatches: [], discountKind: it.discountKind || (estimated ? 'estimated' : 'none'),
       cells: { '采购小票id': receiptId, '采购时间': ts, '供应商': merchant, '品牌': brandRaw, '品名': str(it.item), '品牌货号': itemCell,
         '采购商品原价': unitCell ?? (amountCell !== null && !unitRead.invalid ? round2((amountCell + discount) / (qty || 1)) : null), '采购商品金额': amountCell, '采购商品方法': tender, '销售金额': null },
-      raw: { printedBrand: brandRaw, style: str(it.styleRef) || (str(it.sku) !== str(it.itemId) ? str(it.sku) : null), colour: str(it.colour), size: str(it.size), qty, currency: str(receipt.currency) || 'GBP', storeCodes: picked.storeCodes, idClass: picked.idClass, builder, itemLabels: { concessionCode: it.concessionCode ?? null, internalCode: it.internalCode ?? null, ean: it.ean ?? null, itemId: it.itemId ?? null, sku: it.sku ?? null, styleRef: it.styleRef ?? null }, invalidPrices, printedItemId: (picked.idClass === 'ean' || picked.idClass === 'concession' || picked.idClass === 'unlabelled10') ? picked.lookupId : (itemCell || picked.lookupId), extraUrls: builderUrls(it, builder) },
+      raw: { printedBrand: brandRaw, style: str(it.styleRef) || (str(it.sku) !== str(it.itemId) ? str(it.sku) : null), colour: str(it.colour), size: str(it.size), qty, currency: str(receipt.currency) || 'GBP', storeCodes: picked.storeCodes, idClass: picked.idClass, builder, itemLabels: { concessionCode: it.concessionCode ?? null, internalCode: it.internalCode ?? null, ean: it.ean ?? null, itemId: it.itemId ?? null, sku: it.sku ?? null, styleRef: it.styleRef ?? null }, invalidPrices, printedItemId: replacedUnfitting ? itemCell : ((picked.idClass === 'ean' || picked.idClass === 'concession' || picked.idClass === 'unlabelled10') ? picked.lookupId : (itemCell || picked.lookupId)), extraUrls: builderUrls(it, builder) },
       storeClues: receipt.storeClues || null };
     if (!receiptId) addFlag(row, '采购小票id', PINK, /selfridges/i.test(merchant || '') ? 'Selfridges receipt number (below the barcode) not read.' : /harrods/i.test(merchant || '') ? 'Harrods receipt number (right of date/time) not read.' : 'Receipt ID not read.');
     if (!ts) addFlag(row, '采购时间', PINK, 'Date/time missing or not a valid date.');
@@ -197,7 +220,7 @@ function noteStoreCodes(row) {
 }
 function officialItemId(top, row) {
   const id = str(top?.itemId);
-  if (!id) return null;
+  if (!id || isConcessionCode(id)) return null;
   const held = row.raw?.storeCodes || [];
   if (concessionReading(id, row.raw?.itemLabels || {})) return null;
   if (row.raw?.idClass === 'unlabelled10' && isUnlabelledTenDigits(id) && idsMatch(id, row.raw.printedItemId)) return null;

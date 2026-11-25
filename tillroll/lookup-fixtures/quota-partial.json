@@ -1,0 +1,27 @@
+{
+  "cacheHit": false,
+  "cacheKey": "item:chanel:unknown1",
+  "sourcesQueried": ["gemini"],
+  "candidates": [
+    {
+      "brand": "Chanel",
+      "officialName": "Classic Wallet",
+      "itemId": "WALLET1",
+      "price": 100,
+      "currency": "GBP",
+      "weightGrams": 80,
+      "sourceUrls": ["https://www.chanel.com/gb/wallet"],
+      "onOfficialSite": true,
+      "matchedFields": ["price"],
+      "confidence": 0.4,
+      "matchType": "price-fallback"
+    }
+  ],
+  "mismatches": [],
+  "flag": "#FDE68A",
+  "printedItemId": "UNKNOWN1",
+  "canonicalBrand": "Chanel",
+  "paused": true,
+  "unavailableReason": "Brave Search monthly guard reached (950).",
+  "quotaGuard": ["Brave Search monthly guard reached (950)."]
+}

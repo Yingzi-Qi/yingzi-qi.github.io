@@ -27,6 +27,28 @@ function checkInvariants(result) {
   }
 }
 
+test('an unfitting item code falls through to the official style ref, or the EAN', async () => {
+  const env = makeEnv();
+  const seen = [];
+  const lookupStub = async (_env, req) => {
+    seen.push(req.itemId);
+    if (req.name === 'Tote') {
+      return { candidates: [{ brand: 'Chanel', officialName: 'Synthetic Tote', itemId: 'AS44010', price: 100, currency: 'GBP', sourceUrls: ['https://www.chanel.com/gb/p/AS44010'], onOfficialSite: true, matchedFields: ['name'], confidence: 0.9, matchType: 'id' }] };
+    }
+    return { candidates: [] };
+  };
+  const { result } = await runSanity(env, { batchId: 'fit', mode: 'round1', receipts: [{
+    receiptKey: 'fit', merchant: 'Boutique', receiptReference: 'F1', date: '2026-11-20', time: '12:00', payment: 'Visa', currency: 'GBP',
+    items: [
+      { brand: 'Chanel', item: 'Tote', itemId: 'NOT-A-REF', sku: '3607670123456', qty: 1, unitPrice: 100, amount: 100 },
+      { brand: 'Chanel', item: 'Scarf', itemId: 'ALSO-NOT', sku: '3607670654321', qty: 1, unitPrice: 80, amount: 80 },
+    ],
+  }] }, { lookup: lookupStub });
+  assert.equal(result.agreedRows[0].cells['品牌货号'], 'AS44010');
+  assert.equal(result.agreedRows[1].cells['品牌货号'], '3607670654321');
+  assert.deepEqual(seen, ['3607670123456', '3607670654321']);
+});
+
 test('timestamps: 24h, 00 seconds, am/pm converted', () => {
   assert.equal(normaliseTimestamp('2025-01-17', '7:20 pm'), '2025-01-17 19:20:00');
   assert.equal(normaliseTimestamp('2025-01-17', '12:05 am'), '2025-01-17 00:05:00');

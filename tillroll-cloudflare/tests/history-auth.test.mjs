@@ -10,7 +10,7 @@ const LOCAL_NAME = 'Synthetic Local Merchant';
 const SERVER_SUMMARY = 'Synthetic server event';
 const SERVER_LABEL = 'Showing the reading history saved on the Tillroll server.';
 const OFFLINE_LABEL = 'Showing the history kept in this browser (offline).';
-const LOCKED_LABEL = 'locked: unlock to view history';
+const LOCKED_LABEL = 'unlock required';
 
 function polyfillDialog(window) {
   const proto = window.HTMLDialogElement?.prototype;
@@ -94,7 +94,7 @@ function view() {
   const shown = [];
   if (server && !server.hidden) shown.push('server');
   if (local && !local.hidden) shown.push('local');
-  return { server, local, status, shown, unlock: document.getElementById('v2-unlock-dialog'), unlockButton: document.getElementById('history-unlock') };
+  return { server, local, status, shown, unlock: document.getElementById('v2-unlock-dialog'), localChoice: document.getElementById('history-local-choice') };
 }
 
 const serverEntries = () => json(200, { entries: [{ kind: 'reading', summary: SERVER_SUMMARY, created_at: '2026-01-02T10:20:00.000Z', batch_id: 'syn-batch' }] });
@@ -135,7 +135,7 @@ test('server history uses the unlock dialog and renders exactly one result', asy
     } finally { page.restore(); }
   });
 
-  await t.test('401 dismissed shows the locked message and Unlock button, with no list', async () => {
+  await t.test('401 dismissed shows unlock required and no list', async () => {
     const page = await boot({ host: 'tillroll.example', history: () => json(401, { code: 'locked' }) });
     try {
       const pending = page.openHistory();
@@ -145,8 +145,7 @@ test('server history uses the unlock dialog and renders exactly one result', asy
       const ui = view();
       assert.deepEqual(ui.shown, []);
       assert.equal(ui.status.textContent, LOCKED_LABEL);
-      assert.equal(ui.unlockButton?.hidden, false);
-      assert.equal(ui.unlockButton.textContent, 'Unlock');
+      assert.equal(ui.localChoice?.hidden, false);
       assert.equal(ui.local.hidden, true);
       assert.equal(ui.server.hidden, true);
       assert.doesNotMatch(ui.local.textContent, new RegExp(LOCAL_FILE));
@@ -155,32 +154,22 @@ test('server history uses the unlock dialog and renders exactly one result', asy
     } finally { page.restore(); }
   });
 
-  await t.test('clicking Unlock after a dismiss retries once and shows the server list', async () => {
-    const page = await boot({
-      host: 'tillroll.example',
-      history: n => n < 3 ? json(401, { code: 'locked' }) : serverEntries(),
-    });
+  await t.test('local history appears only after the explicit choice', async () => {
+    const page = await boot({ host: 'tillroll.example', history: () => json(401, { code: 'locked' }) });
     try {
       const pending = page.openHistory();
       await waitFor(() => view().unlock.open);
       view().unlock.close();
       await pending;
       assert.deepEqual(view().shown, []);
-      assert.equal(view().unlockButton?.hidden, false);
-      view().unlockButton.click();
-      await waitFor(() => view().unlock.open);
-      const form = document.getElementById('v2-unlock-form');
-      form.querySelector('[name=passcode]').value = 'synthetic-pass';
-      form.onsubmit({ preventDefault() {} });
-      await waitFor(() => view().status.textContent === SERVER_LABEL, 'timed out waiting for the server list');
+      view().localChoice.click();
       const ui = view();
-      assert.deepEqual(ui.shown, ['server']);
-      assert.match(ui.server.textContent, new RegExp(SERVER_SUMMARY));
-      assert.equal(ui.local.hidden, true);
-      assert.equal(ui.unlockButton.hidden, true);
-      assert.equal(ui.unlock.open, false);
-      assert.equal(page.calls.filter(url => url.includes('/api/history')).length, 3);
-      assert.equal(page.calls.filter(url => url.includes('/api/auth/unlock')).length, 1);
+      assert.deepEqual(ui.shown, ['local']);
+      assert.equal(ui.status.textContent, OFFLINE_LABEL);
+      assert.match(ui.local.textContent, new RegExp(LOCAL_FILE));
+      assert.equal(ui.server.hidden, true);
+      assert.equal(ui.localChoice.hidden, true);
+      assert.equal(page.calls.filter(url => url.includes('/api/history')).length, 1);
     } finally { page.restore(); }
   });
 

@@ -7,6 +7,7 @@
 // them. Keep the export caller flag-only: never auto-edit 品牌 or 品名.
 
 import { BRANDS, canonicalBrand } from '../tillroll-cloudflare/functions/_lib/brands.js';
+import { chooseItemId, isConcessionCode, matchesBrandItemId } from './brand-item-ids.js';
 
 export const BRAND_NOT_READ = 'Brand not read';
 export const NAME_NEEDS_CHECKING = 'Name needs checking';
@@ -29,7 +30,7 @@ export function isUnlabelledTenDigits(value) {
   return /^\d{10}$/.test(compact(value));
 }
 export function isConcessionFamily(value) {
-  return /^9999999\d*$/.test(compact(value));
+  return isConcessionCode(value);
 }
 export function isBareFourDigits(value) {
   return /^\d{4}$/.test(compact(value));
@@ -57,6 +58,8 @@ export function concessionReading(value, item = {}) {
 }
 
 function formatMiss(item, value, brandIdFormat) {
+  const chosen = chooseItemId({ brand: item.brand, fields: { itemId: value, sku: value, styleRef: item.styleRef } });
+  if (chosen && matchesBrandItemId(item.brand, chosen) && compact(chosen).toUpperCase() === compact(value).toUpperCase()) return false;
   const verdict = brandIdFormat(item.brand, value);
   return verdict == null || verdict === false || verdict === 'no match';
 }

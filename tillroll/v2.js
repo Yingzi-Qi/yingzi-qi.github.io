@@ -1,6 +1,7 @@
 // Tillroll v2 layer: Run sanity checks, Linked Workbooks (Google Drive),
 // Reading History, quota status and Brave attribution. Talks only to the
 // same-origin /api/* Cloudflare Pages Functions; holds no secrets.
+import { exportAgreedChina } from './exports.js?v=merge2';
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const COLUMNS = ['采购小票id', '采购时间', '供应商', '品牌', '品名', '品牌货号', '采购商品原价', '采购商品金额', '采购商品方法', '销售金额'];
@@ -189,7 +190,8 @@ async function openWorkbooks() {
   };
 }
 // One Reading History dialog. api() opens the unlock dialog on a locked 401
-// and retries this request once. 5xx and network errors are an offline fallback.
+// and retries this request once. A dismissed unlock does not show local history.
+// 5xx and network errors are the only offline fallback.
 async function serverHistory(limit = 100) {
   try {
     const r = await api(`/api/history?limit=${encodeURIComponent(limit)}`);
@@ -219,6 +221,11 @@ function init() {
     serverHistory,
   });
   $('#v2-workbooks')?.addEventListener('click', openWorkbooks);
+  const china = $('#excel-china');
+  if (china) {
+    const localExport = china.onclick;
+    china.onclick = event => lastResult?.agreedRows ? exportAgreedChina(lastResult.agreedRows) : localExport?.call(china, event);
+  }
   for (const b of document.querySelectorAll('[data-v2-close]')) b.onclick = () => document.getElementById(b.dataset.v2Close).close();
   const p = new URLSearchParams(location.search).get('drive');
   if (p === 'connected') note('Google Drive connected.'); else if (p === 'denied') note('Google Drive was not connected.');
