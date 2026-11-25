@@ -500,6 +500,16 @@ test('brand item id: style ref, then brand code, then EAN; never a store code', 
   const model = read(['ATELIER', '12/11/2026 11:00', 'Linen shirt 40.00', 'Model: ZX-90', 'TOTAL 40.00']);
   assert.equal(model.data.items[0].styleRef, 'ZX-90');
   assert.equal(model.data.items[0].brandItemId, 'ZX-90');
+  const bare = read(['ATELIER', '12/11/2026 11:00', 'Wool coat 40.00', 'AB4401', 'TOTAL 40.00']);
+  assert.equal(bare.data.items[0].styleRef, 'AB4401');
+  assert.equal(bare.data.items[0].brandItemId, 'AB4401');
+  assert.equal(bare.data.items[0].brandItemIdCandidate.source, 'styleRef');
+});
+test('a standalone size line is not a style code', () => {
+  for (const size of ['EU36', 'UK10', 'IT38', 'S', 'M', 'L', 'S/M/L', '36.5']) {
+    const slip = read(['ATELIER', '12/11/2026 11:00', 'Wool coat 40.00', size, 'TOTAL 40.00']);
+    assert.equal(slip.data.items[0].styleRef ?? null, null);
+  }
 });
 test('field sorter: Dior description, brand-only line, Gucci style and a bad price', () => {
   const knit = read(['HARRODS', '12/11/2026 14:03 NT04567-111222',

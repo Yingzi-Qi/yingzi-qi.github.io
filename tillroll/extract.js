@@ -475,6 +475,13 @@ function itemsFromLines(lines, trace, receiptTotal=null) {
       }
       continue;
     }
+    const sizeToken=/^(?:(?:xxs|xs|s|m|l|xl|xxl|xxxl|os)(?:\s*\/\s*(?:xxs|xs|s|m|l|xl|xxl|xxxl))*|(?:eu|uk|us|it|fr|de|jp|cn)\s*-?\s*\d{1,3}(?:\.\d)?|\d{1,3}\.\d)$/i.test(text);
+    const bareStyle=/^(?:[A-Za-z]{1,6}-?\d{2,}[A-Za-z0-9]*)$/.test(text) && !/^NT/i.test(text) && !sizeToken;
+    if(bareStyle && items.length && i-lastProduct>0 && i-lastProduct<=3){
+      const row=items.at(-1);
+      if(!row.styleRef) row.styleRef=text;
+      continue;
+    }
     const printedStyle=readPrintedStyleRef(text);
     if (/^(?:style\b|sku\b)/i.test(text) || printedStyle) {
       if(i-lastProduct<=2 && items.length){
