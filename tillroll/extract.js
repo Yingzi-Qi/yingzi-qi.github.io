@@ -654,6 +654,10 @@ function cleanReceipt(raw) {
   out.fieldIssues=(Array.isArray(raw.fieldIssues)?raw.fieldIssues:[]).filter(v=>v && typeof v.field==='string' && typeof v.reason==='string').map(v=>({field:v.field,reason:v.reason,evidence:str(v.evidence)||''}));
   return out;
 }
+export function shouldCallServerOcr(apiKey) {
+  return String(apiKey ?? '').trim() === '__server__';
+}
+
 export async function extractAI(file, apiKey, tier = 1, reasons = []) {
   if (!apiKey?.trim()) throw new Error('An API key is required for the Gemini reader.');
   const strong = tier === 2 || tier === 'strong' || tier === 'second';
@@ -671,7 +675,7 @@ export async function extractAI(file, apiKey, tier = 1, reasons = []) {
     const payload={contents:[{role:'user',parts:[{text:prompt + notes},{inlineData:{mimeType:'image/jpeg',data:imageData}}]}],
         generationConfig:{responseMimeType:'application/json',responseJsonSchema:schema}};
     // Tillroll v2: the Gemini key lives in the Cloudflare Worker; the browser never holds it.
-    const viaServer = apiKey.trim()==='__server__';
+    const viaServer = shouldCallServerOcr(apiKey);
     const response = viaServer
       ? await fetch('/api/ocr',{method:'POST',credentials:'same-origin',signal:controller.signal,headers:{'Content-Type':'application/json'},body:JSON.stringify({model,...payload})})
       : await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,{

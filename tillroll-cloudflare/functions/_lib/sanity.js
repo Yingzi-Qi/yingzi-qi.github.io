@@ -2,10 +2,12 @@
 // roles (Reader & Sanity Checker -> Look-up Verifier -> Reader cross-check ->
 // Excel Sync audit) and iterates until the audit converges. Only the final
 // agreed version leaves this module; the internal trail is stored in D1 only.
-import { canonicalBrand } from './brands.js';
-import { lookup as defaultLookup, invalidate, priceFallbackIsTie } from './lookup.js';
+import { canonicalBrand, brandSearchPhrases, CHANEL_FALLBACK_NOTE } from './brands.js';
+import { lookup as defaultLookup, invalidate, priceFallbackIsTie, isExactOfficialIdPriceMatch } from './lookup.js';
 import { nowIso, sha256Hex } from './http.js';
 import { expandReceipt, joinPurchaseTime, supplierVisibleName } from '../../../tillroll/units.js';
+import { isGtin } from '../../../tillroll/product-code.js';
+import { sortItemFields, isNumericPrice } from '../../../tillroll/field-sorter.js';
 
 export const COLUMNS = ['采购小票id', '采购时间', '供应商', '品牌', '品名', '品牌货号', '采购商品原价', '采购商品金额', '采购商品方法', '销售金额'];
 export const PINK = '#FECDD3', AMBER = '#FDE68A';
@@ -38,13 +40,248 @@ export function stripBrandFromItemId(itemId, brand) {
   }
   return out.trim() || id;
 }
-const TENDERS = [[/apple\s*pay/i, 'Apple Pay'], [/google\s*pay/i, 'Google Pay'], [/ali\s*pay/i, 'Alipay'], [/we\s*chat/i, 'WeChat'], [/amex|american express/i, 'Amex'],
-  [/master\s*card|mastercard/i, 'Mastercard'], [/maestro/i, 'Maestro'], [/visa/i, 'Visa'], [/union\s*pay/i, 'UnionPay'], [/cash/i, 'Cash'], [/carte\s*(bleue|bancaire)|card|debit|credit/i, null]];
+// P4 (Yingzi approved): card schemes and wallets (Apple/Google/Samsung/Garmin Pay,
+// or the word "wallet"), with or without a printed scheme, map to Card with no flag.
+// Cash, PayPal, Klarna, gift card or empty: keep as printed or null, Pink, TENDER_REASON.
+export const TENDER_VALUES = ['UnionPay', 'Card', 'Alipay', 'WeChat'];
+export const ALLOWED_TENDERS = TENDER_VALUES;
+export const TENDER_REASON = 'Payment method must be UnionPay, Card, Alipay or WeChat.';
+const SCHEME = /\b(visa|mastercard|master\s*card|maestro|amex|american express|carte\s*(?:bleue|bancaire)|debit|credit|card)\b/i;
+const WALLET = /\b(apple\s*pay|google\s*pay|samsung\s*pay|garmin\s*pay|android\s*pay|wallet)\b/i;
 export function normaliseTender(p) {
   const s = str(p);
   if (!s) return null;
-  for (const [re, name] of TENDERS) if (re.test(s)) return name || s;
+  if (/union\s*pay|银联/i.test(s)) return 'UnionPay';
+  if (/ali\s*pay|支付宝/i.test(s)) return 'Alipay';
+  if (/we\s*chat|weixin|微信/i.test(s)) return 'WeChat';
+  // Gift card must not be swallowed by the bare "card" scheme token.
+  if (/\bgift\s*card\b|\bgift\s*voucher\b/i.test(s)) return s;
+  if (SCHEME.test(s) || WALLET.test(s)) return 'Card';
   return s;
+}
+const BARCODE_SHAPE = /^(?:\d{8}|\d{12,14})$/;
+const STORE_INTERNAL = /^(?:\d{4}|\d{10}|9999999\d*)$/; // concession 4-digit, 10-digit store-internal, 9999999… family
+const CONCESSION_PREFIX = /^(?:harrods|selfridges|harvey\s*nichols|\bhn\b|concession|dept(?:artment)?(?:\s*store)?)[-_\s.]/i;
+export function isBarcodeOrEan(value) {
+  const s = str(value);
+  if (!s) return false;
+  const compact = s.replace(/[\s-]/g, '');
+  return isGtin(compact) || BARCODE_SHAPE.test(compact);
+}
+export function isConcessionOrStoreCode(value, item = {}) {
+  const s = str(value);
+  if (!s) return false;
+  const compact = s.replace(/\s+/g, '');
+  if (item.concessionCode && str(item.concessionCode) === s) return true;
+  if (item.storeSku && str(item.storeSku) === s) return true;
+  if (item.retailerSku && str(item.retailerSku) === s) return true;
+  if (item.departmentCode && str(item.departmentCode) === s) return true;
+  if (item.concession === true && (s === str(item.itemId) || s === str(item.sku))) return true;
+  if (STORE_INTERNAL.test(compact)) return true;
+  return CONCESSION_PREFIX.test(s);
+}
+
+// Never use a concession 4-digit code or 9999999xxx as 品牌货号, whatever the label.
+export function isForbiddenBrandItemCode(value, item = {}) {
+  const s = str(value);
+  if (!s) return false;
+  const compact = s.replace(/[\s-]/g, '');
+  if (/^\d{4}$/.test(compact) || /^9999999\d*$/.test(compact) || /^\d{10}$/.test(compact)) return true;
+  return isConcessionOrStoreCode(s, item);
+}
+
+// Chanel optional season prefix: "24P AS1234" → style ref AS1234 (group 1).
+export const CHANEL_STYLE_REF = /^(?:\d{2}[A-Z]\s+)?([A-Z]{1,3}\d{4,5})\b/;
+export function extractChanelStyleRef(value) {
+  const s = str(value);
+  if (!s) return null;
+  const direct = s.match(CHANEL_STYLE_REF);
+  if (direct) return direct[1];
+  const upper = s.toUpperCase().match(CHANEL_STYLE_REF);
+  if (!upper) return null;
+  // Recover the capture from the printed string so we do not rewrite its spelling.
+  const idx = s.toUpperCase().indexOf(upper[1]);
+  return idx >= 0 ? s.slice(idx, idx + upper[1].length) : upper[1];
+}
+function isChanelBrandName(brand) {
+  const c = canonicalBrand(brand) || str(brand) || '';
+  return /^chanel$/i.test(c);
+}
+
+// Classify a printed code. The raw reader itemId is never passed through as-is:
+// it is only used when it classifies as a style ref, brand product code, or EAN,
+// and never when it is a concession / store code. Chanel season prefixes are
+// stripped to capture-group 1; characters are never auto-corrected (I/1, O/0).
+export function readerBrandItemIdCandidate(item = {}, brand) {
+  const classify = (value, sourceIfStyle) => {
+    if (!value) return null;
+    if (isForbiddenBrandItemCode(value, item)) return null;
+    let cleaned = stripBrandFromItemId(value, brand) || value;
+    const printed = cleaned;
+    if (isChanelBrandName(brand)) {
+      const style = extractChanelStyleRef(cleaned);
+      if (style) cleaned = style;
+    }
+    if (!cleaned || isForbiddenBrandItemCode(cleaned, item)) return null;
+    if (isBarcodeOrEan(cleaned)) return { value: cleaned.replace(/[\s-]/g, ''), source: 'ean', printed };
+    return { value: cleaned, source: sourceIfStyle, printed };
+  };
+  const styleRef = classify(str(item.styleRef) || str(item.style), 'styleRef');
+  if (styleRef && styleRef.source !== 'ean') return styleRef;
+  const sku = classify(str(item.sku), 'styleRef');
+  if (sku && sku.source !== 'ean') return sku;
+  const own = classify(str(item.productId), 'brandProductCode')
+    || classify(str(item.itemId), 'brandProductCode');
+  if (own && own.source !== 'ean') return own;
+  const ean = classify(str(item.ean) || str(item.barcode) || str(item.gtin) || str(item.upc), 'ean')
+    || (styleRef?.source === 'ean' ? styleRef : null)
+    || (sku?.source === 'ean' ? sku : null)
+    || (own?.source === 'ean' ? own : null);
+  return ean || null;
+}
+
+// Exported, empty by default. Do not copy a table from PR #3. The Verifier can
+// wire a table later via setBrandItemIdFormat() or deps.brandItemIdFormat.
+export const BRAND_ITEM_ID_FORMAT = {};
+let injectedBrandItemIdFormat = null;
+export function setBrandItemIdFormat(table) {
+  injectedBrandItemIdFormat = (table && typeof table === 'object') ? table : null;
+}
+export function getBrandItemIdFormat(override) {
+  return override || injectedBrandItemIdFormat || BRAND_ITEM_ID_FORMAT;
+}
+const compactId = v => String(v ?? '').replace(/[\s-]/g, '').toUpperCase();
+function formatPattern(brand, table) {
+  if (!table) return null;
+  return table[canonicalBrand(brand) || brand] || table[brand] || table[str(brand)] || null;
+}
+export function fitsBrandItemIdFormat(brand, value, table) {
+  if (!str(value) || isForbiddenBrandItemCode(value)) return false;
+  const formats = getBrandItemIdFormat(table);
+  const pattern = formatPattern(brand, formats);
+  if (!pattern) return true;
+  return pattern.test(str(value)) || pattern.test(compactId(value));
+}
+
+// Possible I/1 or O/0 readings that would fit the table. Never written to the cell.
+export function suggestedPrintedCodeAlternative(value, brand, table) {
+  const printed = str(value);
+  const formats = getBrandItemIdFormat(table);
+  const pattern = formatPattern(brand, formats);
+  if (!printed || !pattern || fitsBrandItemIdFormat(brand, printed, formats)) return null;
+  const variants = new Set();
+  const swap = (s, a, b) => s.replace(new RegExp(a, 'g'), b);
+  for (const v of [
+    swap(printed, 'I', '1'), swap(printed, 'l', '1'), swap(printed, 'O', '0'),
+    swap(printed, '1', 'I'), swap(printed, '0', 'O'),
+    swap(swap(printed, 'I', '1'), 'O', '0'),
+  ]) if (v !== printed) variants.add(v);
+  const fits = [...variants].filter(v => fitsBrandItemIdFormat(brand, v, formats));
+  return fits.length === 1 ? fits[0] : null;
+}
+export function officialSiteShowsReason(officialId) {
+  return `official site shows ${officialId}`;
+}
+export function printedValueKeptReason(alternative) {
+  return alternative ? `Printed value kept; alternative ${alternative}.` : 'Printed value kept.';
+}
+
+// Per-row 品牌货号. The receipt is the source of truth:
+// 1) a printed style ref / brand product code that fits the brand format table is kept
+//    (flag null if the official ID matches / P5; Amber 'official site shows <X>' if it differs);
+// 2) only when no such printed code exists, the official look-up ID (Amber unless P5 exact);
+// 3) EAN (Amber);
+// 4) empty + Pink.
+export function resolveBrandItemId({ item = {}, brand, officialItemId, exactOfficial = false, formatTable } = {}) {
+  const table = getBrandItemIdFormat(formatTable);
+  const officialRaw = str(officialItemId);
+  const official = officialRaw && !isForbiddenBrandItemCode(officialRaw, item)
+    ? (stripBrandFromItemId(officialRaw, brand) || officialRaw)
+    : null;
+  const usableOfficial = official && !isForbiddenBrandItemCode(official, item) ? official : null;
+  const cand = readerBrandItemIdCandidate(item, brand);
+  const styleLike = cand && (cand.source === 'styleRef' || cand.source === 'brandProductCode') ? cand : null;
+  const fitting = styleLike && fitsBrandItemIdFormat(brand, styleLike.value, table) ? styleLike : null;
+
+  if (fitting) {
+    const idsMatch = Boolean(usableOfficial && compactId(usableOfficial) === compactId(fitting.value));
+    if (usableOfficial && !idsMatch) {
+      return {
+        brandItemId: fitting.value,
+        brandItemIdSource: fitting.source,
+        flag: AMBER,
+        reason: officialSiteShowsReason(usableOfficial),
+      };
+    }
+    return {
+      brandItemId: fitting.value,
+      brandItemIdSource: fitting.source,
+      flag: null,
+      reason: null,
+    };
+  }
+  // A printed style / brand code that does not fit (or cannot be confirmed) is
+  // kept exactly as printed and flagged Pink. Alternatives (OCR I/1, O/0, or
+  // an official ID) go in the comment/reason only — never into the cell.
+  if (styleLike) {
+    const rawPrinted = styleLike.printed || styleLike.value;
+    const alternative = suggestedPrintedCodeAlternative(rawPrinted, brand, table)
+      || suggestedPrintedCodeAlternative(styleLike.value, brand, table)
+      || usableOfficial
+      || null;
+    return {
+      brandItemId: rawPrinted,
+      brandItemIdSource: styleLike.source,
+      flag: PINK,
+      reason: printedValueKeptReason(alternative),
+    };
+  }
+  if (usableOfficial) {
+    return {
+      brandItemId: usableOfficial,
+      brandItemIdSource: 'official',
+      flag: exactOfficial ? null : AMBER,
+      reason: exactOfficial ? null : 'Official brand item ID from look-up.',
+    };
+  }
+  if (cand && cand.source === 'ean') {
+    return {
+      brandItemId: cand.value,
+      brandItemIdSource: 'ean',
+      flag: AMBER,
+      reason: 'EAN used as 品牌货号; not a brand style ref.',
+    };
+  }
+  const raw = [item.styleRef, item.style, item.sku, item.itemId, item.ean, item.barcode, item.concessionCode, item.storeSku]
+    .map(str).filter(Boolean);
+  const concession = raw.some(c => isForbiddenBrandItemCode(c, item));
+  return {
+    brandItemId: null,
+    brandItemIdSource: null,
+    flag: PINK,
+    reason: concession ? 'Department-store or concession code, not a brand item ID.' : 'No brand item ID.',
+  };
+}
+export function chooseBrandItemId(item = {}, brand, formatTable) {
+  return resolveBrandItemId({ item, brand, formatTable }).brandItemId;
+}
+
+function applyBrandItemIdRecord(row, rec, { replaceFlag = false } = {}) {
+  row.brandItemId = rec.brandItemId ?? null;
+  row.brandItemIdSource = rec.brandItemIdSource ?? null;
+  row.brandItemIdFlag = rec.flag ?? null;
+  row.brandItemIdReason = rec.reason ?? null;
+  row.cells['品牌货号'] = rec.brandItemId ?? null;
+  if (replaceFlag) {
+    delete row.flags['品牌货号'];
+    row._reading = (row._reading || []).filter(e => e.col !== '品牌货号');
+    row._lookup = (row._lookup || []).filter(e => e.col !== '品牌货号');
+  }
+  if (rec.flag && rec.reason) addFlag(row, '品牌货号', rec.flag, rec.reason);
+  if (rec.reason) {
+    if (!row._comments) row._comments = {};
+    if (!row._comments['品牌货号']) row._comments['品牌货号'] = rec.reason;
+  }
 }
 
 function prepareReceiptForSplit(source, receiptKey) {
@@ -55,8 +292,23 @@ function prepareReceiptForSplit(source, receiptKey) {
     items: (source.items || []).map(it => ({
       ...it,
       unitDiscount: it.unitDiscount ?? it.discountEach ?? it.perItemDiscount ?? it.itemDiscount,
+      priceNotNumeric: (it.unitPrice != null && it.unitPrice !== '' && isNumericPrice(it.unitPrice) === false)
+        || (it.amount != null && it.amount !== '' && isNumericPrice(it.amount) === false),
     })),
   };
+}
+
+// units.js expandReceipt copies only sku/itemId (PR #4). Reattach the brand-owned
+// identifiers P1 needs so chooseBrandItemId still sees styleRef / barcodes / concession marks.
+const LINE_ID_FIELDS = ['styleRef', 'style', 'barcode', 'ean', 'gtin', 'upc', 'productId',
+  'concessionCode', 'storeSku', 'retailerSku', 'departmentCode', 'concession', 'priceNotNumeric'];
+function reattachLineIdentifiers(expandedItems, originalItems) {
+  return (expandedItems || []).map(it => {
+    const src = originalItems[it.lineIndex] || originalItems[0] || {};
+    const extra = {};
+    for (const k of LINE_ID_FIELDS) if (it[k] == null && src[k] != null) extra[k] = src[k];
+    return Object.keys(extra).length ? { ...it, ...extra } : it;
+  });
 }
 
 function addFlag(row, col, colour, reason, extra = {}) {
@@ -77,7 +329,7 @@ function noteMismatch(row, col, receipt, official, shown) {
 }
 
 // ---- Stage 1: Receipt Reader & Sanity Checker ------------------------------
-function readerStage(receipt, rIndex, state) {
+function readerStage(receipt, rIndex, state, formatTable) {
   const rows = [];
   const merchant = str(receipt.merchant);
   const receiptId = str(receipt.receiptReference) || str(receipt.orderNumber) || str(receipt.orderId);
@@ -92,24 +344,41 @@ function readerStage(receipt, rIndex, state) {
     const zeroUnit = unit === 0, zeroAmt = amount === 0;
     const confirmedZero = (it.zeroConfirmed === true && (zeroUnit || zeroAmt)) || (zeroUnit && zeroAmt && it.zeroConfirmed !== false);
     if (confirmedZero) { state.excludedZero.push({ receiptKey: receipt.receiptKey, lineIndex, name: str(it.item) }); return; }
-    const brandRaw = str(it.brand);
+    const sorted = sortItemFields({ brand: str(it.brand), name: str(it.item), itemId: str(it.itemId) }, { canonicalBrand, phrases: brandSearchPhrases() });
+    const brandRaw = str(sorted.brand);
+    const itemName = str(sorted.name);
     const unitCount = it.unitCount || (receipt.items || []).filter(x => (x.lineIndex ?? 0) === lineIndex).length || 1;
     const row = { rowId: it.rowId || `${receipt.receiptKey}:${lineIndex}:u${it.unitIndex ?? 0}`, receiptKey: receipt.receiptKey, lineIndex,
       unitIndex: it.unitIndex ?? 0, unitCount, discountKind: it.discountKind || 'none', estimated: it.estimated === true || it.discountKind === 'estimated',
       flags: {}, notes: [], _reading: [], _lookup: [], lookup: null,
-      cells: { '采购小票id': receiptId, '采购时间': ts, '供应商': merchant, '品牌': brandRaw, '品名': str(it.item), '品牌货号': stripBrandFromItemId(it.itemId ?? it.sku, brandRaw),
+      cells: { '采购小票id': receiptId, '采购时间': ts, '供应商': merchant, '品牌': brandRaw, '品名': itemName, '品牌货号': null,
         '采购商品原价': unit ?? (amount !== null ? round2((amount + discount) / (qty || 1)) : null), '采购商品金额': amount, '采购商品方法': tender, '销售金额': null },
       raw: { style: str(it.sku) !== str(it.itemId) ? str(it.sku) : null, colour: str(it.colour), size: str(it.size), qty, currency: str(receipt.currency),
-        amount, lineDiscount: num(it.lineDiscount ?? it.discount), unitDiscount: num(it.unitDiscount ?? it.perItemDiscount ?? it.itemDiscount) } };
+        amount, lineDiscount: num(it.lineDiscount ?? it.discount), unitDiscount: num(it.unitDiscount ?? it.perItemDiscount ?? it.itemDiscount) },
+      _brandIdItem: it };
     if (!receiptId) addFlag(row, '采购小票id', PINK, /selfridges/i.test(merchant || '') ? 'Selfridges receipt number (below the barcode) not read.' : /harrods/i.test(merchant || '') ? 'Harrods receipt number (right of date/time) not read.' : 'Receipt ID not read.');
     if (!ts) addFlag(row, '采购时间', PINK, 'Date/time missing or not a valid date.');
     if (!merchant) addFlag(row, '供应商', PINK, 'Supplier not read.');
-    if (!tender) addFlag(row, '采购商品方法', PINK, 'Payment tender not read.');
-    if (!row.cells['品名'] || JUNK_NAME.test(row.cells['品名'])) addFlag(row, '品名', PINK, `Item name "${row.cells['品名'] ?? ''}" failed the column sanity check.`);
+    if (!row._comments) row._comments = {};
+    if (!tender || !ALLOWED_TENDERS.includes(tender)) {
+      addFlag(row, '采购商品方法', PINK, TENDER_REASON);
+      row._comments['采购商品方法'] = TENDER_REASON;
+    }
+    const brandId = resolveBrandItemId({ item: it, brand: brandRaw, formatTable });
+    applyBrandItemIdRecord(row, brandId);
+    if (!row.cells['品名'] || JUNK_NAME.test(row.cells['品名']) || sorted.junk || !sorted.nameHasNonBrandWord) {
+      const why = sorted.codePlusBrand ? 'is only a product code plus the brand'
+        : sorted.brandOnly || (sorted.junk && !row.cells['品名']) ? 'has no non-brand word'
+        : JUNK_NAME.test(row.cells['品名'] || '') ? 'failed the column sanity check'
+        : 'has no non-brand word';
+      addFlag(row, '品名', PINK, `Item name "${row.cells['品名'] ?? str(it.item) ?? ''}" ${why}.`);
+    }
+    if (sorted.brandMoved) addFlag(row, '品牌', PINK, 'Brand was empty and was taken from the item name.');
     const idp = itemIdProblem(row.cells['品牌货号']);
     if (idp) addFlag(row, '品牌货号', PINK, `Item ID ${idp}.`);
     if ((it.fieldIssues || []).some(f => /itemid/i.test(f))) addFlag(row, '品牌货号', PINK, 'Reader marked the item ID as uncertain.');
-    if (unit === null && amount === null) addFlag(row, '采购商品原价', PINK, 'No price read.');
+    if (it.priceNotNumeric) addFlag(row, unit === null ? '采购商品原价' : '采购商品金额', PINK, 'Price is not numeric.');
+    else if (unit === null && amount === null) addFlag(row, '采购商品原价', PINK, 'No price read.');
     else if (unit === null) addFlag(row, '采购商品原价', PINK, 'Unit price not printed; derived from line amount.');
     if ((zeroUnit || zeroAmt) && row.flags['采购商品原价'] !== PINK) addFlag(row, '采购商品原价', PINK, 'Doubtful 0 price: may be an OCR miss.');
     if (amount === null) addFlag(row, '采购商品金额', PINK, 'Line amount not read.');
@@ -182,15 +451,23 @@ async function verifierStage(rows, receipt, ctx) {
     const mismatches = res.mismatches || [];
     row.mismatches = mismatches;
     row.lookup.mismatches = mismatches;
+    if (res.sourceNote) row.lookup.sourceNote = res.sourceNote;
+    const chanelFallback = Boolean(res.sourceNote === CHANEL_FALLBACK_NOTE || (mismatches || []).some(m => m.field === 'source' && m.reason === CHANEL_FALLBACK_NOTE));
+    const exactOfficial = isExactOfficialIdPriceMatch(req, top);
+    const p5Exact = exactOfficial && !chanelFallback;
     for (const m of mismatches) {
+      if (m.field === 'source') {
+        row.notes.push(m.reason || res.sourceNote);
+        continue;
+      }
       if (m.field === 'brand' && !ctx.locked(row.rowId, '品牌')) {
         noteMismatch(row, '品牌', c['品牌'], m.officialValue, 'official');
         c['品牌'] = m.officialValue;
-        addFlag(row, '品牌', AMBER, `Receipt brand "${m.receiptValue ?? ''}" vs official "${m.officialValue}".`, { confidence: top.confidence, sourceUrls: top.sourceUrls, mismatches });
+        if (!p5Exact) addFlag(row, '品牌', AMBER, `Receipt brand "${m.receiptValue ?? ''}" vs official "${m.officialValue}".`, { confidence: top.confidence, sourceUrls: top.sourceUrls, mismatches });
       } else if (m.field === 'name' && !ctx.locked(row.rowId, '品名')) {
         noteMismatch(row, '品名', c['品名'], m.officialValue, row._skipOfficialName ? 'receipt' : 'official');
         if (!row._skipOfficialName) { row.previousName = c['品名']; c['品名'] = m.officialValue; }
-        addFlag(row, '品名', AMBER, `Receipt name "${m.receiptValue ?? ''}" vs official "${m.officialValue}".`, { confidence: top.confidence, sourceUrls: top.sourceUrls, mismatches });
+        if (!p5Exact) addFlag(row, '品名', AMBER, `Receipt name "${m.receiptValue ?? ''}" vs official "${m.officialValue}".`, { confidence: top.confidence, sourceUrls: top.sourceUrls, mismatches });
       } else if (m.field === 'price' && !ctx.locked(row.rowId, '采购商品原价')) {
         if (m.reason === 'official price unavailable' || m.officialValue === null || m.officialValue === undefined) {
           addFlag(row, '采购商品原价', AMBER, 'official price unavailable', { confidence: top.confidence, sourceUrls: top.sourceUrls, mismatches });
@@ -198,10 +475,22 @@ async function verifierStage(rows, receipt, ctx) {
           noteMismatch(row, '采购商品原价', m.receiptValue, m.officialValue, 'receipt');
           addFlag(row, '采购商品原价', AMBER, `Receipt price ${m.receiptValue} vs official ${m.officialValue}; receipt value kept.`, { confidence: top.confidence, sourceUrls: top.sourceUrls, mismatches });
         }
-      } else if (m.field === 'itemId' && !ctx.locked(row.rowId, '品牌货号')) {
-        noteMismatch(row, '品牌货号', m.receiptValue, m.officialValue, 'receipt');
-        addFlag(row, '品牌货号', AMBER, `Receipt item ID "${m.receiptValue}" vs official "${m.officialValue}"; receipt value kept.`, { confidence: top.confidence, sourceUrls: top.sourceUrls, mismatches });
       }
+      // itemId mismatches are resolved below: the printed style / brand code is kept.
+    }
+    if (!ctx.locked(row.rowId, '品牌货号')) {
+      const rec = resolveBrandItemId({ item: row._brandIdItem || {}, brand: c['品牌'], officialItemId: top.itemId, exactOfficial: p5Exact, formatTable: ctx.formatTable });
+      const previous = c['品牌货号'];
+      applyBrandItemIdRecord(row, rec, { replaceFlag: true });
+      if (rec.reason && rec.reason.startsWith('official site shows ') && previous && top.itemId) {
+        noteMismatch(row, '品牌货号', rec.brandItemId, top.itemId, 'receipt');
+      }
+    }
+    if (chanelFallback) {
+      const comment = res.sourceNote || CHANEL_FALLBACK_NOTE;
+      addFlag(row, '品牌货号', AMBER, comment);
+      row.brandItemIdFlag = AMBER;
+      if (!row.brandItemIdReason) row.brandItemIdReason = comment;
     }
     row._candidatePrice = top.price; row._candidateCurrency = top.currency;
   }
@@ -263,6 +552,55 @@ export function validateInput(body) {
   return { batchId, mode, receipts: body.receipts };
 }
 
+
+// TODO(PR #1): The Reader will export a pure
+//   checkBatchDateOutliers(units, { now = new Date() } = {})
+// returning [{ rowId, field: '采购时间', flag: '#FECDD3', reason }].
+// Do NOT reimplement that function here. This hook imports that one name from
+// tillroll/receipt-rules.js once #1 ships it; until then it is a no-op.
+// deps.checkBatchDateOutliers may be injected in tests.
+const PR1_DATE_OUTLIER_MODULE = '../../../tillroll/receipt-rules.js';
+const PR1_DATE_OUTLIER_NAME = 'checkBatchDateOutliers';
+
+export async function loadPr1BatchDateOutlierCheck() {
+  try {
+    const mod = await import(PR1_DATE_OUTLIER_MODULE);
+    if (typeof mod[PR1_DATE_OUTLIER_NAME] === 'function') return mod[PR1_DATE_OUTLIER_NAME];
+  } catch {
+    // receipt-rules.js is not on this branch yet, or the export has not landed.
+  }
+  return null;
+}
+
+export async function maybeApplyPr1BatchDateOutlierCheck(units, trail, deps = {}, locked = () => false) {
+  const fn = typeof deps.checkBatchDateOutliers === 'function'
+    ? deps.checkBatchDateOutliers
+    : await loadPr1BatchDateOutlierCheck();
+  if (typeof fn !== 'function') {
+    trail?.push({ stage: 'pr1-batch-date-outlier', applied: false, reason: 'PR #1 checkBatchDateOutliers not available yet' });
+    return null;
+  }
+  try {
+    const now = deps.now instanceof Date ? deps.now : new Date();
+    const result = fn(units, { now });
+    trail?.push({ stage: 'pr1-batch-date-outlier', applied: true, name: PR1_DATE_OUTLIER_NAME });
+    if (!Array.isArray(result)) return result;
+    for (const item of result) {
+      const field = item.field || '采购时间';
+      if (field !== '采购时间') continue;
+      const row = (units || []).find(r => r.rowId === item.rowId);
+      if (!row || !item.reason) continue;
+      // human_verified_unflagged locks must not be overwritten.
+      if (locked(row.rowId, field)) continue;
+      addFlag(row, field, item.flag || PINK, item.reason);
+    }
+    return result;
+  } catch (err) {
+    trail?.push({ stage: 'pr1-batch-date-outlier', applied: false, error: String(err?.message || err) });
+    return null;
+  }
+}
+
 // Main loop. env gives D1 for locks; deps.lookup can be swapped in tests.
 export async function runSanity(env, input, deps = {}) {
   const { batchId, mode } = input;
@@ -284,7 +622,8 @@ export async function runSanity(env, input, deps = {}) {
     const prepared = prepareReceiptForSplit(source, receiptKey);
     const expanded = expandReceipt(prepared, { settled });
     state.excludedZero.push(...(expanded.excludedZero || []));
-    receipts.push({ ...source, ...prepared, receiptKey, items: expanded.items, _unitAudit: expanded.audit });
+    const items = reattachLineIdentifiers(expanded.items, prepared.items || []);
+    receipts.push({ ...source, ...prepared, receiptKey, items, _unitAudit: expanded.audit });
   }
   const rowIds = receipts.flatMap(r => (r.items || []).map(it => it.rowId).filter(Boolean));
   if (env?.DB && rowIds.length) {
@@ -295,8 +634,9 @@ export async function runSanity(env, input, deps = {}) {
     }
   }
   const memo = new Map();
+  const formatTable = getBrandItemIdFormat(deps.brandItemIdFormat);
   const ctx = {
-    mode, lookupsUsed: 0, paused: new Set(),
+    mode, lookupsUsed: 0, paused: new Set(), formatTable,
     locked: (rowId, col) => locks.has(`${rowId}\u0000${col}`),
     callLookup: async req => {
       const k = JSON.stringify(req);
@@ -311,7 +651,7 @@ export async function runSanity(env, input, deps = {}) {
   // Round 2: invalidate cache for edited 品牌货号 and set the skip gate.
   let allRows = [];
   for (const r of receipts) {
-    const rows = readerStage(r, 0, state);
+    const rows = readerStage(r, 0, state, formatTable);
     const byId = new Map((r.items || []).filter(it => it.rowId).map(it => [it.rowId, it]));
     const byLine = new Map((r.items || []).map((it, i) => [it.lineIndex ?? i, it]));
     for (const row of rows) {
@@ -329,6 +669,8 @@ export async function runSanity(env, input, deps = {}) {
     await verifierStage(rows, r, ctx);
     allRows.push(...rows);
   }
+  // TODO(PR #1): optional checkBatchDateOutliers hook — no local reimplementation.
+  await maybeApplyPr1BatchDateOutlierCheck(allRows, trail, deps, ctx.locked);
   readerReview(allRows, trail);
   // Locks apply to unit rowIds (Excel Sync lines up row for row).
   for (const row of allRows) {
@@ -347,6 +689,10 @@ export async function runSanity(env, input, deps = {}) {
     for (const e of row._reading) if (row.flags[e.col]) readingErrors.push({ rowId: row.rowId, col: e.col, reason: e.reason });
     for (const e of row._lookup) if (row.flags[e.col]) lookupUncertainties.push({ rowId: row.rowId, col: e.col, reason: e.reason, confidence: e.confidence ?? row.lookup?.confidence ?? null, sourceUrls: e.sourceUrls || row.lookup?.sourceUrls || [], estimated: Boolean(e.estimated), ...(e.candidates ? { candidates: e.candidates } : {}), ...(e.mismatches || row.mismatches ? { mismatches: e.mismatches || row.mismatches } : {}) });
     const round2Changed = row.previous ? COLUMNS.filter(col => row.previous[col] !== undefined && row.previous[col] !== row.cells[col]) : [];
+    const brandItemId = row.brandItemId ?? row.cells['品牌货号'] ?? null;
+    const brandItemIdSource = row.brandItemIdSource ?? null;
+    const brandItemIdFlag = row.brandItemIdFlag ?? row.flags['品牌货号'] ?? null;
+    const brandItemIdReason = row.brandItemIdReason ?? null;
     const exportMeta = {
       discountKind: row.discountKind || (row.estimated ? 'estimated' : 'none'),
       currency: row.raw?.currency || null,
@@ -357,9 +703,11 @@ export async function runSanity(env, input, deps = {}) {
       alternates: row._alternates || {},
       comments: row._comments || {},
       officialBranch: row._officialBranch || null,
+      brandItemId, brandItemIdSource, brandItemIdFlag, brandItemIdReason,
     };
     return { rowId: row.rowId, receiptKey: row.receiptKey, lineIndex: row.lineIndex, unitIndex: row.unitIndex, unitCount: row.unitCount,
       cells: row.cells, flags: row.flags, notes: row.notes, lookup: row.lookup, estimated: Boolean(row.estimated),
+      brandItemId, brandItemIdSource, brandItemIdFlag, brandItemIdReason,
       exportMeta, mismatches: row.mismatches || [], ...(mode === 'round2' ? { round2Changed } : {}) };
   });
   const result = { agreedRows, excludedZeroCount: state.excludedZero.length, readingErrors, lookupUncertainties, workbookExportReady: finalIssues.length === 0 };

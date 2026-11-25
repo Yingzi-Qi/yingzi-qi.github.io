@@ -54,6 +54,11 @@ const ALIASES = {
 const DEPARTMENT_SUFFIX = /\s+(accessory|accessories|beauty|fragrance|fragrances|parfums?|watches?|fine jewell?ery|jewell?ery|shoes|footwear|rtw|ready[- ]to[- ]wear|leather goods|boutique|cosmetics|uk|london)$/i;
 const fold = s => String(s ?? '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase().replace(/\s+/g, ' ');
 const CANON = new Map(Object.keys(BRANDS).map(b => [fold(b), b]));
+export function brandSearchPhrases() {
+  const out = Object.keys(BRANDS).map(b => ({ phrase: b, canonical: b }));
+  for (const [alias, canonical] of Object.entries(ALIASES)) out.push({ phrase: alias, canonical });
+  return out;
+}
 export function canonicalBrand(input) {
   if (!input || !String(input).trim()) return null;
   let s = fold(input);
@@ -74,14 +79,17 @@ export function hostOf(url) {
   try { return new URL(url).hostname.toLowerCase().replace(/^www\./, ''); } catch { return ''; }
 }
 export const hostMatches = (host, domain) => host === domain || host.endsWith('.' + domain);
-export function isOfficialUrl(url, brand, titleHint) {
+export function isOfficialUrl(url, brand, titleHint, opts = {}) {
+  const acceptFallback = opts.acceptChanelFallback === true;
+  if (isChanelBrand(brand) && isChanelOfficialUrl(url, { acceptFallback })) return true;
   const domains = officialDomains(brand);
   if (!domains.length) return false;
   const host = hostOf(url);
   if (domains.some(d => hostMatches(host, d))) return true;
   // Gemini grounding returns redirect URLs whose chunk title is the source domain.
-  const t = String(titleHint || '').toLowerCase().replace(/^www\./, '');
-  return Boolean(t) && domains.some(d => hostMatches(t, d));
+  const hint = String(titleHint || '').toLowerCase().replace(/^www\./, '');
+  if (acceptFallback && isChanelBrand(brand) && (hostMatches(hint, 'chanel.cn') || hostMatches(hint, 'chanel.com'))) return true;
+  return Boolean(hint) && domains.some(d => hostMatches(hint, d));
 }
 export const isUkRetailerUrl = url => UK_RETAILERS.some(d => hostMatches(hostOf(url), d));
 
@@ -100,4 +108,26 @@ export function knownBranch(supplier, postcode) {
   const s = fold(supplier);
   const hit = KNOWN_BRANCHES.find(b => fold(b.supplier) === s && b.postcode.test(String(postcode).replace(/\s+/g, '')));
   return hit ? hit.name : null;
+}
+
+// Chanel official-site policy (Orchestrator, consistent with PR #3 domain order):
+// query chanel.com first; use chanel.cn or chanel.com/gb only when chanel.com is
+// blocked or errors. The note text is a fixed contract string.
+export const CHANEL_FALLBACK_NOTE = 'chanel.com blocked; confirmed on chanel.cn/gb';
+export const isChanelBrand = brand => canonicalBrand(brand) === 'Chanel';
+export function isChanelFallbackUrl(url) {
+  const host = hostOf(url);
+  if (hostMatches(host, 'chanel.cn')) return true;
+  if (!hostMatches(host, 'chanel.com')) return false;
+  try {
+    const path = new URL(url).pathname.toLowerCase();
+    return path === '/gb' || path.startsWith('/gb/');
+  } catch { return false; }
+}
+export function isChanelPrimaryUrl(url) {
+  return hostMatches(hostOf(url), 'chanel.com') && !isChanelFallbackUrl(url);
+}
+export function isChanelOfficialUrl(url, { acceptFallback = false } = {}) {
+  if (hostMatches(hostOf(url), 'chanel.com')) return true;
+  return acceptFallback && hostMatches(hostOf(url), 'chanel.cn');
 }

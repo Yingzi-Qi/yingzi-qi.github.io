@@ -15,7 +15,7 @@ const $ = s=>document.querySelector(s);
 const escape = v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const paths={settings:'<path d="M4 7h5m4 0h7M4 17h9m4 0h3"/><circle cx="11" cy="7" r="2"/><circle cx="15" cy="17" r="2"/>',upload:'<path d="M12 15V3m-5 5 5-5 5 5M4 14v5a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5"/>',plus:'<path d="M12 5v14M5 12h14"/>',download:'<path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/>',search:'<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>',link:'<path d="m10 14 4-4m-4-3 2-2a5 5 0 0 1 7 7l-2 2m-3 3-2 2a5 5 0 0 1-7-7l2-2"/>',play:'<path d="m8 5 10 7-10 7z"/>'};
 for(const el of document.querySelectorAll('[data-icon]')) el.innerHTML=`<svg aria-hidden="true" class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${paths[el.dataset.icon]}</svg>`;
-window.tillrollV2Hooks={getBatch:()=>batch};
+window.tillrollV2Hooks={...window.tillrollV2Hooks,getBatch:()=>batch,render:()=>render()};
 let batch=[],orderList=null,orderFilename='',filter='all',seq=0,generation=0,nowReading=0;
 let mode='local',apiKey='',savedSamples=false,noticeTimer,startTime=0,finishedTime=0;
 const queue=[], hashOwners=new Map();
@@ -310,7 +310,8 @@ function rowHTML(r){
   const span=`rowspan="${visible.length}"`;
   const date=cell(r,'date',purchaseDateText(d),d.dateIssue||d.date||'Enter purchase date');
   const time=d.time?cell(r,'time',d.time,'Purchase time','purchase-time'):'';
-  const shared=`<th scope="rowgroup" ${span}><div class="receipt-controls">${open}${receiptStatus(r)}</div></th>
+  const check=window.tillrollV2Hooks?.receiptCheckHtml?.(r)||'';
+  const shared=`<th scope="rowgroup" ${span}><div class="receipt-controls">${open}${receiptStatus(r)}${check}</div></th>
     <td ${span} class="purchase-date">${date}${time}</td><td ${span}>${cell(r,'merchant',d.merchantDisplay||d.merchant,'Edit shop')}</td>
     <td ${span} class="order-number"><span class="mobile-order-label" aria-hidden="true">Order number</span>${orderNumberCell(r)}</td>`;
   if(!d.items.length)return `<tbody aria-label="Receipt ${r.id}"><tr>${shared}<td colspan="4" class="no-items">No items read</td></tr></tbody>`;
@@ -347,6 +348,7 @@ function render(){
   $('#table').innerHTML=shown.length?`<table class="receipt-lines" aria-label="Receipt line items"><thead><tr>${headers.join('')}</tr></thead>${shown.map(rowHTML).join('')}</table>`:'<p class="empty">No receipts match this view.</p>';
   $('#refresh-excel').disabled=$('#excel').disabled=$('#csv').disabled=!done.length||work;
   $('#startover').disabled=work;$('#clear-orders').hidden=!orderList;
+  window.tillrollV2Hooks?.afterRender?.(batch);
 }
 function resolveImportFlags(r, resolved){
   if(r.origin!=='achung' || !resolved.length)return;

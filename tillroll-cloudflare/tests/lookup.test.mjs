@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { makeEnv, mockFetch, CATALOGUE } from './helpers.mjs';
-import { lookup, invalidate, officialMismatches, rankPriceFallback, priceFallbackGapBand, parsePrice } from '../functions/_lib/lookup.js';
+import { lookup, invalidate, officialMismatches, rankPriceFallback, priceFallbackGapBand, parsePrice, isExactOfficialIdPriceMatch } from '../functions/_lib/lookup.js';
 import { keys } from '../functions/_lib/cache.js';
+import { CHANEL_FALLBACK_NOTE } from '../functions/_lib/brands.js';
 import { status } from '../functions/_lib/quota.js';
 const KEYS = { BRAVE_API_KEY: 'test-brave', GEMINI_API_KEY: 'test-gemini' };
 
@@ -178,7 +179,7 @@ test('each candidate carries its own mismatches; top-level mismatches match the 
   assert.ok(r.candidates[0].mismatches.some(m => m.field === 'itemId' && m.receiptValue === '000001'));
 });
 
-test('price-fallback gap band is max(2% of printed price, £5), replacing min(2%, £1)', () => {
+test('price-fallback gap band is the approved max(2% of printed price, £5)', () => {
   assert.equal(priceFallbackGapBand(100), 5);
   assert.equal(priceFallbackGapBand(1000), 20);
   assert.equal(priceFallbackGapBand(50), 5);
@@ -381,4 +382,97 @@ test('official match with a null official price is Amber with official price una
   assert.equal(m2.reason, 'official price unavailable');
   assert.equal(m2.officialValue, null);
   assert.ok(!('receiptValue' in m2), 'never emit receiptValue null for an unprinted field');
+});
+
+
+test('P5: exact official item-ID + price match gives official name with flag null, even if 品名 wording differs', async () => {
+  const env = makeEnv(KEYS); const f = mockFetch(CATALOGUE);
+  const r = await lookup(env, { brand: 'Chanel', itemId: 'A69900', name: 'Mini flap', price: 4950, currency: 'GBP' }, { fetchImpl: f });
+  assert.equal(r.candidates[0].onOfficialSite, true);
+  assert.equal(r.candidates[0].matchType, 'id');
+  assert.equal(r.candidates[0].itemId, 'A69900');
+  assert.equal(r.candidates[0].price, 4950);
+  assert.equal(r.candidates[0].officialName, 'Classic Flap Mini Bag');
+  assert.equal(r.flag, null);
+  assert.ok(isExactOfficialIdPriceMatch({ brand: 'Chanel', itemId: 'A69900', price: 4950, currency: 'GBP' }, r.candidates[0]));
+  assert.ok((r.mismatches || []).some(m => m.field === 'name' && m.receiptValue === 'Mini flap' && m.officialValue === 'Classic Flap Mini Bag'));
+});
+
+test('P5: official price unavailable is still Amber and is not treated as an exact price match', async () => {
+  const env = makeEnv(KEYS);
+  const f = mockFetch([{
+    brand: 'Chanel', officialName: 'Classic Flap Mini Bag', itemId: 'A69900', price: null,
+    url: 'https://www.chanel.com/fashion/p/A69900/',
+    title: 'Classic Flap Mini Bag | Chanel', description: 'A69900 official page.',
+  }], { brave: 0, gemini: 0 }, {
+    geminiCandidates: [{ brand: 'Chanel', officialName: 'Classic Flap Mini Bag', itemId: 'A69900', price: null, sourceUrls: ['https://www.chanel.com/fashion/p/A69900/'] }],
+  });
+  const r = await lookup(env, { brand: 'Chanel', itemId: 'A69900', name: 'Classic Flap Mini Bag', price: 4950, currency: 'GBP' }, { fetchImpl: f });
+  assert.equal(r.flag, '#FDE68A');
+  assert.equal(r.flagReason, 'official price unavailable');
+  assert.equal(r.candidates[0].price, null);
+  assert.equal(isExactOfficialIdPriceMatch({ brand: 'Chanel', itemId: 'A69900', price: 4950, currency: 'GBP' }, r.candidates[0]), false);
+});
+
+test('P6: chanel.com blocked falls back to chanel.cn/gb with the exact source note', async () => {
+  const env = makeEnv(KEYS);
+  const f = mockFetch([{
+    brand: 'Chanel', officialName: 'Classic Flap Mini Bag', itemId: 'A69900', price: 4950, currency: 'GBP',
+    url: 'https://www.chanel.cn/gb/fashion/p/A69900/',
+    title: 'Classic Flap Mini Bag | Chanel',
+    description: 'A69900 £4,950.00',
+  }], { brave: 0, gemini: 0 }, { blockChanelPrimary: true });
+  const r = await lookup(env, { brand: 'Chanel', itemId: 'A69900', name: 'Classic Flap Mini Bag', price: 4950, currency: 'GBP' }, { fetchImpl: f });
+  assert.ok(f.calls.brave >= 2 && f.calls.gemini >= 2, 'primary then fallback');
+  assert.equal(r.candidates[0].onOfficialSite, true);
+  assert.equal(r.candidates[0].price, 4950);
+  assert.equal(r.sourceNote, CHANEL_FALLBACK_NOTE);
+  assert.equal(r.candidates[0].sourceNote, CHANEL_FALLBACK_NOTE);
+  assert.ok((r.mismatches || []).some(m => m.field === 'source' && m.reason === CHANEL_FALLBACK_NOTE));
+  assert.equal(CHANEL_FALLBACK_NOTE, 'chanel.com blocked; confirmed on chanel.cn/gb');
+  // Any fallback-path result stays Amber. GBP is present, so do not append the unconfirmed-price clause.
+  assert.equal(r.flag, '#FDE68A');
+  assert.equal(r.sourceNote, 'chanel.com blocked; confirmed on chanel.cn/gb');
+  assert.ok(!String(r.sourceNote).includes('GBP price cannot be confirmed'));
+});
+
+test('P6: a successful chanel.com answer does not add the blocked fallback note', async () => {
+  const env = makeEnv(KEYS); const f = mockFetch(CATALOGUE);
+  const r = await lookup(env, { brand: 'Chanel', itemId: 'A69900', price: 4950, currency: 'GBP' }, { fetchImpl: f });
+  assert.equal(r.sourceNote, undefined);
+  assert.ok(!(r.mismatches || []).some(m => m.field === 'source'));
+  assert.ok(r.candidates[0].sourceUrls.some(u => /chanel\.com/.test(u)));
+  assert.equal(r.flag, null); // P5 applies on a primary chanel.com hit
+});
+
+test('P6: a non-GBP Chanel mirror price is not used for price matching or price-fallback', async () => {
+  const env = makeEnv(KEYS);
+  const cn = {
+    brand: 'Chanel', officialName: 'Classic Flap Mini Bag', itemId: 'A69900', price: 49500, currency: 'CNY',
+    url: 'https://www.chanel.cn/fashion/p/A69900/',
+    title: 'Classic Flap Mini Bag | Chanel',
+    description: 'A69900 ¥49,500',
+  };
+  const f = mockFetch([cn], { brave: 0, gemini: 0 }, { blockChanelPrimary: true });
+  const r = await lookup(env, { brand: 'Chanel', itemId: 'A69900', name: 'Classic Flap Mini Bag', price: 4950, currency: 'GBP' }, { fetchImpl: f });
+  assert.equal(r.candidates[0].onOfficialSite, true);
+  assert.equal(r.candidates[0].price, null);
+  assert.equal(r.candidates[0].nonGbpMirrorPrice, true);
+  assert.equal(r.candidates[0].publishedPrice, 49500);
+  assert.equal(r.candidates[0].publishedCurrency, 'CNY');
+  assert.ok(!r.candidates[0].matchedFields.includes('price'));
+  assert.equal(r.flag, '#FDE68A');
+  assert.equal(r.flagReason, 'official price unavailable');
+  assert.equal(r.sourceNote, CHANEL_FALLBACK_NOTE + '; GBP price cannot be confirmed on the fallback path');
+
+  const env2 = makeEnv(KEYS);
+  const onlyCny = {
+    brand: 'Chanel', officialName: 'Other bag', itemId: 'OTHER99', price: 4950, currency: 'CNY',
+    url: 'https://www.chanel.cn/fashion/p/OTHER99/',
+    title: 'Other bag | Chanel', description: 'OTHER99 ¥4,950',
+  };
+  const f2 = mockFetch([onlyCny], { brave: 0, gemini: 0 }, { blockChanelPrimary: true });
+  const fb = await lookup(env2, { brand: 'Chanel', itemId: 'NOMATCH', price: 4950, currency: 'GBP' }, { fetchImpl: f2 });
+  assert.ok(!(fb.candidates || []).some(c => c.matchType === 'price-fallback' && c.currency === 'CNY'));
+  assert.ok(!(fb.candidates || []).some(c => c.price === 4950 && c.currency === 'CNY'));
 });

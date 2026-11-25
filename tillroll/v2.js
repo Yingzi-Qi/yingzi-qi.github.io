@@ -35,7 +35,7 @@ function unlock() {
 // ---- Receipts -> sanity-run payload ----------------------------------------
 const UK_POSTCODE = /\b([A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2})\b/i;
 const PHONE = /(?:\+44\s?|\b0)\d{2,4}[\s-]?\d{3,4}[\s-]?\d{3,4}\b/;
-// Provisional fallback only; the Receipt Reader owns storeClues (binding Reader contract).
+// Client-side storeClues fallback only; the Receipt Reader owns storeClues (binding Reader contract).
 function deriveStoreClues(ocr) {
   const lines = (ocr?.lines || []).map(l => l.text).filter(Boolean);
   if (!lines.length) return null;
@@ -60,6 +60,7 @@ export function receiptsFromBatch(batch) {
       for (const k of keys) { if (!flagsByLine.has(k)) flagsByLine.set(k, new Set()); flagsByLine.get(k).add(hit[1]); }
     }
     return {
+      id: r.id,
       receiptKey: r.hash ? 'sha:' + r.hash.slice(0, 16) : undefined, sha256: r.hash, filename: r.filename,
       merchant: d.merchant, receiptReference: d.receiptReference, orderNumber: d.orderNumber, orderId: d.orderId,
       date: d.date, time: d.time, payment: d.payment, currency: d.currency, discount: d.discount,
@@ -69,18 +70,71 @@ export function receiptsFromBatch(batch) {
   });
 }
 
+// Optional per-receipt "needs checking" selection. An empty selection means the whole batch.
+const needsChecking = new Set();
+export function receiptSelectId(r) { return r?.id; }
+export function getNeedsChecking() { return new Set(needsChecking); }
+export function setNeedsChecking(id, on) { if (on) needsChecking.add(id); else needsChecking.delete(id); }
+export function clearNeedsChecking() { needsChecking.clear(); }
+
+export function buildSanityPayload(batch, selectedIds = needsChecking) {
+  const all = receiptsFromBatch(batch);
+  const ids = selectedIds instanceof Set ? selectedIds : new Set(selectedIds || []);
+  const usedSelection = ids.size > 0;
+  const receipts = usedSelection ? all.filter(r => ids.has(receiptSelectId(r))) : all;
+  const scope = usedSelection ? 'selected' : 'batch';
+  const label = usedSelection
+    ? `${receipts.length} selected receipt${receipts.length === 1 ? '' : 's'} marked as needing checking`
+    : `the whole batch (${all.length} receipt${all.length === 1 ? '' : 's'})`;
+  return { receipts, scope, label, selectedCount: usedSelection ? receipts.length : 0, batchCount: all.length };
+}
+
+export function readingNetworkPolicy(mode, apiKey) {
+  // Upload/read must never start /api/sanity-run or /api/lookup. /api/ocr only when
+  // Settings > reader is "Tillroll server" (apiKey __server__); default reader is local.
+  const server = mode === 'server' && String(apiKey || '').trim() === '__server__';
+  return { mayCallOcr: server, mayCallSanityRun: false, mayCallLookup: false };
+}
+
+const RUN_HINT_IDLE = 'Upload and read at least one receipt, then run sanity checks.';
+const RUN_HINT_READY = "Start the bots' review and show only the final agreed version";
+
+export function syncRunButton(batch = window.tillrollV2Hooks?.getBatch?.() || []) {
+  const btn = $('#v2-run');
+  const bar = $('#v2-select-bar');
+  const ready = receiptsFromBatch(batch).length > 0;
+  if (btn) {
+    btn.disabled = !ready;
+    btn.title = ready ? RUN_HINT_READY : RUN_HINT_IDLE;
+  }
+  if (bar) bar.hidden = !ready;
+  const all = $('#v2-check-all');
+  if (all) {
+    const ids = receiptsFromBatch(batch).map(receiptSelectId).filter(id => id != null);
+    all.checked = ids.length > 0 && ids.every(id => needsChecking.has(id));
+    all.indeterminate = needsChecking.size > 0 && !all.checked;
+  }
+}
+
+export function receiptCheckHtml(r) {
+  if (r.state !== 'done' || r.duplicateOf) return '';
+  const on = needsChecking.has(r.id);
+  return `<label class="v2-needs-check v2-only"><input type="checkbox" class="v2-check-receipt" value="${r.id}" ${on ? 'checked' : ''}> Needs checking</label>`;
+}
+
 // ---- Run sanity checks ------------------------------------------------------
 async function runSanity() {
   const batch = window.tillrollV2Hooks?.getBatch?.() || [];
-  const receipts = receiptsFromBatch(batch);
+  const payload = buildSanityPayload(batch);
+  const receipts = payload.receipts;
   if (!receipts.length) { note('Upload and read receipts first, then run sanity checks.'); return; }
   const btn = $('#v2-run'); btn.disabled = true;
   const panel = $('#v2-panel'); panel.hidden = false;
-  panel.innerHTML = '<p class="v2-status" role="status">The bots are reviewing your receipts. Only the final agreed version will appear here.</p>';
+  panel.innerHTML = `<p class="v2-status" role="status">The bots are reviewing ${esc(payload.label)}. Only the final agreed version will appear here.</p>`;
   try {
     lastBatchId = 'b_' + Date.now().toString(36);
     await api('/api/batches', { method: 'POST', body: JSON.stringify({ batchId: lastBatchId, files: receipts.filter(r => r.sha256).map(r => ({ sha256: r.sha256, filename: r.filename })) }) }).catch(() => null);
-    const res = await api('/api/sanity-run', { method: 'POST', body: JSON.stringify({ batchId: lastBatchId, receipts, mode: 'round1' }) });
+    const res = await api('/api/sanity-run', { method: 'POST', body: JSON.stringify({ batchId: lastBatchId, receipts, mode: 'round1', selection: payload.scope }) });
     const start = await res.json();
     if (!res.ok) throw new Error(start.error || `Sanity run could not start (${res.status}).`);
     let wait = start.pollAfterMs || 1500, out;
@@ -173,14 +227,38 @@ async function openHistory() {
   list.innerHTML = data.entries.length ? '<ul class="v2-list">' + data.entries.map(e => `<li><span><b>${esc(e.kind)}</b> · ${esc(e.summary)}<br><small>${esc(new Date(e.created_at).toLocaleString('en-GB', { timeZone: 'Europe/London' }))}${e.batch_id ? ' · ' + esc(e.batch_id) : ''}</small></span></li>`).join('') + '</ul>' : '<p>No history yet.</p>';
 }
 
+function onCheckChange(e) {
+  const t = e.target;
+  if (t?.id === 'v2-check-all') {
+    const batch = window.tillrollV2Hooks?.getBatch?.() || [];
+    for (const r of receiptsFromBatch(batch)) setNeedsChecking(receiptSelectId(r), t.checked);
+    window.tillrollV2Hooks?.render?.();
+    syncRunButton();
+    return;
+  }
+  if (t?.classList?.contains('v2-check-receipt')) {
+    setNeedsChecking(Number(t.value) || t.value, t.checked);
+    syncRunButton();
+  }
+}
+
 function init() {
   $('#v2-run')?.addEventListener('click', runSanity);
   $('#v2-workbooks')?.addEventListener('click', openWorkbooks);
   $('#v2-history')?.addEventListener('click', openHistory);
+  document.addEventListener('change', onCheckChange);
   for (const b of document.querySelectorAll('[data-v2-close]')) b.onclick = () => document.getElementById(b.dataset.v2Close).close();
   const p = new URLSearchParams(location.search).get('drive');
   if (p === 'connected') note('Google Drive connected.'); else if (p === 'denied') note('Google Drive was not connected.');
+  window.tillrollV2Hooks = {
+    ...(window.tillrollV2Hooks || {}),
+    afterRender: syncRunButton,
+    receiptCheckHtml,
+    syncRunButton,
+  };
+  syncRunButton();
   refreshQuota(); refreshDrive();
 }
-if (location.protocol.startsWith('http') && !location.hostname.endsWith('github.io')) init();
-else document.documentElement.classList.add('v2-static'); // GitHub Pages mirror: no backend
+const hasDom = typeof document !== 'undefined' && typeof location !== 'undefined';
+if (hasDom && location.protocol.startsWith('http') && !location.hostname.endsWith('github.io')) init();
+else if (hasDom) document.documentElement.classList.add('v2-static'); // GitHub Pages mirror: no backend

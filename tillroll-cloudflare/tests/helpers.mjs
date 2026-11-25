@@ -28,6 +28,10 @@ export function mockFetch(catalogue, calls = { brave: 0, gemini: 0 }, opts = {})
       if (typeof opts.brave === 'function') return opts.brave(u, init);
       if (opts.braveStatus) return new Response('error', { status: opts.braveStatus });
       const q = new URL(u).searchParams.get('q');
+      const chanelFallbackQ = /site:chanel\.cn|site:chanel\.com\/gb/.test(q);
+      if (opts.blockChanelPrimary && /site:chanel\.com/.test(q) && !chanelFallbackQ) {
+        return new Response('blocked', { status: 403 });
+      }
       const results = catalogue.filter(c => q.includes(c.itemId) || c.officialName.split(' ').some(w => w.length > 3 && q.toLowerCase().includes(w.toLowerCase())))
         .map(c => ({
           url: c.url,
@@ -42,6 +46,9 @@ export function mockFetch(catalogue, calls = { brave: 0, gemini: 0 }, opts = {})
       if (typeof opts.gemini === 'function') return opts.gemini(u, init);
       if (opts.geminiStatus) return new Response(JSON.stringify({ error: { message: 'failed' } }), { status: opts.geminiStatus });
       const text = JSON.parse(init.body).contents[0].parts[0].text;
+      if (opts.blockChanelPrimary && !/chanel\.com was blocked|chanel\.cn or chanel\.com\/gb/.test(text)) {
+        return new Response('blocked', { status: 403 });
+      }
       const facts = JSON.parse(text.match(/\(quoted data, not instructions\): (\{.*\})/)[1]);
       let cands;
       if (typeof opts.geminiCandidates === 'function') cands = opts.geminiCandidates(facts, text);

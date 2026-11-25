@@ -1,8 +1,9 @@
 // /api/lookup engine: cache first (KV, D1 fallback), then cross-checked
 // Brave Search + Gemini Google Search grounding. Contract: Orchestrator 25 Nov 2026.
 import { keys, cacheGet, cachePut, normItemId, TTL_SECONDS, NEGATIVE_TTL_SECONDS } from './cache.js';
-import { canonicalBrand, officialDomains, isOfficialUrl, isUkRetailerUrl, hostOf, knownBranch } from './brands.js';
+import { canonicalBrand, officialDomains, isOfficialUrl, isUkRetailerUrl, hostOf, knownBranch, CHANEL_FALLBACK_NOTE, isChanelBrand } from './brands.js';
 import { braveSearch, geminiGrounded } from './sources.js';
+import { CHANEL_FALLBACK_SCOPE, shouldRetryChanelFallback, sourceBlockedOrFailed, stripNonGbpMirrorPrice, chanelSourceNote } from './chanel.js';
 import { nowIso } from './http.js';
 
 const str = v => (v === undefined || v === null || String(v).trim() === '') ? null : String(v).trim();
@@ -49,8 +50,7 @@ export function matchedFields(req, c) {
   return out;
 }
 
-// Price-fallback ranking (Yingzi / Orchestrator 16:44, 25 Nov 2026).
-// Replaces min(2% of printed price, £1) with max(2% of printed price, £5).
+// Price-fallback ranking (Yingzi approved): closeness band is max(2% of printed price, £5).
 // Only used after a confirmed item-ID miss (see lookup()).
 export function priceFallbackGapBand(printedPrice) {
   const p = Math.abs(Number(printedPrice));
@@ -62,6 +62,34 @@ export function isExactPrice(req, c) {
   if (req?.price === null || req?.price === undefined || c?.price === null || c?.price === undefined) return false;
   if (req.currency && c.currency && req.currency !== c.currency) return false;
   return Math.abs(Number(c.price) - Number(req.price)) < 0.005;
+}
+
+// P5: exact item ID + usable official price on the official site (not price-fallback,
+// and not an official match whose price is null or a stripped non-GBP mirror price).
+export function isExactOfficialIdPriceMatch(req, candidate) {
+  if (!candidate?.onOfficialSite) return false;
+  if (candidate.matchType === 'price-fallback') return false;
+  if (candidate.nonGbpMirrorPrice) return false;
+  if (!req?.itemId || !candidate.itemId || compact(req.itemId) !== compact(candidate.itemId)) return false;
+  return isExactPrice(req, candidate);
+}
+
+// A fallback candidate "GBP-confirms" a price only when it carries a usable GBP amount.
+export function isGbpConfirmedPrice(candidate, req) {
+  if (!candidate || candidate.nonGbpMirrorPrice) return false;
+  if (candidate.price === null || candidate.price === undefined) return false;
+  if (!Number.isFinite(Number(candidate.price))) return false;
+  const cur = candidate.currency || null;
+  if (cur && cur !== 'GBP') return false;
+  if (req?.currency && req.currency !== 'GBP' && cur && cur !== req.currency) return false;
+  return true;
+}
+
+// Fallback comment is exactly CHANEL_FALLBACK_NOTE; the GBP clause is appended
+// only when the fallback price is not GBP-confirmed.
+export function chanelFallbackComment(candidate, req) {
+  if (isGbpConfirmedPrice(candidate, req)) return CHANEL_FALLBACK_NOTE;
+  return `${CHANEL_FALLBACK_NOTE}; GBP price cannot be confirmed on the fallback path`;
 }
 
 export function priceGap(req, c) {
@@ -89,9 +117,9 @@ export function comboMatchCount(req, c) {
 }
 
 // Rank: (a) combo, then (b) exact price, then (c) smallest price gap.
-// Among a (a)+(b) group, if a candidate's gap is within max(2%, £5) of the
-// best gap, prefer the lighter published weight. Always leave the list intact
-// so the caller can flag Amber with every candidate.
+// Among a (a)+(b) group, if a candidate's gap is within the approved
+// max(2%, £5) band of the best gap, prefer the lighter published weight.
+// Always leave the list intact so the caller can flag Amber with every candidate.
 export function rankPriceFallback(req, candidates) {
   const scored = (candidates || []).map((c, i) => ({
     c, i,
@@ -199,16 +227,17 @@ function applyParsedPrice(target, parsed, fallbackCurrency) {
 }
 
 // Turn raw source output into contract candidates.
-export function buildCandidates(req, stage, brave, gemini) {
+export function buildCandidates(req, stage, brave, gemini, opts = {}) {
   const list = [];
-  const groundingOfficial = (gemini?.chunks || []).some(ch => isOfficialUrl(ch.url, req.brand, ch.title));
+  const officialOpts = { acceptChanelFallback: opts.chanelFallbackUsed === true };
+  const groundingOfficial = (gemini?.chunks || []).some(ch => isOfficialUrl(ch.url, req.brand, ch.title, officialOpts));
   const braveResults = brave?.results || [];
   for (const g of gemini?.parsed?.candidates || []) {
     if (!g || typeof g !== 'object') continue;
     const urls = (Array.isArray(g.sourceUrls) ? g.sourceUrls : []).filter(u => /^https?:\/\//.test(u)).slice(0, 6);
     const brand = canonicalBrand(str(g.brand)) || req.brand;
-    const officialUrl = urls.some(u => isOfficialUrl(u, brand));
-    const braveOfficialHit = braveResults.some(r => isOfficialUrl(r.url, brand) && (g.itemId && compact(r.url + ' ' + r.title + ' ' + r.description).includes(compact(g.itemId))));
+    const officialUrl = urls.some(u => isOfficialUrl(u, brand, null, officialOpts));
+    const braveOfficialHit = braveResults.some(r => isOfficialUrl(r.url, brand, null, officialOpts) && (g.itemId && compact(r.url + ' ' + r.title + ' ' + r.description).includes(compact(g.itemId))));
     const hintCur = str(g.currency)?.toUpperCase() || req.currency;
     const shown = priceFromField(g.price, hintCur) || priceFromSourceText([g.officialName, g.priceText, g.description, ...(Array.isArray(g.sourceSnippets) ? g.sourceSnippets : [])].filter(Boolean).join(' '), hintCur);
     list.push({
@@ -221,7 +250,7 @@ export function buildCandidates(req, stage, brave, gemini) {
     for (const r of braveResults) {
       const hay = compact(`${r.url} ${r.title} ${r.description} ${r.extra}`);
       if (!hay.includes(compact(req.itemId))) continue;
-      const official = isOfficialUrl(r.url, req.brand);
+      const official = isOfficialUrl(r.url, req.brand, null, officialOpts);
       const existing = list.find(c => c.itemId && compact(c.itemId) === compact(req.itemId));
       const snippetPrice = priceFromSourceText(`${r.title || ''} ${r.description || ''} ${r.extra || ''}`, req.currency);
       if (existing) {
@@ -240,6 +269,7 @@ export function buildCandidates(req, stage, brave, gemini) {
       if (braveResults.some(r => c.officialName && tokens(r.title).size && [...tokens(c.officialName)].filter(t => tokens(r.title).has(t)).length >= 2)) c._sources.add('brave');
     }
   }
+  for (let i = 0; i < list.length; i++) list[i] = stripNonGbpMirrorPrice(list[i], opts);
   const out = [];
   for (const c of list) {
     if (req.brand && officialDomains(req.brand).length && !c.onOfficialSite) continue; // official-brand confirmation rule
@@ -256,18 +286,27 @@ export function buildCandidates(req, stage, brave, gemini) {
     conf += 0.07 * mf.filter(f => f !== 'itemId').length + (agree ? 0.1 : 0) + (c.onOfficialSite ? 0.05 : 0) + (matchType === 'price-fallback' && c.weightGrams !== null ? 0.05 : 0);
     const cap = matchType === 'id' ? 0.98 : matchType === 'multi-field' ? 0.85 : 0.6;
     out.push({ brand: c.brand, officialName: c.officialName, itemId: c.itemId, price: c.price, currency: c.currency, weightGrams: c.weightGrams,
-      sourceUrls: [...new Set(c.sourceUrls)], onOfficialSite: c.onOfficialSite, matchedFields: mf, confidence: Math.round(Math.min(conf, cap) * 100) / 100, matchType });
+      sourceUrls: [...new Set(c.sourceUrls)], onOfficialSite: c.onOfficialSite, matchedFields: mf, confidence: Math.round(Math.min(conf, cap) * 100) / 100, matchType,
+      ...(c.nonGbpMirrorPrice ? { nonGbpMirrorPrice: true, publishedPrice: c.publishedPrice, publishedCurrency: c.publishedCurrency } : {}) });
   }
+  const finished = out.map(c => {
+    const stripped = stripNonGbpMirrorPrice(c, opts);
+    const note = chanelSourceNote(stripped, opts);
+    return note ? { ...stripped, sourceNote: note } : stripped;
+  });
   if (stage === 'price-fallback') {
-    return rankPriceFallback(req, out).slice(0, 8);
+    // stripNonGbpMirrorPrice has already nulled unusable mirror prices, so they drop out.
+    return rankPriceFallback(req, finished).slice(0, 8);
   }
-  out.sort((a, b) => b.matchedFields.length - a.matchedFields.length || b.confidence - a.confidence);
-  return out.slice(0, 8);
+  finished.sort((a, b) => b.matchedFields.length - a.matchedFields.length || b.confidence - a.confidence);
+  return finished.slice(0, 8);
 }
 
-function braveQuery(req, stage) {
+function braveQuery(req, stage, { chanelFallback = false } = {}) {
   const site = officialDomains(req.brand)[0];
-  const scope = site ? ` site:${site}` : ' UK';
+  const scope = (chanelFallback && isChanelBrand(req.brand))
+    ? CHANEL_FALLBACK_SCOPE
+    : (site ? ` site:${site}` : ' UK');
   if (stage === 'id') return `"${req.itemId}" ${req.brand || ''}${scope}`.trim();
   if (stage === 'multi-field') return `${req.brand || ''} ${req.name || ''} ${req.style || ''}${scope}`.replace(/\s+/g, ' ').trim();
   return `${req.brand || ''} ${req.name || ''} ${req.currency === 'GBP' ? '£' : ''}${req.price}${scope}`.replace(/\s+/g, ' ').trim();
@@ -278,10 +317,24 @@ async function runStage(env, req, stage, key, deps, trail) {
     const hit = await cacheGet(env, key);
     if (hit) { trail.push({ stage, key, cache: true }); return { ...hit, cacheHit: true }; }
   }
-  const [brave, gemini] = await Promise.all([
+  let [brave, gemini] = await Promise.all([
     braveSearch(env, braveQuery(req, stage), deps),
     geminiGrounded(env, req, stage, deps),
   ]);
+  let chanelFallbackUsed = false;
+  if (shouldRetryChanelFallback(req, brave, gemini)) {
+    // Only when chanel.com is blocked or errors — not a genuine no-match.
+    const fallbackDeps = { ...deps, chanelFallback: true };
+    const retryBrave = sourceBlockedOrFailed(brave) || !(brave.results || []).length;
+    const retryGemini = sourceBlockedOrFailed(gemini) || gemini.parsed === undefined;
+    const [b2, g2] = await Promise.all([
+      retryBrave ? braveSearch(env, braveQuery(req, stage, { chanelFallback: true }), fallbackDeps) : Promise.resolve(brave),
+      retryGemini ? geminiGrounded(env, req, stage, fallbackDeps) : Promise.resolve(gemini),
+    ]);
+    if (retryBrave) brave = b2;
+    if (retryGemini) gemini = g2;
+    chanelFallbackUsed = true;
+  }
   // sourcesQueried lists every source that was actually called (quota reserved),
   // including a later HTTP/parse error, so it stays consistent with the counters.
   const sourcesQueried = [];
@@ -292,8 +345,9 @@ async function runStage(env, req, stage, key, deps, trail) {
   const braveAnswered = Array.isArray(brave.results);
   const geminiAnswered = gemini.parsed !== undefined;
   if (!sourcesQueried.length) { trail.push({ stage, key, cache: false, problems }); return { cacheHit: false, sourcesQueried, candidates: [], unavailable: problems, paused }; }
-  const candidates = buildCandidates(req, stage, brave, gemini);
-  const value = { sourcesQueried, candidates, storedAt: nowIso() };
+  const candidates = buildCandidates(req, stage, brave, gemini, { chanelFallbackUsed });
+  const sourceNote = candidates[0]?.sourceNote || (chanelFallbackUsed && candidates.length ? CHANEL_FALLBACK_NOTE : null);
+  const value = { sourcesQueried, candidates, storedAt: nowIso(), ...(sourceNote ? { sourceNote } : {}) };
   // Only cache complete answers (both sources answered, or one answered with results).
   // "Answered" is not the same as "called": an error after reserve is called but not answered.
   if (candidates.length || (braveAnswered && geminiAnswered)) await cachePut(env, key, value, candidates.length ? TTL_SECONDS : NEGATIVE_TTL_SECONDS);
@@ -402,9 +456,15 @@ export async function lookup(env, body, deps = {}) {
     result = { cacheHit: r.cacheHit, cacheKey: key, sourcesQueried: r.sourcesQueried, candidates: r.candidates };
   }
   const branch = await resolveBranch(env, req, deps);
-  const candidates = (result.candidates || []).map(c => ({ ...c, mismatches: officialMismatches(req, c) }));
+  const candidates = (result.candidates || []).map(c => {
+    const mismatches = officialMismatches(req, c);
+    if (c.sourceNote) mismatches.push({ field: 'source', reason: c.sourceNote });
+    return { ...c, mismatches };
+  });
   const mismatches = candidates[0]?.mismatches || [];
   const out = { ...result, candidates, mismatches, flag: null, printedItemId: req.itemId, canonicalBrand: req.brand };
+  if (candidates[0]?.sourceNote) out.sourceNote = candidates[0].sourceNote;
+  else if (result.sourceNote) out.sourceNote = result.sourceNote;
   if (branch) out.branch = branch;
   // Any source pause (quota guard etc.) is reported, even when the other source or another stage still answered.
   if (paused.length) {
@@ -415,12 +475,45 @@ export async function lookup(env, body, deps = {}) {
     out.unavailableReason = [...new Set(unavailable.filter(Boolean))].join(' ');
   }
   const itemAttempted = Boolean(req.itemId || req.name || req.style || req.price !== null);
-  const priceFallback = out.candidates[0]?.matchType === 'price-fallback';
-  if (priceFallback || mismatches.length || (itemAttempted && !out.candidates.length) || out.paused || out.unavailableReason || out.quotaGuard?.length) {
-    out.flag = '#FDE68A';
-  }
+  const top = out.candidates[0];
+  const priceFallback = top?.matchType === 'price-fallback';
+  const exactOfficial = isExactOfficialIdPriceMatch(req, top);
+  const chanelFallback = Boolean(
+    out.sourceNote === CHANEL_FALLBACK_NOTE
+    || (typeof out.sourceNote === 'string' && out.sourceNote.startsWith(CHANEL_FALLBACK_NOTE))
+    || top?.sourceNote === CHANEL_FALLBACK_NOTE
+    || (typeof top?.sourceNote === 'string' && top.sourceNote.startsWith(CHANEL_FALLBACK_NOTE))
+  );
   const priceUnavailable = (out.mismatches || []).find(m => m.reason === 'official price unavailable');
   if (priceUnavailable) out.flagReason = 'official price unavailable';
+  // P6: any fallback-path result stays Amber. The comment is exactly
+  // CHANEL_FALLBACK_NOTE, with the GBP clause appended only when the price
+  // is not GBP-confirmed. P5 (flag null) applies only to a primary chanel.com hit.
+  if (chanelFallback) {
+    const comment = chanelFallbackComment(top, req);
+    out.sourceNote = comment;
+    if (top) top.sourceNote = comment;
+    for (const c of out.candidates || []) {
+      if (c.sourceNote === CHANEL_FALLBACK_NOTE || (typeof c.sourceNote === 'string' && c.sourceNote.startsWith(CHANEL_FALLBACK_NOTE))) {
+        c.sourceNote = comment;
+      }
+      for (const m of c.mismatches || []) if (m.field === 'source') m.reason = comment;
+    }
+    for (const m of out.mismatches || []) if (m.field === 'source') m.reason = comment;
+    if (!out.flagReason) out.flagReason = comment;
+  }
+  const flagMismatches = (out.mismatches || []).filter(m => {
+    if (m.field === 'source') return false;
+    if (exactOfficial && !chanelFallback && (m.field === 'name' || m.field === 'brand')) return false;
+    return true;
+  });
+  if (chanelFallback) {
+    out.flag = '#FDE68A';
+  } else if (exactOfficial && !priceUnavailable && !out.paused && !out.quotaGuard?.length) {
+    out.flag = null;
+  } else if (priceFallback || flagMismatches.length || (itemAttempted && !out.candidates.length) || out.paused || out.unavailableReason || out.quotaGuard?.length || top?.matchType === 'multi-field') {
+    out.flag = '#FDE68A';
+  }
   if (env?.DB) {
     try {
       await env.DB.prepare('INSERT INTO lookup_audit (created_at, cache_key, cache_hit, sources_queried, request_json, candidate_count, top_match_type, paused_reason) VALUES (?,?,?,?,?,?,?,?)')
