@@ -2,6 +2,7 @@ import {orderNeedsReview} from './orders.js?v=lineverify1';
 import {reviewForLine} from './checks.js?v=productcodes3';
 import {validateOrderPatterns} from './retail-rules.js?v=6';
 import {parsePrintedItemId} from './product-code.js?v=productcodes3';
+import {maskCardField} from './item-identifiers.js';
 import * as zipPackage from './export-vendor/jszip.min.js';
 
 const JSZip = zipPackage.default ?? globalThis.JSZip;
@@ -74,6 +75,12 @@ function baselineParts(baseline) {
 const esc = value => String(value ?? '').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]/g,'')
   .replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
 const colName = n => n > 26 ? colName(Math.floor((n-1)/26)) + colName((n-1)%26+1) : String.fromCharCode(64+n);
+function withoutCardDigits(value) {
+  return String(value ?? '').replace(/\d[\d\s-]{11,}\d/g, ' ').replace(/\s+/g, ' ').trim();
+}
+function safeCardValue(value) {
+  return String(maskCardField(value) ?? '').replace(/\d/g, '');
+}
 function exportData(receipts,includeRefresh=false) {
   const includeOrders = receipts.some(r => r.orders?.length);
   const columns = [...receiptColumns,...(includeOrders ? orderColumns : []),...verificationColumns];
@@ -112,7 +119,9 @@ function exportData(receipts,includeRefresh=false) {
         let value = sources[source]?.[key] ?? '';
         const numeric = type && value !== '' && Number.isFinite(Number(value));
         value = numeric ? Number(value) : String(value);
-      if (baseline && (source==='receipt' || source==='line')) {
+        if (key==='card') value = safeCardValue(value);
+        else if (key==='payment' && !numeric) value = withoutCardDigits(value);
+        if (baseline && (source==='receipt' || source==='line')) {
           const saved=numeric ? value : value.slice(0,32767).replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]/g,'');
           baseline[source][key]=saved==='' ? null : saved;
         }
@@ -239,7 +248,9 @@ function chinaExportData(receipts) {
         let value='';
         if(scope==='receipt') value=key==='purchaseTime' ? purchaseTimeValue(r.data) : (key==='orderNumber' ? receiptId : r.data[key]??'');
         else if(scope==='line') value=line[key]??'';
-        else if(scope==='derived' && key==='saleAmount') value=saleAmountValue(line);
+        if(key==='payment') value=withoutCardDigits(value);
+        if(key==='card') value=safeCardValue(value);
+        if(scope==='derived' && key==='saleAmount') value=saleAmountValue(line);
         const numeric=type && value!=='' && Number.isFinite(Number(value));
         return {value:numeric?Number(value):String(value),numeric,style:type==='money'?3:0};
       });

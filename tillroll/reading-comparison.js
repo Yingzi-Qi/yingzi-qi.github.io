@@ -1,10 +1,10 @@
-const receiptFields=['merchant','date','time','orderId','orderNumber','receiptReference','currency','payment','card','total','subtotal','discount','tax'];
-const productFields=['brand','item','itemId','sku','qty','unitPrice','amount','colour','size','lineDiscount'];
+const receiptFields=['merchant','date','time','orderId','orderNumber','receiptReference','currency','payment','card','total','subtotal','discount','receiptDiscount','tax'];
+const productFields=['brand','item','itemId','sku','qty','unitPrice','amount','colour','size','lineDiscount','lineDiscountLabel'];
 const labels={merchant:'Retailer',date:'Purchase date',time:'Time',orderId:'Order ID',orderNumber:'Order number',
   receiptReference:'Receipt reference',currency:'Currency',payment:'Payment',card:'Card ending',total:'Receipt total',
-  subtotal:'Subtotal',discount:'Discount',tax:'Tax',brand:'Brand',item:'Item name',itemId:'Item ID',sku:'Style / SKU',qty:'Quantity',
-  unitPrice:'Unit price',amount:'Line amount',colour:'Colour',size:'Size',lineDiscount:'Line discount'};
-const numeric=new Set(['qty','unitPrice','amount','lineDiscount','total','subtotal','discount','tax']);
+  subtotal:'Subtotal',discount:'Discount',receiptDiscount:'Receipt discount',tax:'Tax',brand:'Brand',item:'Item name',itemId:'Item ID',sku:'Style / SKU',qty:'Quantity',
+  unitPrice:'Unit price',amount:'Line amount',colour:'Colour',size:'Size',lineDiscount:'Line discount',lineDiscountLabel:'Discount label'};
+const numeric=new Set(['qty','unitPrice','amount','lineDiscount','receiptDiscount','total','subtotal','discount','tax']);
 const present=value=>value!=null && String(value).trim()!=='';
 const normal=value=>String(value??'').normalize('NFKC').trim().toLowerCase().replace(/\s+/g,' ');
 function same(key,a,b) {
@@ -77,11 +77,31 @@ function rowSummary(rows) {
   return display+(rows.length>4?'…':'');
 }
 
+function oneDigitApart(a, b) {
+  const left=String(a).trim().toUpperCase(), right=String(b).trim().toUpperCase();
+  if (!left || left.length!==right.length || left===right) return false;
+  let diffs=0;
+  for (let i=0;i<left.length;i++) if (left[i]!==right[i]) {
+    if (!/\d/.test(left[i]+right[i])) return false;
+    diffs++;
+  }
+  return diffs===1;
+}
 export function mergeReadings(first,second,photo) {
   const data={...first,model:second.model??first.model,cost:second.cost??first.cost,
     items:(first.items||[]).map(row=>({...row})),fieldIssues:[...(first.fieldIssues||[])]};
   const conflicts=[];
-  compareFields(first,second,receiptFields,'',conflicts,data,'The second reading',photo);
+  let fields=receiptFields;
+  if (present(first.receiptReference) && present(second.receiptReference) && !same('receiptReference',first.receiptReference,second.receiptReference) && oneDigitApart(first.receiptReference,second.receiptReference)) {
+    const firstConfidence=Number(first.readConfidence?.receiptReference);
+    const secondConfidence=Number(second.readConfidence?.receiptReference);
+    const preferSecond=Number.isFinite(secondConfidence) && (!Number.isFinite(firstConfidence) || secondConfidence>firstConfidence);
+    data.receiptReference=preferSecond ? second.receiptReference : first.receiptReference;
+    data.readConfidence={...(data.readConfidence||{}), receiptReference: preferSecond ? secondConfidence : (Number.isFinite(firstConfidence) ? firstConfidence : 0)};
+    data.fieldIssues.push({field:'receiptReference', reason:'receipt_id_pass_conflict', evidence:first.receiptReference+' / '+second.receiptReference});
+    fields=receiptFields.filter(key=>key!=='receiptReference');
+  }
+  compareFields(first,second,fields,'',conflicts,data,'The second reading',photo);
   data.dateIssue=[...new Set([first.dateIssue,second.dateIssue].filter(Boolean))].join(' ') || null;
   const other=second.items||[], pairs=pairRows(data.items,other);
   const witnesses=uniquePrintedRows(other,photo?.items||[]);
