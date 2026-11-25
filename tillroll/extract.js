@@ -3,7 +3,7 @@ import {inspectReference} from './reference.js?v=6';
 import {isGtin,isPrintedItemNumber,parsePrintedItemId,printedBarcodeDetail,barcodesBelowNames} from './product-code.js?v=productcodes3';
 import {readPurchaseDate} from './purchase-date.js?v=8';
 import {comparePhotoFields,mergeReadings} from './reading-comparison.js?v=discounts1';
-import {readPurchaseTime,normalizePurchaseTime,readTender,normalizeTender,toPaymentMethod,dropCardDigits,brandItemIdCandidate,readPrintedStyleRef,readStoreClues,mergeStoreClues,storeReceiptId,cleanProductCode,applyZeroPriceExclusion,isUkPurchase} from './receipt-rules.js?v=1';
+import {readPurchaseTime,normalizePurchaseTime,readTender,normalizeTender,toPaymentMethod,dropCardDigits,brandItemIdCandidate,readPrintedStyleRef,readStoreClues,mergeStoreClues,storeReceiptId,cleanProductCode,applyZeroPriceExclusion,isUkPurchase,confusableDigitAlternative} from './receipt-rules.js?v=1';
 import {sortItemFields} from './field-sorter.js';
 import {applyItemIdentifiers, isUntrustedReceiptText, maskCardField, cardScheme} from './item-identifiers.js';
 // OCR assets resolve on this site. Receipt images remain in the tab unless the
@@ -138,6 +138,13 @@ function findMerchant(lines, text) {
   for (const name of retailers) { const seen = text.match(name); if (seen) return seen[0]; }
   const top=lines.slice(0,4).map(line=>line.text.trim()).find(line=>/\bN\.?\s*PEAL\b/i.test(line) && /\/|\blondon\b/i.test(line));
   if(top) return 'N.Peal';
+  const city=/^(?:london|paris|manchester|edinburgh|glasgow|dublin|birmingham|bristol|leeds|liverpool|cambridge|oxford|chelsea|mayfair|knightsbridge|westminster|soho|england|scotland|wales|great britain|united kingdom)$/i;
+  const addressLike=value=>/^\d|\b(?:street|st\.?|road|rd\.?|avenue|ave\.?|lane|ln\.?|square|place|drive|terrace|gardens|wharf|broadway|floor|level|unit|suite)\b/i.test(value);
+  for (const line of lines.slice(0, 6)) {
+    const parts = line.text.split(/\s*\/\s*/);
+    const brand = parts[0].trim();
+    if (parts.length === 2 && city.test(parts[1].trim()) && /\p{L}{2}/u.test(brand) && !addressLike(brand)) return brand;
+  }
   const header=[];
   for(const line of lines.slice(0,8)) {
     if(/\breceipt\b|\bsale transaction\b|\b(?:sub)?total\b|\d[.,]\d{2}\b/i.test(line.text))break;
@@ -473,6 +480,13 @@ function itemsFromLines(lines, trace, receiptTotal=null) {
         items.at(-1).itemId=printedId;
         if(trace)trace.at(-1).idLine=i;
       }
+      continue;
+    }
+    const sizeToken=/^(?:(?:xxs|xs|s|m|l|xl|xxl|xxxl|os)(?:\s*\/\s*(?:xxs|xs|s|m|l|xl|xxl|xxxl))*|(?:eu|uk|us|it|fr|de|jp|cn)\s*-?\s*\d{1,3}(?:\.\d)?|\d{1,3}\.\d)$/i.test(text);
+    const bareStyle=/^(?:[A-Za-z]{1,6}-?\d{2,}[A-Za-z0-9]*)$/.test(text) && !/^NT/i.test(text) && !sizeToken;
+    if(bareStyle && items.length && i-lastProduct>0 && i-lastProduct<=3){
+      const row=items.at(-1);
+      if(!row.styleRef) row.styleRef=text;
       continue;
     }
     const printedStyle=readPrintedStyleRef(text);
@@ -929,6 +943,7 @@ export function extractLocal(ocr) {
   const reference=inspectReference(result,ocr);
   if (reference.status==='found' && !result[reference.kind] && !(storeId && reference.kind==='receiptReference'))
     result[reference.kind]=reference.value;
+  Object.assign(result, attachConfusableReceiptAlternative(result));
   result.imageQuality=ocr.confidence<.65?'poor':'unknown';
   result.model='On-device OCR'; result.cost=0;
   return applyItemIdentifiers(applyZeroPriceExclusion(normalizeReading(result),ocr), ocr);
@@ -945,6 +960,13 @@ export function applyStoreReceiptId(data, ocr) {
   } else next.receiptReference=null;
   return next;
 }
+function attachConfusableReceiptAlternative(receipt) {
+  const confusable=confusableDigitAlternative(receipt?.receiptReference);
+  if(!confusable) return receipt;
+  const list=receipt.receiptReferenceAlternatives||[];
+  if(list.includes(confusable)) return receipt;
+  return {...receipt, receiptReferenceAlternatives:[...list, confusable]};
+}
 export function prepareModelReading(data, ocr) {
   let out=data ? {...data} : {};
   if(ocr?.lines?.length){
@@ -953,7 +975,7 @@ export function prepareModelReading(data, ocr) {
     out=applyZeroPriceExclusion(out, ocr);
     out=applyItemIdentifiers(out, ocr);
   }
-  return out;
+  return attachConfusableReceiptAlternative(out);
 }
 
 // Shared clean-up for every reader (on-device OCR and Gemini): 24-hour HH:MM:SS time,
