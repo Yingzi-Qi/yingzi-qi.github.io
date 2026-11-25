@@ -505,6 +505,12 @@ test('brand item id: style ref, then brand code, then EAN; never a store code', 
   assert.equal(bare.data.items[0].brandItemId, 'AB4401');
   assert.equal(bare.data.items[0].brandItemIdCandidate.source, 'styleRef');
 });
+test('a standalone size line is not a style code', () => {
+  for (const size of ['EU36', 'UK10', 'IT38', 'S', 'M', 'L', 'S/M/L', '36.5']) {
+    const slip = read(['ATELIER', '12/11/2026 11:00', 'Wool coat 40.00', size, 'TOTAL 40.00']);
+    assert.equal(slip.data.items[0].styleRef ?? null, null);
+  }
+});
 test('field sorter: Dior description, brand-only line, Gucci style and a bad price', () => {
   const knit = read(['HARRODS', '12/11/2026 14:03 NT04567-111222',
     '2469 9999991234 Christian Dior £1,234.00', 'Product Info: 3610000000012 NAVY CREW 38', 'TOTAL GBP 1234.00']);

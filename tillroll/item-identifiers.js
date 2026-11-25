@@ -267,7 +267,7 @@ export function maskCardField(value) {
   return /\d/.test(String(value)) ? '[card]' : String(value);
 }
 
-// Attach identifiers without changing 品牌货号 or brandItemIdCandidate.
+// Attach identifiers, then refresh 品牌货号 from the style, brand code, or EAN stored on the row.
 export function applyItemIdentifiers(data, ocr) {
   const source = data ? {...data} : {};
   const lines = ocr?.lines || [];
