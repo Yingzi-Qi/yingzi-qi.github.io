@@ -7,6 +7,7 @@ import {
   nonItemName, readStoreClues, mergeStoreClues, storeReceiptId, confirmedStoreReceiptId, classifyZeroPrice, applyZeroPriceExclusion,
 } from '../receipt-rules.js';
 import {extractLocal, cleanReceipt, geminiSchema, geminiPrompt, prepareModelReading, reconcileReadings} from '../extract.js';
+import {inspectReference} from '../reference.js';
 import {sortItemFields} from '../field-sorter.js';
 import {identifierClasses} from '../item-identifiers.js';
 import {checkReceipt, flagCategory, verifyImportedItemIds} from '../checks.js';
@@ -566,6 +567,14 @@ test('residuals: noisy total, footer lines, zeros, phones, missing items and a b
   assert.equal(shop.data.items.length, 1);
   assert.equal(shop.data.items[0].qty, 1);
   assert.equal(shop.data.total, 40);
+});
+test('an unlabelled hex token is not a receipt reference', () => {
+  const ocr = makeOcr(['ATELIER', '12/11/2026 11:00', 'Wool hat 25.00', 'TOTAL 25.00', 'ab12cd34']);
+  const ref = inspectReference({merchant: 'Atelier', items: [{item: 'Wool hat', amount: 25}]}, ocr);
+  assert.equal(ref.value, null);
+  assert.equal((ref.candidates || []).some(entry => entry.value === 'ab12cd34'), false);
+  const labelled = read(['ATELIER', '12/11/2026 11:00', 'Wool hat 25.00', 'Receipt # AB12345', 'TOTAL 25.00']);
+  assert.equal(labelled.data.receiptReference, 'AB12345');
 });
 test('identifiers: labels, priority, masks, count and untrusted text', () => {
   assert.equal(new Set(identifierClasses).size, identifierClasses.length);
