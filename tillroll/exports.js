@@ -206,7 +206,9 @@ const aliases = {
   unit_price:['unitprice','priceperitem','priceperunit','unitamount'],
   amount:['amount','lineamount','linetotal','itemamount','extendedamount'],
   total:['purchasetotal','purchaseamount','receipttotal','ordertotal','totalpaid','amountpaid'],
-  currency:['currency','currencycode'], order_id_pattern:['orderidpattern','orderidformat'],
+  currency:['currency','currencycode'], weight:['weight','weightg','grams','grammes'],
+  store_address:['storeaddress','branchaddress','address','location'], official_name:['officialname','officialitemname'],
+  order_id_pattern:['orderidpattern','orderidformat'],
   order_number_pattern:['ordernumberpattern','ordernumberformat']
 };
 const keys = new Map(Object.entries(aliases).flatMap(([key,names])=>names.map(name=>[name,key])));
