@@ -1,0 +1,26 @@
+# Tillroll v2 — Cloudflare Pages (free tier only). No paid add-ons.
+name = "tillroll-v2"
+pages_build_output_dir = "../tillroll"
+compatibility_date = "2026-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "tillroll-v2-db"
+database_id = "0dc9556b-4d50-41e2-a004-554b083cec81"
+migrations_dir = "migrations"
+
+[[kv_namespaces]]
+binding = "LOOKUP_CACHE"
+id = "50b5636d24974dcfa8da87711f0359de"
+
+[vars]
+# Quota guards (strictly below the free allowances agreed by Orchestrator 25 Nov 2026)
+BRAVE_MONTHLY_LIMIT = "950"          # Brave free allowance ~1,000/month
+GEMINI_GROUNDING_MONTHLY_LIMIT = "4800"  # < 5,000/month
+GEMINI_GROUNDING_DAILY_LIMIT = "1450"    # < 1,500/day
+GEMINI_OCR_DAILY_LIMIT = "400"
+KV_WRITE_SOFT_LIMIT = "900"          # fall back to D1 cache near 1,000 KV writes/day
+GEMINI_LOOKUP_MODEL = "gemini-2.5-flash"
+# Secrets (set with `wrangler pages secret put`, never in this file):
+#   GEMINI_API_KEY, BRAVE_API_KEY, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, SESSION_SECRET
