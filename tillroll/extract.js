@@ -5,6 +5,7 @@ import {readPurchaseDate} from './purchase-date.js?v=8';
 import {comparePhotoFields,mergeReadings} from './reading-comparison.js?v=discounts1';
 import {readPurchaseTime,normalizePurchaseTime,readTender,normalizeTender,toPaymentMethod,dropCardDigits,brandItemIdCandidate,readPrintedStyleRef,readStoreClues,mergeStoreClues,storeReceiptId,cleanProductCode,applyZeroPriceExclusion} from './receipt-rules.js?v=1';
 import {sortItemFields} from './field-sorter.js';
+import {applyItemIdentifiers, isUntrustedReceiptText, maskCardField} from './item-identifiers.js';
 // OCR assets resolve on this site. Receipt images remain in the tab unless the
 // caller explicitly starts the optional Gemini reader using a supplied API key.
 const asset = name => new URL(`./ocr/${name}`, import.meta.url).href;
@@ -115,9 +116,9 @@ function amounts(text) {
   });
 }
 const roundMoney = value => Math.round(value * 100) / 100;
-const itemShape = () => ({ brand:null, brandRaw:null, item:null, itemId:null, sku:null, colour:null, size:null, qty:null, unitPrice:null, amount:null, lineDiscount:null, lineDiscountLabel:null, lineDiscounts:null, concessionCode:null, internalCode:null, ean:null, styleRef:null, brandItemId:null, brandItemIdCandidate:null });
+const itemShape = () => ({ brand:null, brandRaw:null, item:null, itemId:null, sku:null, colour:null, size:null, qty:null, unitPrice:null, amount:null, lineDiscount:null, lineDiscountLabel:null, lineDiscounts:null, concessionCode:null, internalCode:null, ean:null, styleRef:null, brandItemId:null, brandItemIdCandidate:null, identifiers:[], primaryItemId:null, primaryItemIdReason:null });
 const receiptShape = () => ({ merchant:null, date:null, time:null, orderNumber:null, orderId:null, receiptReference:null,
-  total:null, subtotal:null, discount:null, receiptDiscount:null, receiptDiscounts:[], tax:null, currency:null, payment:null, card:null,
+  total:null, subtotal:null, discount:null, receiptDiscount:null, receiptDiscounts:[], tax:null, currency:null, payment:null, card:null, identifiers:[], itemCountCheck:null,
   storeClues:{addressLines:[],postcode:null,storeNumber:null,phone:null},
   items:[], excludedZeroItems:[], fieldIssues:[], imageQuality:'unknown' });
 
@@ -411,6 +412,7 @@ function itemsFromLines(lines, trace, receiptTotal=null) {
     if(used.has(i))continue;
     if(skipCashier){skipCashier=false;continue;}
     if(/you have been served today by/i.test(text)){skipCashier=true;continue;}
+    if(isUntrustedReceiptText(text))continue;
     const productInfo=/^product\s+info\s*:\s*(\d{13})(?:\s+(.+))?$/i.exec(text);
     if(productInfo){
       if(items.length && i-lastProduct<=3){
@@ -833,7 +835,7 @@ export function extractLocal(ocr) {
     result[reference.kind]=reference.value;
   result.imageQuality=ocr.confidence<.65?'poor':'unknown';
   result.model='On-device OCR'; result.cost=0;
-  return applyZeroPriceExclusion(normalizeReading(result),ocr);
+  return applyItemIdentifiers(applyZeroPriceExclusion(normalizeReading(result),ocr), ocr);
 }
 // The store rule owns 采购小票id for Harrods and Selfridges, including a Gemini reading.
 export function applyStoreReceiptId(data, ocr) {
@@ -852,6 +854,7 @@ export function prepareModelReading(data, ocr) {
     out.storeClues=mergeStoreClues(out.storeClues, readStoreClues(ocr.lines, out.merchant));
     out=applyStoreReceiptId(out, ocr);
     out=applyZeroPriceExclusion(out, ocr);
+    out=applyItemIdentifiers(out, ocr);
   }
   return out;
 }
@@ -882,6 +885,7 @@ export function normalizeReading(data) {
     out.paymentMethod=null;
     issue('payment','payment_method','No payment tender was read.');
   }
+  if(out.card) out.card=maskCardField(out.card);
   const context={card:out.card,phone:out.storeClues?.phone,date:out.date};
   const harrodsMerchant=/harrods/i.test(out.merchant||'');
   out.items=(out.items||[]).map((item,i)=>{
