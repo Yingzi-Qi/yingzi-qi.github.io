@@ -70,13 +70,13 @@ test('look-ups enrich rows (Amber) without overwriting printed prices or item ID
   const [chanel, vca, gucci, dior] = result.agreedRows;
   assert.equal(result.excludedZeroCount, 1);
   assert.equal(chanel.cells['采购时间'], '2026-11-20 15:15:00');
-  assert.equal(chanel.cells['采购商品方法'], 'Visa');
+  assert.equal(chanel.cells['采购商品方法'], 'Card');
   assert.equal(chanel.cells['供应商'], 'Selfridges');
   assert.equal(chanel.flags['供应商'], undefined);
   assert.equal(chanel.exportMeta.officialBranch, 'Selfridges London Oxford Street');
   assert.equal(chanel.cells['品牌'], 'Chanel'); assert.equal(chanel.flags['品牌'], AMBER);
   assert.equal(chanel.cells['品牌货号'], 'A69900');
-  assert.equal(chanel.cells['品名'], 'Classic Flap Mini Bag'); assert.equal(chanel.flags['品名'], AMBER);
+  assert.equal(chanel.cells['品名'], 'Classic Flap Mini Bag'); assert.equal(chanel.flags['品名'], undefined);
   assert.equal(chanel.cells['销售金额'], 4356);
   assert.equal(vca.cells['品牌'], 'Van Cleef & Arpels');
   assert.equal(vca.cells['品牌货号'], '0012345');

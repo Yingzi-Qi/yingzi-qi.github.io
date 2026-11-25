@@ -38,13 +38,58 @@ export function stripBrandFromItemId(itemId, brand) {
   }
   return out.trim() || id;
 }
-const TENDERS = [[/apple\s*pay/i, 'Apple Pay'], [/google\s*pay/i, 'Google Pay'], [/ali\s*pay/i, 'Alipay'], [/we\s*chat/i, 'WeChat'], [/amex|american express/i, 'Amex'],
-  [/master\s*card|mastercard/i, 'Mastercard'], [/maestro/i, 'Maestro'], [/visa/i, 'Visa'], [/union\s*pay/i, 'UnionPay'], [/cash/i, 'Cash'], [/carte\s*(bleue|bancaire)|card|debit|credit/i, null]];
+// P4 (approved 25 Nov 17:45): the cell must be one of these four. Card schemes
+// (Visa, Mastercard, Amex, Maestro, debit, credit) collapse to Card. Anything
+// else, including Cash, Apple Pay and an empty tender, is kept and flagged Pink.
+export const ALLOWED_TENDERS = ['UnionPay', 'Card', 'Alipay', 'WeChat'];
+export const TENDER_REASON = 'Payment method must be UnionPay, Card, Alipay or WeChat.';
+const CHANEL_BLOCKED_COMMENT = 'chanel.com blocked; confirmed on chanel.cn/gb';
 export function normaliseTender(p) {
   const s = str(p);
   if (!s) return null;
-  for (const [re, name] of TENDERS) if (re.test(s)) return name || s;
+  if (/union\s*pay/i.test(s)) return 'UnionPay';
+  if (/ali\s*pay/i.test(s)) return 'Alipay';
+  if (/we\s*chat|wechat/i.test(s)) return 'WeChat';
+  if (/\b(visa|mastercard|master\s*card|maestro|amex|american express|debit|credit|card)\b/i.test(s)) return 'Card';
   return s;
+}
+function itemIdKind(id) {
+  const s = String(id ?? '').replace(/[\s-]/g, '');
+  if (!s) return 'empty';
+  if (/^9999999\d*$/.test(s)) return 'concession';
+  if (/^\d{8}$|^\d{12}$|^\d{13}$|^\d{14}$/.test(s)) return 'ean';
+  return 'style';
+}
+function idsMatch(a, b) {
+  const n = v => String(v ?? '').replace(/[\s-]/g, '').toUpperCase();
+  return Boolean(n(a)) && n(a) === n(b);
+}
+function exactIdAndPrice(top, row) {
+  const price = row.cells['采购商品原价'];
+  if (top?.matchType !== 'id' || typeof price !== 'number' || top.price == null) return false;
+  if (top.currency && row.raw?.currency && top.currency !== row.raw.currency) return false;
+  return Math.abs(Number(top.price) - price) < 0.009;
+}
+function touchCell(row, col) {
+  if (!row._lookupTouched) row._lookupTouched = new Set();
+  row._lookupTouched.add(col);
+}
+function appendComment(row, col, text) {
+  if (!text) return;
+  if (!row._comments) row._comments = {};
+  const cur = row._comments[col];
+  if (!cur) row._comments[col] = text;
+  else if (!cur.includes(text)) row._comments[col] = `${cur}; ${text}`;
+}
+function chanelFallbackComment(urls) {
+  const parsed = [];
+  for (const u of urls || []) { try { parsed.push(new URL(u)); } catch { /* not a URL */ } }
+  if (!parsed.length) return null;
+  const host = u => u.hostname.replace(/^www\./i, '').toLowerCase();
+  const cnOrGb = u => host(u) === 'chanel.cn' || host(u).endsWith('.chanel.cn') || (host(u) === 'chanel.com' && u.pathname.toLowerCase().startsWith('/gb'));
+  const otherChanel = u => host(u) === 'chanel.com' && !u.pathname.toLowerCase().startsWith('/gb');
+  if (!parsed.some(cnOrGb) || parsed.some(otherChanel)) return null;
+  return CHANEL_BLOCKED_COMMENT;
 }
 
 function addFlag(row, col, colour, reason, extra = {}) {
@@ -95,7 +140,10 @@ function readerStage(receipt, rIndex, state) {
     if (!receiptId) addFlag(row, '采购小票id', PINK, /selfridges/i.test(merchant || '') ? 'Selfridges receipt number (below the barcode) not read.' : /harrods/i.test(merchant || '') ? 'Harrods receipt number (right of date/time) not read.' : 'Receipt ID not read.');
     if (!ts) addFlag(row, '采购时间', PINK, 'Date/time missing or not a valid date.');
     if (!merchant) addFlag(row, '供应商', PINK, 'Supplier not read.');
-    if (!tender) addFlag(row, '采购商品方法', PINK, 'Payment tender not read.');
+    if (!tender || !ALLOWED_TENDERS.includes(tender)) {
+      addFlag(row, '采购商品方法', PINK, TENDER_REASON);
+      row._comments['采购商品方法'] = TENDER_REASON;
+    }
     if (!row.cells['品名'] || JUNK_NAME.test(row.cells['品名'])) addFlag(row, '品名', PINK, `Item name "${row.cells['品名'] ?? ''}" failed the column sanity check.`);
     const idp = itemIdProblem(row.cells['品牌货号']);
     if (idp) addFlag(row, '品牌货号', PINK, `Item ID ${idp}.`);
@@ -181,18 +229,32 @@ async function verifierStage(rows, receipt, ctx) {
       }
       row.notes.push(top.weightGrams !== null ? `Closest-price fallback; lightest published weight ${top.weightGrams} g.` : 'Closest-price fallback.');
     }
-    // Printed receipt evidence wins on prices and item IDs; look-ups fill names/brands.
+    // P5: an exact item-id and price match writes the official 品名 with no fill.
+    // Amber is only for a partial match, a price-fallback, or no identified item.
+    // A Pink reading flag on any other cell is left in place. A lock is not overwritten.
+    const exact = exactIdAndPrice(top, row);
+    if (exact) row._exactIdPrice = true;
     if (!c['品牌'] && top.brand && !ctx.locked(row.rowId, '品牌')) {
       noteMismatch(row, '品牌', c['品牌'], top.brand, 'official');
       c['品牌'] = top.brand;
       lookupFlag(row, '品牌', AMBER, 'Brand recovered by look-up.', { confidence: top.confidence, sourceUrls: top.sourceUrls });
     }
-    if (top.officialName && top.officialName !== c['品名'] && !ctx.locked(row.rowId, '品名')) {
-      noteMismatch(row, '品名', c['品名'], top.officialName, 'official');
-      row.previousName = c['品名']; c['品名'] = top.officialName;
-      lookupFlag(row, '品名', AMBER, `Official name from look-up (${top.matchType}).`, { confidence: top.confidence, sourceUrls: top.sourceUrls });
-    } else if (!ctx.locked(row.rowId, '品名')) lookupFlag(row, '品名', AMBER, `Confirmed by look-up (${top.matchType}).`, { confidence: top.confidence, sourceUrls: top.sourceUrls });
-    // Price columns and 品牌货号 keep the receipt. A different official value is Amber, in a comment, and in the hidden column.
+    if (!ctx.locked(row.rowId, '品名') && row.flags['品名'] !== PINK) {
+      if (top.officialName && top.officialName !== c['品名']) {
+        noteMismatch(row, '品名', c['品名'], top.officialName, 'official');
+        row.previousName = c['品名'];
+        c['品名'] = top.officialName;
+      }
+      if (exact) {
+        touchCell(row, '品名');
+        if (row.flags['品名'] === AMBER) delete row.flags['品名'];
+      } else {
+        const why = top.matchType === 'price-fallback' ? 'Price-fallback look-up.'
+          : top.matchType === 'id' ? 'Item id matched but the price does not match the official site exactly.'
+          : `Partial or unidentified look-up (${top.matchType}).`;
+        lookupFlag(row, '品名', AMBER, why, { confidence: top.confidence, sourceUrls: top.sourceUrls, ...(row._candidates ? { candidates: row._candidates } : {}) });
+      }
+    }
     if (top.price !== null && top.price !== undefined && typeof c['采购商品原价'] === 'number' && Math.abs(Number(top.price) - c['采购商品原价']) > 0.009) {
       for (const col of ['采购商品原价', '采购商品金额']) {
         if (ctx.locked(row.rowId, col)) continue;
@@ -200,13 +262,31 @@ async function verifierStage(rows, receipt, ctx) {
         lookupFlag(row, col, AMBER, `Official price ${top.price} differs from the receipt. Receipt value kept.`, { sourceUrls: top.sourceUrls });
       }
     }
-    if (top.itemId && c['品牌货号'] && String(top.itemId) !== String(c['品牌货号']) && !ctx.locked(row.rowId, '品牌货号')) {
-      noteMismatch(row, '品牌货号', c['品牌货号'], top.itemId, 'receipt');
-      lookupFlag(row, '品牌货号', AMBER, `Official item id ${top.itemId} differs from the receipt. Receipt value kept.`, { sourceUrls: top.sourceUrls });
+    // P1: the cell is the brand's own item id. Prefer a style reference over an EAN
+    // or a 9999999 concession code. If that is all we have, keep it and flag Amber.
+    if (!ctx.locked(row.rowId, '品牌货号') && row.flags['品牌货号'] !== PINK) {
+      const printed = c['品牌货号'];
+      const printedKind = itemIdKind(printed);
+      const styleId = [top.itemId, row.raw.style].find(id => itemIdKind(id) === 'style');
+      if ((printedKind === 'ean' || printedKind === 'concession') && styleId) {
+        noteMismatch(row, '品牌货号', printed, styleId, 'official');
+        c['品牌货号'] = styleId;
+        lookupFlag(row, '品牌货号', AMBER, 'Style reference used instead of an EAN or concession code.', { sourceUrls: top.sourceUrls });
+      } else if (printedKind === 'ean' || printedKind === 'concession') {
+        const other = top.itemId && !idsMatch(top.itemId, printed) ? top.itemId : null;
+        if (other) noteMismatch(row, '品牌货号', printed, other, 'receipt');
+        else appendComment(row, '品牌货号', printedKind === 'ean' ? 'Only an EAN is available; the brand item id was not found.' : 'Only a concession code is available; the brand item id was not found.');
+        if (!row._alternates['品牌货号']) row._alternates['品牌货号'] = { receipt: printed, official: other, shown: 'receipt' };
+        lookupFlag(row, '品牌货号', AMBER, row._comments['品牌货号'], { sourceUrls: top.sourceUrls });
+      } else if (top.itemId && printed && !idsMatch(top.itemId, printed)) {
+        // A guessed price-fallback id stays in the comment; the printed code stays in the cell.
+        noteMismatch(row, '品牌货号', printed, top.itemId, 'receipt');
+        lookupFlag(row, '品牌货号', AMBER, `Official item id ${top.itemId} differs from the receipt. Receipt value kept.`, { sourceUrls: top.sourceUrls });
+      }
     }
-    if (top.matchType === 'price-fallback') {
-      // Price-fallback values are always Amber. The candidate list is hidden metadata.
-      if (!ctx.locked(row.rowId, '品名')) lookupFlag(row, '品名', AMBER, 'Price-fallback look-up.', { candidates: row._candidates });
+    if (canonicalBrand(c['品牌']) === 'Chanel') {
+      const note = chanelFallbackComment(top.sourceUrls || []);
+      if (note) for (const col of ['品名', '品牌', '品牌货号']) if (c[col]) appendComment(row, col, note);
     }
     row._candidatePrice = top.price; row._candidateCurrency = top.currency;
   }
@@ -411,8 +491,11 @@ export async function runSanity(env, input, deps = {}) {
     // Cells the look-up changed in Round 2 are Amber, and never over a human lock.
     if (mode === 'round2') for (const col of round2Changed) {
       if (ctx.locked(row.rowId, col)) { delete row.flags[col]; continue; }
+      // P5: an exact item-id and price match leaves 品名 with no fill, even when the official name changed.
+      if (col === '品名' && row._exactIdPrice) continue;
       if (!row.flags[col]) { row.flags[col] = AMBER; row._lookup.push({ col, reason: 'Changed in Round 2.' }); }
     }
+    if (row._exactIdPrice && row.flags['品名'] === AMBER && !ctx.locked(row.rowId, '品名')) delete row.flags['品名'];
     if (mode === 'round2') restoreBaselineFlags(row, ctx);
     const flagReasons = {};
     for (const e of row._reading) if (row.flags[e.col]) flagReasons[e.col] = e.reason;

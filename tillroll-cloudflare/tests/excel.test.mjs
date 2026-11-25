@@ -152,7 +152,8 @@ test('workbook: 10 headers, time, sale amount, only two fills, hidden columns, n
   assert.equal(parsed.kind, 'v2');
   assert.deepEqual(parsed.rows[0].values && VISIBLE_COLUMNS.map(c => parsed.rows.find(r => r.rowId === chanel.rowId).values[c]),
     VISIBLE_COLUMNS.map(c => chanel.cells[c]));
-  assert.equal(parsed.rows.find(r => r.rowId === chanel.rowId).fills['品名'], AMBER);
+  assert.equal(parsed.rows.find(r => r.rowId === chanel.rowId).fills['品名'], undefined);
+  assert.equal(parsed.rows.find(r => r.rowId === chanel.rowId).fills['品牌'], AMBER);
   assert.equal(parsed.rows.find(r => r.rowId === vca.rowId).comments['采购商品原价']?.includes('3600'), true);
   assert.equal(STYLE.amber, 3);
   assert.equal(STYLE.pink, 5);
@@ -162,17 +163,18 @@ test('cleared Pink/Amber fill becomes a lock and is never re-flagged; edits are 
   const env = makeEnv(KEYS);
   const f = mockFetch(CATALOGUE);
   const base = { receiptKey: 'lock1', merchant: 'Harrods', receiptReference: null, date: '2026-11-21', time: '10:00', payment: 'Amex', currency: 'GBP' };
-  const r1 = await runSanity(env, { batchId: 'lock', mode: 'round1', receipts: [{ ...base, items: [{ brand: 'Chanel', item: 'mini', itemId: 'A69900', unitPrice: 4950, amount: 4950 }] }] }, { fetchImpl: f, lookup });
+  const r1 = await runSanity(env, { batchId: 'lock', mode: 'round1', receipts: [{ ...base, items: [{ brand: 'Chanel Accessory', item: 'mini', itemId: 'A69900', unitPrice: 4950, amount: 4950 }] }] }, { fetchImpl: f, lookup });
   const row = r1.result.agreedRows[0];
   assert.equal(row.flags['采购小票id'], PINK);
-  assert.equal(row.flags['品名'], AMBER);
+  assert.equal(row.flags['品牌'], AMBER);
+  assert.equal(row.flags['品名'], undefined);
   const blob = await buildV2XlsxBlob(r1.result, { exportKey: '00000000-0000-4000-8000-000000000002' });
   const { default: JSZip } = await import('../../tillroll/export-vendor/jszip.min.js');
   const zip = await JSZip.loadAsync(await blob.arrayBuffer());
   let xml = await zip.file('xl/worksheets/sheet1.xml').async('string');
   const pink = xml.match(/<c r="A2"[^>]*s="[56]"/);
-  const amber = xml.match(/<c r="E2"[^>]*s="[34]"/);
-  assert.ok(pink && amber, xml.slice(0, 500));
+  const amber = xml.match(/<c r="D2"[^>]*s="[34]"/);
+  assert.ok(pink && amber, xml.slice(0, 800));
   xml = xml.replace(pink[0], pink[0].replace(/s="[56]"/, 's="0"'));
   xml = xml.replace(amber[0], amber[0].replace(/s="[34]"/, 's="0"'));
   xml = xml.replace('Classic Flap Mini Bag', 'Classic Flap Mini Bag edited');
@@ -180,23 +182,23 @@ test('cleared Pink/Amber fill becomes a lock and is never re-flagged; edits are 
   const edited = await zip.generateAsync({ type: 'uint8array' });
   const planned = await readV2Workbook(edited);
   const item = planned.receipts[0].items[0];
-  assert.ok(item.clearedCols.includes('采购小票id') && item.clearedCols.includes('品名'));
+  assert.ok(item.clearedCols.includes('采购小票id') && item.clearedCols.includes('品牌'));
   assert.ok(item.editedCols.includes('品名'));
   assert.equal(item.previousItemId, null);
-  assert.deepEqual(planned.locks.map(l => l.col).sort(), ['品名', '采购小票id'].sort());
+  assert.deepEqual(planned.locks.map(l => l.col).sort(), ['品牌', '采购小票id'].sort());
   const t = new Date().toISOString();
   await env.DB.batch(planned.locks.map(l => env.DB.prepare('INSERT OR IGNORE INTO human_verified_unflagged (row_id, col_key, verified_at) VALUES (?,?,?)').bind(l.rowId, l.col, t)));
   const calls = f.calls.gemini;
   const r2 = await runSanity(env, { batchId: 'lock', mode: 'round2', receipts: planned.receipts }, { fetchImpl: f, lookup });
   const again = r2.result.agreedRows[0];
   assert.equal(again.flags['采购小票id'], undefined);
-  assert.equal(again.flags['品名'], undefined);
+  assert.equal(again.flags['品牌'], undefined);
   assert.equal(again.cells['品名'], 'Classic Flap Mini Bag edited');
   assert.ok(!again.round2Changed.includes('采购小票id'));
   assert.equal(f.calls.gemini, calls, 'verified brand, name and price with an unedited item id skip look-up');
-  const r3 = await runSanity(env, { batchId: 'lock', mode: 'round1', receipts: [{ ...base, items: [{ brand: 'Chanel', item: 'mini', itemId: 'A69900', unitPrice: 4950, amount: 4950 }] }] }, { fetchImpl: f, lookup });
+  const r3 = await runSanity(env, { batchId: 'lock', mode: 'round1', receipts: [{ ...base, items: [{ brand: 'Chanel Accessory', item: 'mini', itemId: 'A69900', unitPrice: 4950, amount: 4950 }] }] }, { fetchImpl: f, lookup });
   assert.equal(r3.result.agreedRows[0].flags['采购小票id'], undefined);
-  assert.equal(r3.result.agreedRows[0].flags['品名'], undefined);
+  assert.equal(r3.result.agreedRows[0].flags['品牌'], undefined);
 });
 
 test('edited 品牌货号 invalidates the 2dp price-fallback key and re-looks-up; paused stays Amber', async () => {
@@ -216,7 +218,7 @@ test('edited 品牌货号 invalidates the 2dp price-fallback key and re-looks-up
   assert.equal(r2.result.agreedRows[0].cells['品名'], 'GG Marmont mini bag');
   assert.equal(r2.result.agreedRows[0].lookup.matchType, 'id');
   assert.ok(r2.result.agreedRows[0].round2Changed.includes('品名'));
-  assert.equal(r2.result.agreedRows[0].flags['品名'], AMBER);
+  assert.equal(r2.result.agreedRows[0].flags['品名'], undefined);
   const pf = await env.LOOKUP_CACHE.get(keys.pf('Gucci', 'GBP', 1350));
   assert.equal(pf, null);
 
@@ -374,4 +376,122 @@ test('excluded zero sheet keeps 采购小票id and 采购时间 in Sheet 1 forma
   const zero2 = again.excludedZero.find(z => z.name === 'Paper bag');
   assert.equal(zero2.receiptId, 'SYN-ZERO-9');
   assert.equal(zero2.purchaseTime, '2026-06-15 19:05:00');
+});
+
+test('P4: 采购商品方法 is UnionPay, Card, Alipay or WeChat; anything else is Pink', async () => {
+  const env = makeEnv();
+  const base = { merchant: 'Synthetic Store', date: '2026-07-01', time: '10:00', currency: 'GBP', items: [{ brand: 'Synthetic', item: 'Pencil', itemId: 'SYN-P4', unitPrice: 4, amount: 4 }] };
+  const { result } = await runSanity(env, { batchId: 'p4', mode: 'round1', receipts: [
+    { ...base, receiptKey: 'p4-visa', receiptReference: 'P4-VISA', payment: 'Visa' },
+    { ...base, receiptKey: 'p4-ali', receiptReference: 'P4-ALI', payment: 'Alipay' },
+    { ...base, receiptKey: 'p4-wx', receiptReference: 'P4-WX', payment: 'WeChat Pay' },
+    { ...base, receiptKey: 'p4-up', receiptReference: 'P4-UP', payment: 'UnionPay' },
+    { ...base, receiptKey: 'p4-cash', receiptReference: 'P4-CASH', payment: 'Cash' },
+    { ...base, receiptKey: 'p4-empty', receiptReference: 'P4-EMPTY', payment: '' },
+  ] });
+  const byId = Object.fromEntries(result.agreedRows.map(r => [r.cells['采购小票id'], r]));
+  for (const [id, value] of [['P4-VISA', 'Card'], ['P4-ALI', 'Alipay'], ['P4-WX', 'WeChat'], ['P4-UP', 'UnionPay']]) {
+    assert.equal(byId[id].cells['采购商品方法'], value);
+    assert.equal(byId[id].flags['采购商品方法'], undefined);
+  }
+  assert.equal(byId['P4-CASH'].cells['采购商品方法'], 'Cash');
+  assert.equal(byId['P4-CASH'].flags['采购商品方法'], PINK);
+  assert.match(byId['P4-CASH'].flagReasons['采购商品方法'], /UnionPay, Card, Alipay or WeChat/);
+  assert.match(byId['P4-CASH'].exportMeta.comments['采购商品方法'], /UnionPay, Card, Alipay or WeChat/);
+  assert.equal(byId['P4-EMPTY'].cells['采购商品方法'], null);
+  assert.equal(byId['P4-EMPTY'].flags['采购商品方法'], PINK);
+});
+
+test('P5: exact item id and price leave 品名 unfilled; partial and fallback stay Amber', async () => {
+  const env = makeEnv();
+  await env.DB.prepare('INSERT INTO human_verified_unflagged (row_id, col_key, verified_at) VALUES (?,?,?)').bind('p5-lock', '品名', '2026-11-25T17:45:00.000Z').run();
+  const hit = (itemId, price, matchType, name) => ({
+    candidates: [{ brand: 'Synthetic', officialName: name, itemId, price, currency: 'GBP', matchType, confidence: 0.9, sourceUrls: ['https://synthetic.example/p'], matchedFields: ['itemId', 'price'], onOfficialSite: true, weightGrams: null }],
+    cacheHit: false, cacheKey: 'k', sourcesQueried: ['brave'], flag: '#FDE68A', printedItemId: itemId, canonicalBrand: 'Synthetic',
+  });
+  const lookup = async (_env, body) => {
+    if (body.supplier && !body.itemId) return { candidates: [], branch: null };
+    if (body.itemId === 'SYN-EXACT') return hit('SYN-EXACT', 100, 'id', 'Official Exact Coat');
+    if (body.itemId === 'SYN-PART') return hit('SYN-PART', 80, 'id', 'Official Partial Coat');
+    if (body.itemId === 'SYN-FB') return hit('SYN-OTHER', 50, 'price-fallback', 'Fallback Coat');
+    if (body.itemId === 'SYN-LOCK') return hit('SYN-LOCK', 100, 'id', 'Should Not Replace');
+    return { candidates: [], cacheHit: false, cacheKey: 'none', sourcesQueried: [] };
+  };
+  const { result } = await runSanity(env, { batchId: 'p5', mode: 'round1', receipts: [{
+    receiptKey: 'p5', merchant: 'Synthetic Store', receiptReference: 'P5-1', date: '2026-07-02', time: '11:00', payment: 'Card', currency: 'GBP',
+    items: [
+      { rowId: 'p5-exact', brand: 'Synthetic', item: 'Coat', itemId: 'SYN-EXACT', unitPrice: 100, amount: 100, readingFlags: ['采购小票id'] },
+      { rowId: 'p5-part', brand: 'Synthetic', item: 'Coat', itemId: 'SYN-PART', unitPrice: 100, amount: 100 },
+      { rowId: 'p5-fb', brand: 'Synthetic', item: 'Coat', itemId: 'SYN-FB', unitPrice: 50, amount: 50 },
+      { rowId: 'p5-lock', brand: 'Synthetic', item: 'Locked Name', itemId: 'SYN-LOCK', unitPrice: 100, amount: 100 },
+    ],
+  }] }, { lookup });
+  const exact = result.agreedRows.find(r => r.rowId === 'p5-exact');
+  const part = result.agreedRows.find(r => r.rowId === 'p5-part');
+  const fb = result.agreedRows.find(r => r.rowId === 'p5-fb');
+  const locked = result.agreedRows.find(r => r.rowId === 'p5-lock');
+  assert.equal(exact.cells['品名'], 'Official Exact Coat');
+  assert.equal(exact.flags['品名'], undefined);
+  assert.equal(exact.flags['采购小票id'], PINK);
+  assert.equal(part.flags['品名'], AMBER);
+  assert.equal(fb.flags['品名'], AMBER);
+  assert.equal(fb.lookup.matchType, 'price-fallback');
+  assert.equal(locked.cells['品名'], 'Locked Name');
+  assert.equal(locked.flags['品名'], undefined);
+});
+
+test('P1: 品牌货号 prefers a style reference over an EAN or concession code', async () => {
+  const env = makeEnv();
+  const lookup = async (_env, body) => {
+    if (body.itemId === '5012345678901') return { candidates: [{ brand: 'Synthetic', officialName: 'Style Bag', itemId: 'ST-88', price: 20, currency: 'GBP', matchType: 'multi-field', confidence: 0.7, sourceUrls: ['https://synthetic.example/st'], matchedFields: ['name'], onOfficialSite: true, weightGrams: null }], cacheHit: false, cacheKey: 'ean', sourcesQueried: ['brave'], printedItemId: body.itemId, canonicalBrand: 'Synthetic' };
+    if (body.itemId === '9999999001') return { candidates: [{ brand: 'Synthetic', officialName: 'Concession Scarf', itemId: '9999999001', price: 15, currency: 'GBP', matchType: 'price-fallback', confidence: 0.4, sourceUrls: ['https://synthetic.example/cc'], matchedFields: [], onOfficialSite: false, weightGrams: null }], cacheHit: false, cacheKey: 'cc', sourcesQueried: ['brave'], printedItemId: body.itemId, canonicalBrand: 'Synthetic' };
+    return { candidates: [], cacheHit: false, cacheKey: 'none', sourcesQueried: [] };
+  };
+  const { result } = await runSanity(env, { batchId: 'p1', mode: 'round1', receipts: [{
+    receiptKey: 'p1', merchant: 'Synthetic Store', receiptReference: 'P1-1', date: '2026-07-03', time: '12:00', payment: 'Card', currency: 'GBP',
+    items: [
+      { brand: 'Synthetic', item: 'Bag', itemId: '5012345678901', sku: 'ST-88', unitPrice: 20, amount: 20 },
+      { brand: 'Synthetic', item: 'Scarf', itemId: '9999999001', unitPrice: 15, amount: 15 },
+    ],
+  }] }, { lookup });
+  const ean = result.agreedRows.find(r => r.cells['品名'] === 'Style Bag');
+  const concession = result.agreedRows.find(r => r.cells['品名'] === 'Concession Scarf');
+  assert.equal(ean.cells['品牌货号'], 'ST-88');
+  assert.equal(ean.flags['品牌货号'], AMBER);
+  assert.match(ean.exportMeta.comments['品牌货号'], /5012345678901/);
+  assert.equal(ean.exportMeta.alternates['品牌货号'].official, 'ST-88');
+  assert.equal(ean.exportMeta.alternates['品牌货号'].receipt, '5012345678901');
+  assert.equal(concession.cells['品牌货号'], '9999999001');
+  assert.equal(concession.flags['品牌货号'], AMBER);
+  assert.match(concession.exportMeta.comments['品牌货号'], /concession code/i);
+  assert.equal(concession.exportMeta.alternates['品牌货号'].shown, 'receipt');
+});
+
+test("P6: Chanel confirmed only on chanel.cn or chanel.com/gb gets the blocked-site comment", async () => {
+  const env = makeEnv();
+  const row = (itemId, name, official, urls) => ({
+    candidates: [{ brand: 'Chanel', officialName: official, itemId, price: 10, currency: 'GBP', matchType: 'id', confidence: 0.95, sourceUrls: urls, matchedFields: ['itemId', 'price'], onOfficialSite: true, weightGrams: null }],
+    cacheHit: false, cacheKey: itemId, sourcesQueried: ['brave'], printedItemId: itemId, canonicalBrand: 'Chanel',
+  });
+  const lookup = async (_env, body) => {
+    if (body.itemId === 'CH-SAME') return row('CH-SAME', 'Coat', 'Coat', ['https://www.chanel.cn/zh/p/CH-SAME']);
+    if (body.itemId === 'CH-DIFF') return row('CH-DIFF', 'Coat', 'Classic Coat', ['https://www.chanel.com/gb/fashion/p/CH-DIFF']);
+    if (body.itemId === 'CH-FR') return row('CH-FR', 'Coat', 'Coat', ['https://www.chanel.com/fr/mode/p/CH-FR']);
+    return { candidates: [], cacheHit: false, cacheKey: 'none', sourcesQueried: [] };
+  };
+  const { result } = await runSanity(env, { batchId: 'p6', mode: 'round1', receipts: [{
+    receiptKey: 'p6', merchant: 'Synthetic Store', receiptReference: 'P6-1', date: '2026-07-04', time: '13:00', payment: 'Card', currency: 'GBP',
+    items: [
+      { brand: 'Chanel', item: 'Coat', itemId: 'CH-SAME', unitPrice: 10, amount: 10 },
+      { brand: 'Chanel', item: 'Short', itemId: 'CH-DIFF', unitPrice: 10, amount: 10 },
+      { brand: 'Chanel', item: 'Coat', itemId: 'CH-FR', unitPrice: 10, amount: 10 },
+    ],
+  }] }, { lookup });
+  const same = result.agreedRows.find(r => r.cells['品牌货号'] === 'CH-SAME');
+  const diff = result.agreedRows.find(r => r.cells['品牌货号'] === 'CH-DIFF');
+  const fr = result.agreedRows.find(r => r.cells['品牌货号'] === 'CH-FR');
+  assert.equal(same.exportMeta.comments['品名'], 'chanel.com blocked; confirmed on chanel.cn/gb');
+  assert.match(diff.exportMeta.comments['品名'], /Receipt printed: Short/);
+  assert.match(diff.exportMeta.comments['品名'], /chanel.com blocked; confirmed on chanel.cn\/gb/);
+  assert.equal(fr.exportMeta.comments['品名'], undefined);
 });
