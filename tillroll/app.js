@@ -36,9 +36,8 @@ const confidenceOptions = r=>({independentPhoto:r.origin==='ai'||r.origin==='sam
 const active = ()=>batch.filter(r=>r.state==='done' && !r.duplicateOf).sort(oldestPurchaseFirst);
 const notDone = r=>['queued','reading','checking','second'].includes(r.state);
 const isReview = r=>r.state==='error' || (!r.duplicateOf && r.data && (r.review.flags.some(x=>x.severity!=='info') || r.review.photo.some(x=>x.status==='Needs review') || r.orders?.some(orderNeedsReview) || r.verification?.some(hasVerificationMismatch)));
-function note(message){const n=$('#notice');clearTimeout(noticeTimer);n.hidden=!message;n.textContent=message;if(message)noticeTimer=setTimeout(()=>{n.hidden=true
-}
-function refreshHistoryView(){if(historyMode==='local')renderHistory();}
+function note(message){const n=$('#notice');clearTimeout(noticeTimer);n.hidden=!message;n.textContent=message;if(message)noticeTimer=setTimeout(()=>{n.hidden=true;},6500);}
+function historyRecordReading(r){try{recordReading(r);}catch{} }
 function importedPhotoChecks(r, fillMissing=false) {
   const passes=(r.itemIdReadings || []).map(ocr=>verifyImportedItemIds(r.data,ocr));
   if (!passes.length) return [];
