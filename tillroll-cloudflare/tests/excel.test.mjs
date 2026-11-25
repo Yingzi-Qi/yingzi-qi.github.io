@@ -814,15 +814,15 @@ test('short brand aliases pink only at the start or end, and not inside the look
 test('a gate Pink keeps the look-up Amber reason and candidates in the comment and hidden metadata', async () => {
   const env = makeEnv();
   const lookup = async () => ({
-    candidates: [{ brand: 'Dior', officialName: 'Dior Saddle', itemId: 'OFF-1', price: 10, currency: 'GBP', matchType: 'price-fallback', confidence: 0.4, sourceUrls: ['https://synthetic.example/dior'], matchedFields: [], onOfficialSite: false, weightGrams: 100 }],
+    candidates: [{ brand: 'Dior', officialName: null, itemId: 'OFF-1', price: 10, currency: 'GBP', matchType: 'price-fallback', confidence: 0.4, sourceUrls: ['https://synthetic.example/dior'], matchedFields: [], onOfficialSite: false, weightGrams: 100 }],
     cacheHit: false, cacheKey: 'both', sourcesQueried: ['brave'], printedItemId: 'SYN-BOTH', canonicalBrand: 'Dior',
   });
   const { result } = await runSanity(env, { batchId: 'both', mode: 'round1', receipts: [{
     receiptKey: 'both', merchant: 'Synthetic Store', receiptReference: 'BOTH-1', date: '2026-07-11', time: '12:00', payment: 'Card', currency: 'GBP',
-    items: [{ rowId: 'both-1', brand: 'Dior', item: 'Saddle', itemId: 'SYN-BOTH', unitPrice: 10, amount: 10 }],
+    items: [{ rowId: 'both-1', brand: 'Dior', item: 'Dior tote', itemId: 'SYN-BOTH', unitPrice: 10, amount: 10 }],
   }] }, { lookup });
   const row = result.agreedRows[0];
-  assert.equal(row.cells['品名'], 'Dior Saddle');
+  assert.equal(row.cells['品名'], 'Dior tote');
   assert.equal(row.flags['品名'], PINK);
   assert.match(row.flagReasons['品名'], /Name needs checking/);
   assert.match(row.flagReasons['品名'], /Price-fallback look-up/);
@@ -947,4 +947,67 @@ test('a receipt price within max(2% of price, £5) of the official price is not 
   assert.equal(by['tol-out5'].flags['采购商品原价'], AMBER);
   assert.equal(by['tol-in2'].flags['采购商品原价'], undefined);
   assert.equal(by['tol-out2'].flags['采购商品原价'], AMBER);
+});
+
+test('an official look-up name that contains the brand keeps its Amber and is not Name needs checking', async () => {
+  const env = makeEnv();
+  const rows = {
+    CIGALE: { brand: 'Dior', officialName: 'Mini Dior Cigale Bag, sand', price: 400 },
+    CH25BAG: { brand: 'Chanel', officialName: 'Chanel 25 mini handbag, grained calfskin & silver metal', price: 800 },
+  };
+  const lookup = async (_env, body) => {
+    const hit = rows[body.itemId];
+    if (!hit) return { candidates: [], cacheHit: false, cacheKey: 'none', sourcesQueried: [] };
+    return {
+      candidates: [{ brand: hit.brand, officialName: hit.officialName, itemId: body.itemId, price: hit.price, currency: 'GBP', matchType: 'id', confidence: 0.8, sourceUrls: ['https://synthetic.example/official'], matchedFields: ['itemId'], onOfficialSite: true, weightGrams: null }],
+      cacheHit: false, cacheKey: body.itemId, sourcesQueried: ['brave'], printedItemId: body.itemId, canonicalBrand: hit.brand,
+    };
+  };
+  const { result } = await runSanity(env, { batchId: 'off', mode: 'round1', receipts: [{
+    receiptKey: 'off', merchant: 'Synthetic Store', receiptReference: 'OFF-1', date: '2026-07-14', time: '10:00', payment: 'Card', currency: 'GBP',
+    items: [
+      { rowId: 'off-dior', brand: 'Dior', item: 'bag', itemId: 'CIGALE', unitPrice: 100, amount: 100 },
+      { rowId: 'off-chanel', brand: 'Chanel', item: 'bag', itemId: 'CH25BAG', unitPrice: 100, amount: 100 },
+      { rowId: 'off-plain', brand: null, item: 'Dior tote', itemId: 'SYN-PLAIN', unitPrice: 100, amount: 100 },
+    ],
+  }] }, { lookup });
+  const dior = result.agreedRows.find(r => r.rowId === 'off-dior');
+  const chanel = result.agreedRows.find(r => r.rowId === 'off-chanel');
+  const plain = result.agreedRows.find(r => r.rowId === 'off-plain');
+  assert.equal(dior.cells['品名'], 'Mini Dior Cigale Bag, sand');
+  assert.equal(dior.flags['品名'], AMBER);
+  assert.doesNotMatch(String(dior.flagReasons['品名'] || ''), /Name needs checking/);
+  assert.doesNotMatch(String(dior.exportMeta.comments['品名'] || ''), /Name needs checking/);
+  assert.equal(chanel.cells['品名'], 'Chanel 25 mini handbag, grained calfskin & silver metal');
+  assert.equal(chanel.flags['品名'], AMBER);
+  assert.doesNotMatch(String(chanel.flagReasons['品名'] || ''), /Name needs checking/);
+  assert.equal(plain.cells['品名'], 'Dior tote');
+  assert.equal(plain.flags['品名'], PINK);
+  assert.match(plain.flagReasons['品名'], /Name needs checking/);
+});
+
+test('a name already Pink for a missing or undescriptive value does not also get Name needs checking', async () => {
+  const env = makeEnv();
+  const lookup = async () => ({
+    candidates: [{ brand: 'Synthetic', officialName: 'Real Pencil', itemId: 'PENCIL', price: 4, currency: 'GBP', matchType: 'multi-field', confidence: 0.4, sourceUrls: ['https://synthetic.example/p'], matchedFields: ['name'], onOfficialSite: false, weightGrams: null }],
+    cacheHit: false, cacheKey: 'pink', sourcesQueried: ['brave'], printedItemId: 'PINK', canonicalBrand: 'Synthetic',
+  });
+  const { result } = await runSanity(env, { batchId: 'pink', mode: 'round1', receipts: [{
+    receiptKey: 'pink', merchant: 'Synthetic Store', receiptReference: 'PINK-1', date: '2026-07-14', time: '11:00', payment: 'Card', currency: 'GBP',
+    items: [
+      { rowId: 'pink-missing', brand: 'Synthetic', item: '', itemId: 'SYN-MISS', unitPrice: 4, amount: 4 },
+      { rowId: 'pink-junk', brand: 'Synthetic', item: 'total', itemId: 'SYN-JUNK', unitPrice: 4, amount: 4 },
+    ],
+  }] }, { lookup });
+  for (const row of result.agreedRows) {
+    assert.equal(row.flags['品名'], PINK);
+    assert.match(row.flagReasons['品名'], /failed the column sanity check/);
+    assert.doesNotMatch(row.flagReasons['品名'], /Name needs checking/);
+    assert.equal(row.exportMeta.gateNotes, null);
+    assert.doesNotMatch(String(row.exportMeta.comments['品名'] || ''), /Name needs checking/);
+  }
+  const { zip } = await sheetXml(await buildV2XlsxBlob(result));
+  const flags = await zip.file('xl/worksheets/sheet3.xml').async('string');
+  assert.equal(flags.includes('Name needs checking'), false);
+  assert.match(flags, /failed the column sanity check/);
 });

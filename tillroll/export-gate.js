@@ -128,32 +128,26 @@ function brandHits(name, brand) {
 }
 
 // An alias of 3 characters or fewer counts only as its own token at the start
-// or end of 品名. It does not count inside a longer official name this row's
-// look-up already returned. A brand or alias of 4 or more characters still
-// matches as a whole word anywhere.
-function shortAliasCounts(hit, words, name, officialName) {
+// or end of 品名. A brand or alias of 4 or more characters matches as a whole
+// word anywhere. Neither applies once 品名 is the look-up's official name.
+function shortAliasCounts(hit, words) {
   const letters = hit.phrase.replace(/[^a-z0-9]/g, '');
   if (letters.length > 3) return true;
-  const atEdge = hit.length === 1 && (hit.start === 0 || hit.start + hit.length === words.length);
-  if (!atEdge) return false;
-  if (officialName && fold(name) === fold(officialName)) {
-    const officialWords = wordsOf(officialName);
-    const phrase = officialWords.slice(hit.start, hit.start + hit.length).join(' ');
-    if (officialWords.length > hit.length && phrase === hit.phrase) return false;
-  }
-  return true;
+  return hit.length === 1 && (hit.start === 0 || hit.start + hit.length === words.length);
 }
 
-// True when 品名 still contains the row's brand or a canonical alias, a
-// 9999999… code, an EAN or any run of 6+ digits, or no non-brand word.
-// An empty 品牌 still counts a known brand or alias left in the name.
+// True when a non-official 品名 still contains the row's brand or a canonical
+// alias, a 9999999… code, an EAN or any run of 6+ digits, or no non-brand word.
+// An official look-up name is already approved, so this check does not flag it.
 export function nameNeedsChecking(name, brand, options = {}) {
   const officialName = options.officialName || null;
   const text = String(name ?? '').trim();
+  const official = options.official === true || (officialName && fold(text) === fold(officialName));
+  if (official) return false;
   if (!text) return true;
   if (/9999999\d*/.test(compact(text)) || /\d{6,}/.test(compact(text))) return true;
   const words = wordsOf(text);
-  const hits = brandHits(text, brand).filter(hit => shortAliasCounts(hit, words, text, officialName));
+  const hits = brandHits(text, brand).filter(hit => shortAliasCounts(hit, words));
   if (hits.length) return true;
   const letterIndexes = words.map((word, index) => (/[a-z]/.test(word) ? index : -1)).filter(index => index >= 0);
   if (!letterIndexes.length) return true;
@@ -166,7 +160,11 @@ export function gateFindings(row) {
   const cells = row?.cells || {};
   const findings = [];
   if (!String(cells['品牌'] ?? '').trim()) findings.push({ col: '品牌', reason: BRAND_NOT_READ });
-  if (nameNeedsChecking(cells['品名'], cells['品牌'], { officialName: row?.raw?.officialName || null })) findings.push({ col: '品名', reason: NAME_NEEDS_CHECKING });
+  const officialName = row?.raw?.officialName || null;
+  const nameText = String(cells['品名'] ?? '').trim();
+  const official = row?.raw?.nameFromOfficial === true || row?._exactIdPrice === true
+    || (officialName && fold(nameText) === fold(officialName));
+  if (nameNeedsChecking(cells['品名'], cells['品牌'], { officialName, official })) findings.push({ col: '品名', reason: NAME_NEEDS_CHECKING });
   const invalid = row?.raw?.invalidPrices || {};
   for (const col of PRICE_COLUMNS) {
     const value = cells[col];

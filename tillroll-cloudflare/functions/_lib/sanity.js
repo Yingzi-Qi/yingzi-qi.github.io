@@ -7,7 +7,7 @@ import { lookup as defaultLookup, invalidate, priceTolerance } from './lookup.js
 import { nowIso, sha256Hex } from './http.js';
 import { expandReceipt, isConfirmedZero, joinPurchaseTime, supplierVisibleName } from '../../../tillroll/units.js';
 import { matchBrandIdFormat } from '../../../tillroll/brand-id-format.js';
-import { concessionReading, gateFindings, isUnlabelledTenDigits, selectBrandItem } from '../../../tillroll/export-gate.js';
+import { NAME_NEEDS_CHECKING, concessionReading, gateFindings, isUnlabelledTenDigits, selectBrandItem } from '../../../tillroll/export-gate.js';
 
 export const COLUMNS = ['采购小票id', '采购时间', '供应商', '品牌', '品名', '品牌货号', '采购商品原价', '采购商品金额', '采购商品方法', '销售金额'];
 export const PINK = '#FECDD3', AMBER = '#FDE68A';
@@ -363,7 +363,11 @@ async function verifierStage(rows, receipt, ctx) {
         noteMismatch(row, '品名', c['品名'], top.officialName, 'official');
         row.previousName = c['品名'];
         c['品名'] = top.officialName;
+        row.raw.nameFromOfficial = true;
+      } else if (top.officialName && c['品名'] && String(c['品名']).trim().toLowerCase() === String(top.officialName).trim().toLowerCase()) {
+        row.raw.nameFromOfficial = true;
       }
+      if (exact || top.onOfficialSite === true && top.officialName && c['品名'] === top.officialName) row.raw.nameFromOfficial = true;
       if (exact) {
         touchCell(row, '品名');
         if (row.flags['品名'] === AMBER) delete row.flags['品名'];
@@ -502,6 +506,8 @@ function applyExportGate(row, ctx) {
   for (const finding of gateFindings(row)) {
     if (ctx.locked(row.rowId, finding.col)) continue;
     if (finding.col === '品牌货号' && row.raw?.idClass === 'builder') continue;
+    // A cell already Pink for another reason keeps that fill, reason, comment and Flags entry.
+    if (finding.reason === NAME_NEEDS_CHECKING && row.flags[finding.col] === PINK) continue;
     const prior = (row._lookup || []).filter(e => e.col === finding.col);
     const lookupReason = [...new Set(prior.map(e => e.reason).filter(Boolean))].join('; ');
     const candidates = prior.flatMap(e => e.candidates || []);
