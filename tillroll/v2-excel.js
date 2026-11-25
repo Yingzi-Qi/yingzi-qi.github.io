@@ -152,6 +152,7 @@ function baselineFor(row, exportKey) {
     matchType: meta.matchType || row.lookup?.matchType || null,
     alternates: meta.alternates || {},
     comments: meta.comments || {},
+    pendingOwnerConfirmation: meta.pendingOwnerConfirmation || null,
   };
 }
 

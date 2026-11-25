@@ -38,11 +38,15 @@ export function stripBrandFromItemId(itemId, brand) {
   }
   return out.trim() || id;
 }
-// P4 (approved 25 Nov 17:45): the cell must be one of these four. Card schemes
-// (Visa, Mastercard, Amex, Maestro, debit, credit) collapse to Card. Anything
-// else, including Cash, Apple Pay and an empty tender, is kept and flagged Pink.
+// P4, with the 25 Nov wallet decision. Card schemes map to Card with no fill.
+// A wallet with a scheme printed also maps to Card with no fill. A wallet with
+// no scheme maps to Card and is Pink, pending owner confirmation. Cash and an
+// empty tender stay as printed or empty and are Pink.
 export const ALLOWED_TENDERS = ['UnionPay', 'Card', 'Alipay', 'WeChat'];
 export const TENDER_REASON = 'Payment method must be UnionPay, Card, Alipay or WeChat.';
+export const WALLET_REASON = 'wallet, scheme not printed';
+const SCHEME = /\b(visa|mastercard|master\s*card|maestro|amex|american express|debit|credit|card)\b/i;
+const WALLET = /\b(apple\s*pay|google\s*pay|samsung\s*pay|garmin\s*pay|android\s*pay|wallet)\b/i;
 const CHANEL_BLOCKED_COMMENT = 'chanel.com blocked; confirmed on chanel.cn/gb';
 export function normaliseTender(p) {
   const s = str(p);
@@ -50,8 +54,12 @@ export function normaliseTender(p) {
   if (/union\s*pay/i.test(s)) return 'UnionPay';
   if (/ali\s*pay/i.test(s)) return 'Alipay';
   if (/we\s*chat|wechat/i.test(s)) return 'WeChat';
-  if (/\b(visa|mastercard|master\s*card|maestro|amex|american express|debit|credit|card)\b/i.test(s)) return 'Card';
+  if (SCHEME.test(s) || WALLET.test(s)) return 'Card';
   return s;
+}
+export function walletWithoutScheme(original) {
+  const s = str(original);
+  return Boolean(s) && WALLET.test(s) && !SCHEME.test(s) && !/union\s*pay/i.test(s);
 }
 function itemIdKind(id) {
   const s = String(id ?? '').replace(/[\s-]/g, '');
@@ -140,7 +148,10 @@ function readerStage(receipt, rIndex, state) {
     if (!receiptId) addFlag(row, '采购小票id', PINK, /selfridges/i.test(merchant || '') ? 'Selfridges receipt number (below the barcode) not read.' : /harrods/i.test(merchant || '') ? 'Harrods receipt number (right of date/time) not read.' : 'Receipt ID not read.');
     if (!ts) addFlag(row, '采购时间', PINK, 'Date/time missing or not a valid date.');
     if (!merchant) addFlag(row, '供应商', PINK, 'Supplier not read.');
-    if (!tender || !ALLOWED_TENDERS.includes(tender)) {
+    if (walletWithoutScheme(receipt.payment)) {
+      addFlag(row, '采购商品方法', PINK, WALLET_REASON, { pendingOwnerConfirmation: true });
+      row._comments['采购商品方法'] = WALLET_REASON;
+    } else if (!tender || !ALLOWED_TENDERS.includes(tender)) {
       addFlag(row, '采购商品方法', PINK, TENDER_REASON);
       row._comments['采购商品方法'] = TENDER_REASON;
     }
@@ -161,6 +172,73 @@ function readerStage(receipt, rIndex, state) {
     rows.push(row);
   });
   return rows;
+}
+
+function candidateText(list) {
+  if (!list?.length) return '';
+  return 'Candidates: ' + list.map(c => [c.officialName, c.itemId, c.price].filter(v => v != null && v !== '').join(' ')).join(' | ');
+}
+// Store-internal means the 9999999… concession family. No other pattern is
+// defined; a numeric style ref such as 000001 stays a style ref.
+function settleBrandItemId(row, top, ctx) {
+  const c = row.cells;
+  if (ctx.locked(row.rowId, '品牌货号')) return;
+  const printed = row.raw.printedItemId ?? c['品牌货号'];
+  const kind = itemIdKind(printed);
+  const styleId = itemIdKind(top?.itemId) === 'style' ? String(top.itemId).trim() : null;
+  if (kind === 'concession') {
+    if (itemIdKind(c['品牌货号']) === 'concession') c['品牌货号'] = null;
+    if (styleId && top) {
+      c['品牌货号'] = styleId;
+      row._alternates['品牌货号'] = { receipt: printed, official: styleId, shown: 'official' };
+      row._comments['品牌货号'] = `Concession code ${printed} is not a brand item id. Official item id ${styleId}.`;
+      if (top.matchType === 'price-fallback') appendComment(row, '品牌货号', candidateText(row._candidates?.length ? row._candidates : [top]));
+      if (row.flags['品牌货号'] === PINK) {
+        delete row.flags['品牌货号'];
+        row._reading = row._reading.filter(e => e.col !== '品牌货号');
+      }
+      lookupFlag(row, '品牌货号', AMBER, 'Official brand item id from look-up.', { sourceUrls: top.sourceUrls || [], ...(row._candidates ? { candidates: row._candidates } : {}) });
+    } else if (row.flags['品牌货号'] !== PINK) {
+      c['品牌货号'] = null;
+      appendComment(row, '品牌货号', printed);
+      appendComment(row, '品牌货号', 'no brand item ID printed');
+      addFlag(row, '品牌货号', PINK, 'no brand item ID printed');
+      row._alternates['品牌货号'] = { receipt: printed, official: null, shown: 'receipt' };
+    } else {
+      c['品牌货号'] = null;
+      appendComment(row, '品牌货号', printed);
+      if (!row._alternates['品牌货号']) row._alternates['品牌货号'] = { receipt: printed, official: null, shown: 'receipt' };
+    }
+    return;
+  }
+  if (row.flags['品牌货号'] === PINK) return;
+  if (kind === 'ean') {
+    if (styleId && !idsMatch(styleId, printed)) {
+      noteMismatch(row, '品牌货号', printed, styleId, 'official');
+      c['品牌货号'] = styleId;
+      if (top?.matchType === 'price-fallback') appendComment(row, '品牌货号', candidateText(row._candidates?.length ? row._candidates : [top]));
+      lookupFlag(row, '品牌货号', AMBER, 'Style reference used instead of an EAN.', { sourceUrls: top?.sourceUrls || [] });
+    } else if (printed) {
+      appendComment(row, '品牌货号', 'Only an EAN is available; the brand item id was not found.');
+      if (!row._alternates['品牌货号']) row._alternates['品牌货号'] = { receipt: printed, official: null, shown: 'receipt' };
+      lookupFlag(row, '品牌货号', AMBER, 'Only an EAN is available; the brand item id was not found.', { sourceUrls: top?.sourceUrls || [] });
+    }
+    return;
+  }
+  if (kind === 'style' && top?.matchType === 'price-fallback') {
+    if (top.itemId && printed && !idsMatch(top.itemId, printed)) {
+      noteMismatch(row, '品牌货号', printed, top.itemId, 'receipt');
+      lookupFlag(row, '品牌货号', AMBER, `Official item id ${top.itemId} differs from the receipt. Receipt value kept.`, { sourceUrls: top.sourceUrls || [], ...(row._candidates ? { candidates: row._candidates } : {}) });
+    } else if (printed) {
+      lookupFlag(row, '品牌货号', AMBER, 'Price-fallback look-up.', { sourceUrls: top.sourceUrls || [], ...(row._candidates ? { candidates: row._candidates } : {}) });
+    }
+    appendComment(row, '品牌货号', candidateText(row._candidates?.length ? row._candidates : [top]));
+    return;
+  }
+  if (top?.itemId && printed && !idsMatch(top.itemId, printed) && top.matchType !== 'price-fallback') {
+    noteMismatch(row, '品牌货号', printed, top.itemId, 'receipt');
+    lookupFlag(row, '品牌货号', AMBER, `Official item id ${top.itemId} differs from the receipt. Receipt value kept.`, { sourceUrls: top.sourceUrls || [] });
+  }
 }
 
 // ---- Stage 2: Brand & Catalogue Look-up Verifier --------------------------
@@ -195,37 +273,38 @@ async function verifierStage(rows, receipt, ctx) {
       }
     }
     // Review the Reader first: do not burn quota on suspect input.
-    if (row.flags['品牌货号'] === PINK || (row.flags['采购商品原价'] === PINK && !c['品牌货号'])) { row.notes.push('Look-up held until the reading error is fixed.'); continue; }
-    if (ctx.mode === 'round2' && row.skipLookup) continue;
-    if (!c['品牌货号'] && !c['品名']) continue;
-    if (ctx.lookupsUsed >= MAX_LOOKUPS_PER_RUN) { lookupFlag(row, '品名', AMBER, 'Look-up deferred: per-run cap reached.'); continue; }
-    const req = { brand: c['品牌'], itemId: c['品牌货号'], name: c['品名'], style: row.raw.style, price: c['采购商品原价'], currency: row.raw.currency };
+    row.raw.printedItemId = c['品牌货号'];
+    if (row.flags['品牌货号'] === PINK || (row.flags['采购商品原价'] === PINK && !c['品牌货号'])) { row.notes.push('Look-up held until the reading error is fixed.'); settleBrandItemId(row, null, ctx); continue; }
+    if (ctx.mode === 'round2' && row.skipLookup) { settleBrandItemId(row, null, ctx); continue; }
+    if (!row.raw.printedItemId && !c['品名']) { settleBrandItemId(row, null, ctx); continue; }
+    if (ctx.lookupsUsed >= MAX_LOOKUPS_PER_RUN) { lookupFlag(row, '品名', AMBER, 'Look-up deferred: per-run cap reached.'); settleBrandItemId(row, null, ctx); continue; }
+    const req = { brand: c['品牌'], itemId: row.raw.printedItemId, name: c['品名'], style: row.raw.style, price: c['采购商品原价'], currency: row.raw.currency };
     const res = await ctx.callLookup(req);
-    if (!res) continue;
+    if (!res) { settleBrandItemId(row, null, ctx); continue; }
     if (res.paused || res.unavailableReason) {
       // A paused or unavailable look-up stays Amber, even when nothing came back.
       lookupFlag(row, '品名', AMBER, `Look-up paused: ${res.unavailableReason || 'quota guard reached'}.`);
       ctx.paused.add(res.unavailableReason || 'quota guard');
-      if (!res.candidates?.length) continue;
+      if (!res.candidates?.length) { settleBrandItemId(row, null, ctx); continue; }
     }
     const top = res.candidates?.[0];
     row.lookup = { cacheKey: res.cacheKey, matchType: top?.matchType || null, confidence: top?.confidence ?? null, sourceUrls: top?.sourceUrls || [] };
     if ((res.candidates || []).some(x => x.matchType === 'price-fallback')) {
       row._candidates = res.candidates.map(x => ({ officialName: x.officialName, itemId: x.itemId, brand: x.brand, price: x.price, currency: x.currency, weightGrams: x.weightGrams, sourceUrls: x.sourceUrls || [] }));
     }
-    if (!top) { lookupFlag(row, '品名', AMBER, 'No official match found; values kept as printed.'); continue; }
+    if (!top) { lookupFlag(row, '品名', AMBER, 'No official match found; values kept as printed.'); settleBrandItemId(row, null, ctx); continue; }
     if (top.matchType === 'multi-field') {
       const ties = res.candidates.filter(x => x.matchType === 'multi-field' && x.matchedFields.length === top.matchedFields.length && x.confidence === top.confidence);
       if (ties.length > 1) {
         lookupFlag(row, '品名', AMBER, 'Several official items match equally well. Pick one.', { candidates: ties.map(x => ({ officialName: x.officialName, itemId: x.itemId, price: x.price, sourceUrls: x.sourceUrls })) });
-        continue;
+        settleBrandItemId(row, top, ctx); continue;
       }
     }
     if (top.matchType === 'price-fallback') {
       const samePrice = res.candidates.filter(x => Math.abs(x.price - top.price) < 0.005);
       if (samePrice.length > 1 && samePrice.every(x => x.weightGrams === null)) {
         lookupFlag(row, '品名', AMBER, 'Item ID matched nothing; several official items at this price and no published weight. Pick one.', { candidates: samePrice.map(x => ({ officialName: x.officialName, itemId: x.itemId, price: x.price, sourceUrls: x.sourceUrls })) });
-        continue;
+        settleBrandItemId(row, top, ctx); continue;
       }
       row.notes.push(top.weightGrams !== null ? `Closest-price fallback; lightest published weight ${top.weightGrams} g.` : 'Closest-price fallback.');
     }
@@ -262,28 +341,7 @@ async function verifierStage(rows, receipt, ctx) {
         lookupFlag(row, col, AMBER, `Official price ${top.price} differs from the receipt. Receipt value kept.`, { sourceUrls: top.sourceUrls });
       }
     }
-    // P1: the cell is the brand's own item id. Prefer a style reference over an EAN
-    // or a 9999999 concession code. If that is all we have, keep it and flag Amber.
-    if (!ctx.locked(row.rowId, '品牌货号') && row.flags['品牌货号'] !== PINK) {
-      const printed = c['品牌货号'];
-      const printedKind = itemIdKind(printed);
-      const styleId = [top.itemId, row.raw.style].find(id => itemIdKind(id) === 'style');
-      if ((printedKind === 'ean' || printedKind === 'concession') && styleId) {
-        noteMismatch(row, '品牌货号', printed, styleId, 'official');
-        c['品牌货号'] = styleId;
-        lookupFlag(row, '品牌货号', AMBER, 'Style reference used instead of an EAN or concession code.', { sourceUrls: top.sourceUrls });
-      } else if (printedKind === 'ean' || printedKind === 'concession') {
-        const other = top.itemId && !idsMatch(top.itemId, printed) ? top.itemId : null;
-        if (other) noteMismatch(row, '品牌货号', printed, other, 'receipt');
-        else appendComment(row, '品牌货号', printedKind === 'ean' ? 'Only an EAN is available; the brand item id was not found.' : 'Only a concession code is available; the brand item id was not found.');
-        if (!row._alternates['品牌货号']) row._alternates['品牌货号'] = { receipt: printed, official: other, shown: 'receipt' };
-        lookupFlag(row, '品牌货号', AMBER, row._comments['品牌货号'], { sourceUrls: top.sourceUrls });
-      } else if (top.itemId && printed && !idsMatch(top.itemId, printed)) {
-        // A guessed price-fallback id stays in the comment; the printed code stays in the cell.
-        noteMismatch(row, '品牌货号', printed, top.itemId, 'receipt');
-        lookupFlag(row, '品牌货号', AMBER, `Official item id ${top.itemId} differs from the receipt. Receipt value kept.`, { sourceUrls: top.sourceUrls });
-      }
-    }
+    settleBrandItemId(row, top, ctx);
     if (canonicalBrand(c['品牌']) === 'Chanel') {
       const note = chanelFallbackComment(top.sourceUrls || []);
       if (note) for (const col of ['品名', '品牌', '品牌货号']) if (c[col]) appendComment(row, col, note);
@@ -498,8 +556,10 @@ export async function runSanity(env, input, deps = {}) {
     if (row._exactIdPrice && row.flags['品名'] === AMBER && !ctx.locked(row.rowId, '品名')) delete row.flags['品名'];
     if (mode === 'round2') restoreBaselineFlags(row, ctx);
     const flagReasons = {};
+    const pendingOwnerConfirmation = {};
     for (const e of row._reading) if (row.flags[e.col]) flagReasons[e.col] = e.reason;
     for (const e of row._lookup) if (row.flags[e.col]) flagReasons[e.col] = e.reason;
+    for (const e of [...row._reading, ...row._lookup]) if (e.pendingOwnerConfirmation && row.flags[e.col]) pendingOwnerConfirmation[e.col] = true;
     for (const e of row._reading) if (row.flags[e.col]) readingErrors.push({ rowId: row.rowId, col: e.col, reason: e.reason });
     for (const e of row._lookup) if (row.flags[e.col]) lookupUncertainties.push({ rowId: row.rowId, col: e.col, reason: e.reason, confidence: e.confidence ?? row.lookup?.confidence ?? null, sourceUrls: e.sourceUrls || row.lookup?.sourceUrls || [], ...(e.candidates ? { candidates: e.candidates } : {}) });
     const exportMeta = {
@@ -513,6 +573,7 @@ export async function runSanity(env, input, deps = {}) {
       comments: row._comments || {},
       officialBranch: row._officialBranch || null,
       flagReasons,
+      pendingOwnerConfirmation: Object.keys(pendingOwnerConfirmation).length ? pendingOwnerConfirmation : null,
       storeClues: row.storeClues || null,
     };
     return { rowId: row.rowId, receiptKey: row.receiptKey, lineIndex: row.lineIndex, unitIndex: row.unitIndex ?? 0, cells: row.cells, flags: row.flags, flagReasons, notes: row.notes,
