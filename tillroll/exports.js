@@ -299,27 +299,11 @@ function download(blob,extension) {
 export function exportCSV(receipts) { return download(buildCsvBlob(receipts),'csv'); }
 export async function exportExcel(receipts) { return download(await buildXlsxBlob(receipts),'xlsx'); }
 export async function exportChinaExcel(receipts) { return download(await (LEGACY_CHINA_WRITER ? buildChinaXlsxBlob : buildXlsxBlob)(receipts),'xlsx'); }
-const AGREED_COLUMNS = ['采购小票id', '采购时间', '供应商', '品牌', '品名', '品牌货号', '采购商品原价', '采购商品金额', '采购商品方法', '销售金额'];
-export async function exportAgreedChina(rows) {
-  const body = (rows || []).map(row => AGREED_COLUMNS.map(title => {
-    const value = row?.cells?.[title] ?? '';
-    const numeric = typeof value === 'number' && Number.isFinite(value);
-    return { value: numeric ? value : String(value ?? ''), numeric, style: numeric ? 3 : 0 };
-  }));
-  const range = 'A1:' + colName(AGREED_COLUMNS.length) + (body.length + 1);
-  const rowXml = (number, cells) => `<row r="${number}" ht="${excelRowHeight}" customHeight="1">${cells.map((cell, i) => cellXml(number, i + 1, cell)).join('')}</row>`;
-  const header = rowXml(1, AGREED_COLUMNS.map(title => ({ value: title, style: 1 })));
-  const contents = body.map((row, i) => rowXml(i + 2, row)).join('');
-  const widths = AGREED_COLUMNS.map((_, i) => `<col min="${i + 1}" max="${i + 1}" width="${excelColumnWidth}" customWidth="1"/>`).join('');
-  const worksheet = XML + `<worksheet xmlns="${MAIN}"><dimension ref="${range}"/><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" state="frozen" topLeftCell="A2" activePane="bottomLeft"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="${excelRowHeight}" defaultColWidth="${excelColumnWidth}"/><cols>${widths}</cols><sheetData>${header}${contents}</sheetData><autoFilter ref="${range}"/></worksheet>`;
-  const zip = new JSZip();
-  zip.file('[Content_Types].xml', XML + `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`);
-  zip.file('_rels/.rels', XML + `<Relationships xmlns="${PACKAGE}"><Relationship Id="rId1" Type="${REL}/officeDocument" Target="xl/workbook.xml"/></Relationships>`);
-  zip.file('xl/workbook.xml', XML + `<workbook xmlns="${MAIN}" xmlns:r="${REL}"><sheets><sheet name="Line items" sheetId="1" r:id="rId1"/></sheets></workbook>`);
-  zip.file('xl/_rels/workbook.xml.rels', XML + `<Relationships xmlns="${PACKAGE}"><Relationship Id="rId1" Type="${REL}/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="${REL}/styles" Target="styles.xml"/></Relationships>`);
-  zip.file('xl/worksheets/sheet1.xml', worksheet);
-  zip.file('xl/styles.xml', styles);
-  return download(new Blob([await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' })], { type: WORKBOOK_MIME }), 'xlsx');
+// Retired slim writer. Callers receive the v2 workbook (maskPaymentRow included).
+export async function exportAgreedChina(result) {
+  const { buildV2XlsxBlob } = await import('./v2-excel.js');
+  const input = Array.isArray(result) ? { agreedRows: result } : (result || { agreedRows: [] });
+  return download(await buildV2XlsxBlob(input), 'xlsx');
 }
 
 const aliases = {

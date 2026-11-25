@@ -1,7 +1,6 @@
 // Tillroll v2 layer: Run sanity checks, Linked Workbooks (Google Drive),
 // Reading History, quota status and Brave attribution. Talks only to the
 // same-origin /api/* Cloudflare Pages Functions; holds no secrets.
-import { exportAgreedChina } from './exports.js?v=merge2';
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const COLUMNS = ['采购小票id', '采购时间', '供应商', '品牌', '品名', '品牌货号', '采购商品原价', '采购商品金额', '采购商品方法', '销售金额'];
@@ -224,7 +223,8 @@ function init() {
   const china = $('#excel-china');
   if (china) {
     const localExport = china.onclick;
-    china.onclick = event => lastResult?.agreedRows ? exportAgreedChina(lastResult.agreedRows) : localExport?.call(china, event);
+    // Same writer as the panel's Export Excel: buildV2XlsxBlob, which masks the tender.
+    china.onclick = event => lastResult?.agreedRows ? exportAgreed(lastResult) : localExport?.call(china, event);
   }
   for (const b of document.querySelectorAll('[data-v2-close]')) b.onclick = () => document.getElementById(b.dataset.v2Close).close();
   const p = new URLSearchParams(location.search).get('drive');
