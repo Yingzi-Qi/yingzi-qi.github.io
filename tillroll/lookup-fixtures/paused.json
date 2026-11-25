@@ -1,12 +1,16 @@
 {
   "cacheHit": false,
-  "cacheKey": "lookup:v2:item:chanel:ABC123",
+  "cacheKey": "item:dior:123456",
   "sourcesQueried": [],
   "candidates": [],
+  "mismatches": [],
   "flag": "#FDE68A",
-  "printedItemId": "ABC123",
-  "canonicalBrand": "Chanel",
+  "printedItemId": "123456",
+  "canonicalBrand": "Dior",
   "paused": true,
-  "unavailableReason": "Gemini grounding daily guard reached.",
-  "quotaGuard": ["Gemini grounding daily guard reached."]
+  "unavailableReason": "Brave Search monthly guard reached (950). Gemini grounding daily guard reached (1450).",
+  "quotaGuard": [
+    "Brave Search monthly guard reached (950).",
+    "Gemini grounding daily guard reached (1450)."
+  ]
 }

@@ -6,9 +6,10 @@ import { resolveSupplier } from './uk-branches.js';
 import { branchClue, cacheKeys, createLookupClient, parseLookupResponse } from './lookup-client.js';
 import { flagColour, parseMismatches, primaryAccess, rankPriceFallback, selectCandidate } from './lookup-match.js';
 import { chooseUnitPrice } from './lookup-policy.js';
-import { enrichLines } from './lookup-enrich.js';
+import { enrichLines, lookupPausedNote } from './lookup-enrich.js';
 import { reviewLoop } from './review-loop.js';
 import pausedFixture from './lookup-fixtures/paused.json' with { type: 'json' };
+import quotaExampleA from './lookup-fixtures/quota-example-a.json' with { type: 'json' };
 import partialFixture from './lookup-fixtures/quota-partial.json' with { type: 'json' };
 import lockedFixture from './lookup-fixtures/locked.json' with { type: 'json' };
 import branchFixture from './lookup-fixtures/branch-rolex.json' with { type: 'json' };
@@ -705,13 +706,50 @@ describe('enrichment', () => {
       currency: 'GBP',
       client: result,
     });
+    const note = 'Look-up paused: Brave Search monthly guard reached (950). Gemini grounding daily guard reached (1450).';
     assert.equal(calls.length, 1);
     assert.equal(enriched.lookupsPaused, true);
-    assert.ok(enriched.pausedReasons.some(reason => /guard/i.test(reason)));
+    assert.equal(enriched.pausedReasons[0], note);
     assert.equal(enriched.unitRows[0].accepted, null);
     assert.equal(enriched.unitRows[0].flag, 'amber');
+    assert.equal(enriched.unitRows[0].fields['品名'].note, note);
+    assert.equal(enriched.unitRows[0].fields['品名'].flag, 'amber');
     assert.equal(enriched.unitRows[1].deferred, true);
+    assert.equal(enriched.unitRows[1].fields['品名'].note, note);
     assert.equal(reviewLoop.lastResult.lookupsPaused, true);
+  });
+
+  it('uses a candidate from the source that answered and still keeps the row Amber', async () => {
+    let fetches = 0;
+    const client = createLookupClient({
+      baseUrl: 'https://lookup.test',
+      fetchImpl: async () => {
+        fetches += 1;
+        return json(quotaExampleA);
+      },
+    });
+    const enriched = await enrichLines({
+      items: [line({ item: 'flap', itemId: 'A01234', unitPrice: 150, amount: 150 }), line({ itemId: 'B2' })],
+      currency: 'GBP',
+      client,
+    });
+    const row = enriched.unitRows[0];
+    assert.equal(fetches, 1);
+    assert.equal(row.accepted.officialName, 'Quilted Flap Bag');
+    assert.equal(row.fields['品名'].value, 'Quilted Flap Bag');
+    assert.equal(row.fields['品名'].flag, 'amber');
+    assert.equal(row.fields['品名'].flagColour, '#FDE68A');
+    assert.equal(row.fields['品名'].note, 'Look-up paused: Brave Search monthly guard reached (950).');
+    assert.equal(row.flag, 'amber');
+    assert.match(row.reviewNote, /Look-up paused: Brave Search monthly guard reached \(950\)\./);
+    assert.equal(row.cacheHit, false);
+    assert.equal(enriched.unitRows[1].deferred, true);
+    client.resetRun();
+    await client.lookup({ brand: 'Chanel', itemId: 'A01234', price: 150, currency: 'GBP' });
+    assert.equal(fetches, 2);
+    assert.equal(quotaExampleA.cacheKey, 'item:chanel:a01234');
+    assert.equal(cacheKeys.item('Chanel', 'A01234'), 'lookup:v2:item:chanel:A01234');
+    assert.notEqual(quotaExampleA.cacheKey, cacheKeys.item('Chanel', 'A01234'));
   });
 
   it('does not price-fallback a partial quota response', async () => {
@@ -929,7 +967,7 @@ describe('enrichment', () => {
 
   it('pauses the run when only unavailableReason or only quotaGuard is set', async () => {
     const unavailable = trackingClient(() => json({
-      cacheHit: false, candidates: [], flag: null, sourcesQueried: [], unavailableReason: 'Both sources are down.',
+      cacheHit: false, candidates: [], flag: '#FDE68A', sourcesQueried: [], unavailableReason: 'Brave Search rate limit (429).',
     }));
     const paused = await enrichLines({
       items: [line(), line({ itemId: 'B2' })],
@@ -938,10 +976,12 @@ describe('enrichment', () => {
     });
     assert.equal(unavailable.calls.length, 1);
     assert.equal(paused.lookupsPaused, true);
+    assert.equal(paused.unitRows[0].fields['品名'].note, 'Look-up paused: Brave Search rate limit (429).');
     assert.equal(paused.unitRows[1].deferred, true);
 
     const quota = trackingClient(() => json({
-      cacheHit: false, candidates: [], flag: '#FDE68A', sourcesQueried: ['brave'], quotaGuard: ['Brave Search monthly guard reached.'],
+      cacheHit: false, candidates: [], flag: '#FDE68A', sourcesQueried: ['brave'],
+      quotaGuard: ['Brave Search monthly guard reached (950).', 'Brave Search monthly guard reached (950).'],
     }));
     const guarded = await enrichLines({
       items: [line(), line({ itemId: 'B3' })],
@@ -951,7 +991,32 @@ describe('enrichment', () => {
     assert.equal(quota.calls.length, 1);
     assert.equal(guarded.lookupsPaused, true);
     assert.equal(guarded.unitRows[0].flag, 'amber');
+    assert.equal(guarded.unitRows[0].fields['品名'].note, lookupPausedNote('Brave Search monthly guard reached (950).'));
     assert.equal(guarded.unitRows[1].deferred, true);
+  });
+
+  it('keeps paused absent unless a guard fired, and does not rewrite the service cache key', () => {
+    const plain = parseLookupResponse({ cacheHit: false, candidates: [], flag: null });
+    assert.equal(plain.paused, undefined);
+    assert.equal(parseLookupResponse({ paused: false, candidates: [] }).paused, undefined);
+    const parsed = parseLookupResponse(quotaExampleA);
+    assert.equal(parsed.paused, true);
+    assert.equal(parsed.cacheKey, 'item:chanel:a01234');
+    assert.deepEqual(parsed.quotaGuard, ['Brave Search monthly guard reached (950).']);
+    assert.equal(parsed.flag, '#FDE68A');
+    const both = parseLookupResponse({
+      ...pausedFixture,
+      quotaGuard: [
+        'Brave Search monthly guard reached (950).',
+        'Brave Search monthly guard reached (950).',
+        'Gemini grounding daily guard reached (1450).',
+      ],
+    });
+    assert.deepEqual(both.quotaGuard, [
+      'Brave Search monthly guard reached (950).',
+      'Gemini grounding daily guard reached (1450).',
+    ]);
+    assert.equal(both.unavailableReason, pausedFixture.unavailableReason);
   });
 
   it('puts price in the client cache key only for a price-fallback result', async () => {

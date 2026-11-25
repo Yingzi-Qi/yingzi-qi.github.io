@@ -1,7 +1,7 @@
 {
   "cacheHit": false,
-  "cacheKey": "lookup:v2:pf:chanel:GBP:100.00",
-  "sourcesQueried": ["brave"],
+  "cacheKey": "item:chanel:unknown1",
+  "sourcesQueried": ["gemini"],
   "candidates": [
     {
       "brand": "Chanel",
@@ -17,8 +17,11 @@
       "matchType": "price-fallback"
     }
   ],
+  "mismatches": [],
   "flag": "#FDE68A",
   "printedItemId": "UNKNOWN1",
   "canonicalBrand": "Chanel",
-  "quotaGuard": ["Brave Search monthly guard reached."]
+  "paused": true,
+  "unavailableReason": "Brave Search monthly guard reached (950).",
+  "quotaGuard": ["Brave Search monthly guard reached (950)."]
 }

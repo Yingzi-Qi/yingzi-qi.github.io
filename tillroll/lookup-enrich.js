@@ -76,6 +76,7 @@ function cell(field, receiptValue, officialValue, { locked, colour, forceAmber =
     flag: amber ? 'amber' : null,
     flagColour: amber ? colour : null,
     locked: Boolean(locked),
+    note: '',
   };
 }
 
@@ -115,14 +116,15 @@ function noteFor(result) {
   return parts.join(' ');
 }
 
-function finish(result, row, { response = null, selection = null, orders = null, merchant = '', colour = AMBER, round = 1, previous = null, closeGap: _close = null } = {}) {
+function finish(result, row, { response = null, selection = null, orders = null, merchant = '', colour = AMBER, round = 1, previous = null, closeGap: _close = null, held = false } = {}) {
   const lockedSkip = result.skipped === 'complete-verified'
     || result.skipped === 'reading-error'
     || result.skipped === 'doubtful-zero';
   const accepted = selection?.winner || null;
   const fallbackOnly = Boolean(selection?.fallbackOnly);
   const exactPrimary = Boolean(
-    accepted && selection?.onPrimary && !selection?.fallback && !fallbackOnly
+    !held
+    && accepted && selection?.onPrimary && !selection?.fallback && !fallbackOnly
     && sameCode(row.itemId, accepted.itemId)
     && samePrice(row, accepted),
   );
@@ -154,7 +156,7 @@ function finish(result, row, { response = null, selection = null, orders = null,
   const fields = {
     '供应商': cell('供应商', row.supplier, supplier.supplier, { locked: fieldLocked(row.locks, '供应商'), colour }),
     '品牌': cell('品牌', row.brand, officialBrand, { locked: fieldLocked(row.locks, '品牌'), colour, forceAmber: fallbackOnly && !fieldLocked(row.locks, '品牌') }),
-    '品名': cell('品名', printedName, officialName, { locked: fieldLocked(row.locks, '品名'), colour, forceAmber: forceName && Boolean(officialName) && !fieldLocked(row.locks, '品名'), plain: exactPrimary }),
+    '品名': cell('品名', printedName, officialName, { locked: fieldLocked(row.locks, '品名'), colour, forceAmber: (held || forceName) && Boolean(officialName) && !fieldLocked(row.locks, '品名'), plain: exactPrimary }),
     '品牌货号': cell('品牌货号', row.itemId, officialId, {
       locked: fieldLocked(row.locks, '品牌货号'), colour, keepReceipt: true,
     }),
@@ -198,9 +200,9 @@ function finish(result, row, { response = null, selection = null, orders = null,
   result.matchType = selection?.matchType || null;
   result.fallbackNote = selection?.fallbackNote || '';
   result.exactPrimary = exactPrimary;
-  if (fallbackOnly || selection?.fallback || unidentified || result.mismatches.length || Object.values(fields).some(entry => entry.flag === 'amber') || forceName) {
+  if (held || fallbackOnly || selection?.fallback || unidentified || result.mismatches.length || Object.values(fields).some(entry => entry.flag === 'amber') || forceName) {
     if (!(lockedSkip)) {
-      const anyAmber = fallbackOnly || forceName || result.mismatches.some(entry => !fieldLocked(row.locks, entry.field)) || Object.values(fields).some(entry => entry.flag === 'amber');
+      const anyAmber = held || fallbackOnly || forceName || result.mismatches.some(entry => !fieldLocked(row.locks, entry.field)) || Object.values(fields).some(entry => entry.flag === 'amber');
       if (anyAmber) {
         result.flag = 'amber';
         result.flagColour = colour;
@@ -209,9 +211,18 @@ function finish(result, row, { response = null, selection = null, orders = null,
   }
   if (round === 2) result.round2Changed = round2Changed(previous, fields);
   else delete result.round2Changed;
-  if (row.nameUnresolved && !accepted && !lockedSkip && !fieldLocked(row.locks, '品名')) {
+  if (!held && row.nameUnresolved && !accepted && !lockedSkip && !fieldLocked(row.locks, '品名')) {
     result.fields['品名'] = cell('品名', printedName, null, { pink: true });
     result.mismatches = result.mismatches.filter(entry => entry.field !== '品名');
+  }
+  if (held && result.fields['品名'] && !fieldLocked(row.locks, '品名')) {
+    const note = lookupPausedNote(result.reason);
+    result.reason = note;
+    result.fields['品名'].note = note;
+    result.fields['品名'].flag = 'amber';
+    result.fields['品名'].flagColour = colour;
+    result.flag = 'amber';
+    result.flagColour = colour;
   }
   result.reviewNote = noteFor(result);
   return result;
@@ -263,6 +274,21 @@ function pauseMessage(response) {
     || response?.quotaGuard?.join(' ')
     || response?.error?.message
     || 'Look-up paused.';
+}
+
+export function lookupPausedNote(reason) {
+  const text = String(reason || '').trim();
+  if (!text || text === 'Look-up paused.') return 'Look-up paused.';
+  if (text.startsWith('Look-up paused:')) return text.endsWith('.') ? text : `${text}.`;
+  return `Look-up paused: ${text.endsWith('.') ? text : `${text}.`}`;
+}
+
+function responsePaused(response) {
+  return Boolean(
+    response?.paused === true
+    || response?.unavailableReason
+    || (Array.isArray(response?.quotaGuard) && response.quotaGuard.length),
+  );
 }
 
 export async function enrichLines({
@@ -379,10 +405,11 @@ export async function enrichLines({
       continue;
     }
     const failed = !response?.ok;
-    const pausedNow = Boolean(response?.paused || response?.unavailableReason || response?.locked);
-    const partial = Array.isArray(response?.quotaGuard) && response.quotaGuard.length > 0;
+    const quotaPaused = responsePaused(response);
+    const pausedNow = quotaPaused || Boolean(response?.locked);
+    const partial = quotaPaused;
     let selection = null;
-    if (!failed && !pausedNow) {
+    if (!failed && !response?.locked) {
       const access = primaryAccess(response, primary.brand, officialFallbacks);
       selection = selectCandidate(response.candidates, primary, {
         partial, closeGap, officialFallbacks, primaryBlocked: access.blocked, blockedDomain: access.domain,
@@ -405,21 +432,23 @@ export async function enrichLines({
         result.skipped = 'partial';
       }
       if (failed || pausedNow || response?.deferred) {
-        result.deferred = Boolean(response?.deferred || pausedNow);
-        result.reason = response?.deferred ? response.error.message : pauseMessage(response);
+        result.deferred = Boolean(response?.deferred || response?.locked);
+        result.reason = response?.deferred
+          ? response.error.message
+          : (quotaPaused ? lookupPausedNote(pauseMessage(response)) : pauseMessage(response));
         result.flag = 'amber';
         result.flagColour = colour;
-        result.skipped = response?.locked ? 'locked' : (pausedNow ? 'paused' : (response?.deferred ? 'run-cap' : 'error'));
+        result.skipped = response?.locked ? 'locked' : (quotaPaused ? 'paused' : (response?.deferred ? 'run-cap' : 'error'));
       }
       finish(result, rows[index], {
-        response, selection: failed || pausedNow ? null : selection, orders, merchant, colour, round,
-        previous: previousFor(previous, rows[index].sourceIndex), closeGap,
+        response, selection: failed || response?.locked ? null : selection, orders, merchant, colour, round,
+        previous: previousFor(previous, rows[index].sourceIndex), closeGap, held: quotaPaused,
       });
     });
     if (pausedNow || partial || response?.locked || response?.error?.code === '429' || response?.error?.code === '503' || response?.error?.code === 'locked') {
       lookupsPaused = true;
       locked = locked || Boolean(response?.locked || response?.error?.code === 'locked');
-      const message = pauseMessage(response);
+      const message = quotaPaused ? lookupPausedNote(pauseMessage(response)) : pauseMessage(response);
       if (message && !pausedReasons.includes(message)) pausedReasons.push(message);
     }
   }
@@ -429,12 +458,13 @@ export async function enrichLines({
     const colour = AMBER;
     if (result.flag === 'amber' && result.deferred) {
       finish(result, rows[index], {
-        orders, merchant, colour, round, previous: previousFor(previous, rows[index].sourceIndex),
+        orders, merchant, colour, round, previous: previousFor(previous, rows[index].sourceIndex), held: result.skipped === 'paused',
       });
       result.flag = 'amber';
       result.flagColour = colour;
       result.fields['品名'].flag = fieldLocked(rows[index].locks, '品名') ? null : 'amber';
       result.fields['品名'].flagColour = result.fields['品名'].flag ? colour : null;
+      if (result.skipped === 'paused') result.fields['品名'].note = lookupPausedNote(result.reason);
       return;
     }
     finish(result, rows[index], {

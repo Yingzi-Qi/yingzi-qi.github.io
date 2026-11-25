@@ -2,6 +2,21 @@
 // The service caches a match for 30 days and a no-match for 3 days, keyed by
 // normalised brand + item id. Rounded price is part of that key only for a
 // price-fallback result. This client mirrors that so a repeat does not fight it.
+// A paused response is not cached on either side. Its cacheKey has no
+// "lookup:v2:" prefix; invalidation still deletes the client keys below.
+//
+// Decided quota shape from the look-up service. paused is true only when a
+// source hit a guard, and is absent otherwise (never false). quotaGuard is the
+// unique guard strings in stage order, and only travels with paused. With a
+// pause, unavailableReason is those problems joined by one space, or the
+// joined guards. Without a pause it is set only when there are no candidates
+// and a source errored or was skipped. flag is #FDE68A when either is set.
+// Guards: "Brave Search monthly guard reached (N)." (950, hard 999),
+// "Gemini grounding daily guard reached (N)." (1450/1499),
+// "Gemini grounding monthly guard reached (N)." (4800/4999),
+// and "Quota store (D1) is not bound, so look-ups are paused."
+// A non-pause unavailableReason is a missing key, a 429, or a failed status.
+// GET /api/quota is separate: its pausedReasons omit the "(N)".
 
 import { canonicalBrand, normaliseItemId } from './brand-aliases.js';
 import { roundMoney } from './lookup-policy.js';
@@ -70,9 +85,9 @@ export function parseLookupResponse(payload) {
   const known = new Set(['cacheHit', 'cacheKey', 'sourcesQueried', 'candidates', 'flag', 'printedItemId', 'canonicalBrand', 'branch', 'paused', 'unavailableReason', 'quotaGuard', 'mismatches']);
   const extra = {};
   for (const [key, value] of Object.entries(body)) if (!known.has(key)) extra[key] = value;
-  const quotaGuard = Array.isArray(body.quotaGuard) ? body.quotaGuard.map(String)
-    : body.quotaGuard ? [String(body.quotaGuard)] : [];
-  return {
+  const quotaGuard = uniqueStrings(body.quotaGuard);
+  const unavailableReason = text(body.unavailableReason);
+  const parsed = {
     cacheHit: asBool(body.cacheHit),
     cacheKey: body.cacheKey == null ? null : String(body.cacheKey),
     sourcesQueried: Array.isArray(body.sourcesQueried) ? body.sourcesQueried.map(entry => typeof entry === 'string' ? entry : text(entry?.name || entry?.url || '')) : [],
@@ -81,12 +96,26 @@ export function parseLookupResponse(payload) {
     printedItemId: body.printedItemId == null ? null : String(body.printedItemId),
     canonicalBrand: body.canonicalBrand == null ? null : text(body.canonicalBrand) || null,
     branch: normaliseBranch(body.branch),
-    paused: asBool(body.paused),
-    unavailableReason: text(body.unavailableReason),
     quotaGuard,
     mismatches: parseMismatches(body.mismatches),
     extra,
   };
+  if (body.paused === true) parsed.paused = true;
+  if (unavailableReason) parsed.unavailableReason = unavailableReason;
+  return parsed;
+}
+
+function uniqueStrings(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  const strings = [];
+  for (const entry of value) {
+    const item = text(entry);
+    if (!item || seen.has(item)) continue;
+    seen.add(item);
+    strings.push(item);
+  }
+  return strings;
 }
 
 function invalidateStoreClues(request) {
@@ -177,6 +206,7 @@ export function createLookupClient({ baseUrl = '', fetchImpl = globalThis.fetch,
   };
 
   function remember(body, parsed) {
+    // Paused and unavailable results are not a final answer, and the service does not cache them.
     if (parsed.paused || parsed.unavailableReason || parsed.quotaGuard?.length) return;
     const kind = cacheKind(parsed);
     const key = cacheStorageKey(body, kind);

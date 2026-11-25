@@ -1,6 +1,7 @@
 // Accept an official-site candidate, then compare it with the receipt.
 // Price fallback ranks only candidates the service already marked price-fallback,
-// and only after the item id matched nothing. It does not run on a paused or partial result.
+// and only after the item id matched nothing. It does not run when that id stage
+// was paused, errored or skipped. An id match already in a paused response is still used.
 // Candidates within max(2% of the printed price, £5) of the best gap are close.
 // That band is decided.
 
