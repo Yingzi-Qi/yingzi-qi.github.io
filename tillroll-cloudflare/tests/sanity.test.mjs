@@ -475,15 +475,15 @@ test('BRAND_ITEM_ID_FORMAT is empty by default, injectable, and only fitting pri
   try {
     assert.deepEqual(BRAND_ITEM_ID_FORMAT, {});
     assert.equal(fitsBrandItemIdFormat('Synthetic', 'AB1375'), true);
-    assert.equal(fitsBrandItemIdFormat('Synthetic', 'ABI375'), false);
+    assert.equal(fitsBrandItemIdFormat('Synthetic', 'ABl375'), false);
     const fitting = resolveBrandItemId({ item: { styleRef: 'AB1375' }, brand: 'Synthetic' });
     assert.equal(fitting.brandItemId, 'AB1375');
     assert.equal(fitting.brandItemIdSource, 'styleRef');
     assert.equal(fitting.flag, null);
     // Non-fitting printed code is not treated as a confirmed style ref; it stays
     // exactly as printed (no rewrite to official / I→1) and is Pink.
-    const nonFitting = resolveBrandItemId({ item: { styleRef: 'ABI375' }, brand: 'Synthetic', officialItemId: 'AB1375' });
-    assert.equal(nonFitting.brandItemId, 'ABI375');
+    const nonFitting = resolveBrandItemId({ item: { styleRef: 'ABl375' }, brand: 'Synthetic', officialItemId: 'AB1375' });
+    assert.equal(nonFitting.brandItemId, 'ABl375');
     assert.notEqual(nonFitting.flag, null);
     assert.equal(nonFitting.flag, PINK);
     assert.match(nonFitting.reason, /AB1375/);
@@ -525,21 +525,21 @@ test('Chanel optional season prefix: 24P AS1234 yields style ref AS1234', async 
 
 test('unconfirmed printed brand code is kept exactly; alternative goes in the comment, never auto-corrected into the cell', async () => {
   const table = { Synthetic: /^AB\d{4}$/ };
-  assert.equal(suggestedPrintedCodeAlternative('ABI375', 'Synthetic', table), 'AB1375');
-  const rec = resolveBrandItemId({ item: { itemId: 'ABI375' }, brand: 'Synthetic', formatTable: table });
-  assert.equal(rec.brandItemId, 'ABI375');
+  assert.equal(suggestedPrintedCodeAlternative('ABl375', 'Synthetic', table), 'AB1375');
+  const rec = resolveBrandItemId({ item: { itemId: 'ABl375' }, brand: 'Synthetic', formatTable: table });
+  assert.equal(rec.brandItemId, 'ABl375');
   assert.equal(rec.flag, PINK);
   assert.equal(rec.reason, printedValueKeptReason('AB1375'));
   assert.match(rec.reason, /AB1375/);
   const { result } = await runSanity(makeEnv(), { receipts: [{
     receiptKey: 'ocr-keep', merchant: 'Test', date: '2026-04-03', time: '14:00:00',
     payment: 'Visa', currency: 'GBP',
-    items: [{ brand: 'Synthetic', item: 'Tote bag', itemId: 'ABI375', qty: 1, unitPrice: 100, amount: 100 }],
+    items: [{ brand: 'Synthetic', item: 'Tote bag', itemId: 'ABl375', qty: 1, unitPrice: 100, amount: 100 }],
   }] }, { brandItemIdFormat: table });
   const row = result.agreedRows[0];
-  assert.equal(row.cells['品牌货号'], 'ABI375');
+  assert.equal(row.cells['品牌货号'], 'ABl375');
   assert.notEqual(row.cells['品牌货号'], 'AB1375');
-  assert.equal(row.exportMeta.brandItemId, 'ABI375');
+  assert.equal(row.exportMeta.brandItemId, 'ABl375');
   assert.equal(row.flags['品牌货号'], PINK);
   assert.ok(result.readingErrors.some(e => e.col === '品牌货号' && e.reason === printedValueKeptReason('AB1375')));
   assert.equal(row.exportMeta.comments['品牌货号'], printedValueKeptReason('AB1375'));
