@@ -17,59 +17,59 @@ const fold = s => String(s ?? '').normalize('NFKD').replace(/[\u0300-\u036f]/g, 
 const compact = v => String(v ?? '').replace(/[\s-]/g, '');
 const wordsOf = text => fold(text).split(/[^a-z0-9]+/).filter(Boolean);
 
-// 9999999… family. A standalone numeric style ref such as 000001 is not this.
-export function isConcessionFamily(value) {
-  return /^9999999\d*$/.test(compact(value));
-}
-
-// Harrods layout: a leading 4-digit concession/department code, then a 10-digit code.
-export function harrodsConcessionPair(value) {
-  const match = /^(\d{4})\s+(\d{10})\b/.exec(String(value ?? '').trim());
-  return match ? { concessionCode: match[1], internalCode: match[2] } : null;
-}
-
-function pushCode(codes, value) {
+const clean = value => {
   const text = String(value ?? '').trim();
-  if (!text) return;
-  if (!codes.some(code => compact(code) === compact(text))) codes.push(text);
+  return text || null;
+};
+const sameCode = (a, b) => compact(a) && compact(a).toUpperCase() === compact(b).toUpperCase();
+
+// Numeric-only 10 digits, with no reader label. Not a classification of any
+// other length: a styleRef such as 000001 is never decided here.
+export function isUnlabelledTenDigits(value) {
+  return /^\d{10}$/.test(compact(value));
 }
 
-// Codes that must never be written into 品牌货号. Labels win even when the
-// value is not a 9999999… code. The 4-digit Harrods code counts only inside
-// the 4+10 layout, or when the reader labelled it.
-export function labelledStoreCodes(item = {}) {
-  const codes = [];
-  pushCode(codes, item.concessionCode);
-  pushCode(codes, item.internalCode);
-  const pair = harrodsConcessionPair(item.itemId) || harrodsConcessionPair(item.sku)
-    || harrodsConcessionPair(`${item.concessionCode || ''} ${item.internalCode || ''}`.trim());
-  if (pair) {
-    pushCode(codes, pair.concessionCode);
-    pushCode(codes, pair.internalCode);
-  }
-  if (isConcessionFamily(item.itemId)) pushCode(codes, item.itemId);
-  if (isConcessionFamily(item.sku)) pushCode(codes, item.sku);
-  return codes;
+function formatMiss(item, value, brandIdFormat) {
+  const verdict = brandIdFormat(item.brand, value);
+  return verdict == null || verdict === false || verdict === 'no match';
 }
 
-export function isStoreInternalValue(value, item) {
-  const code = compact(value);
-  if (!code) return false;
-  if (isConcessionFamily(code)) return true;
-  if (harrodsConcessionPair(value)) return true;
-  return labelledStoreCodes(item).some(labelled => compact(labelled) === code);
+// Trust the Reader's labels. Do not decide that a number is a concession code,
+// an EAN, or a style ref from its shape. The one exception is an unlabelled
+// numeric-only 10-digit value, which stays out unless the brand ID-format
+// hook matches it. A value supplied as styleRef always stays eligible.
+export function heldOutOfBrandItem(value, item, brandIdFormat = () => 'no match') {
+  const text = clean(value);
+  if (!text) return true;
+  if (sameCode(text, item.styleRef)) return false;
+  if (sameCode(text, item.concessionCode) || sameCode(text, item.internalCode) || sameCode(text, item.ean)) return true;
+  if (isUnlabelledTenDigits(text)) return formatMiss(item, text, brandIdFormat);
+  return false;
 }
 
-// Prefer a printed style ref. A store-internal code is not a candidate.
-export function brandItemCell(item = {}) {
-  const storeCodes = labelledStoreCodes(item);
-  const blocked = value => {
-    const text = String(value ?? '').trim();
-    if (!text) return true;
-    return isStoreInternalValue(text, item) || Boolean(harrodsConcessionPair(text));
+export function selectBrandItem(item = {}, brandIdFormat = () => 'no match') {
+  const format = typeof brandIdFormat === 'function' ? brandIdFormat : () => 'no match';
+  const storeCodes = [];
+  const push = value => {
+    const text = clean(value);
+    if (!text || storeCodes.some(code => sameCode(code, text))) return;
+    storeCodes.push(text);
   };
-  const cell = [item.styleRef, item.itemId, item.sku].find(value => !blocked(value));
-  return { cell: cell == null ? null : String(cell).trim(), storeCodes };
+  push(item.concessionCode);
+  push(item.internalCode);
+  push(item.ean);
+  for (const value of [item.itemId, item.sku]) {
+    if (clean(value) && heldOutOfBrandItem(value, item, format)) push(value);
+  }
+  const cell = [item.styleRef, item.itemId, item.sku].map(clean).find(value => value && !heldOutOfBrandItem(value, item, format)) || null;
+  const lookupId = clean(item.itemId) || clean(item.ean) || clean(item.sku) || clean(item.styleRef);
+  let idClass = 'printed';
+  if (lookupId && (sameCode(lookupId, item.concessionCode) || sameCode(lookupId, item.internalCode))) idClass = 'concession';
+  else if (lookupId && sameCode(lookupId, item.ean)) idClass = 'ean';
+  else if (lookupId && sameCode(lookupId, item.styleRef)) idClass = 'style';
+  else if (lookupId && isUnlabelledTenDigits(lookupId) && heldOutOfBrandItem(lookupId, item, format)) idClass = 'unlabelled10';
+  else if (cell && sameCode(cell, item.styleRef)) idClass = 'style';
+  return { cell, storeCodes, lookupId, idClass };
 }
 
 function phraseIsRowBrand(phrase, rowBrand) {
@@ -89,22 +89,40 @@ function brandHits(name, brand) {
   for (let i = 0; i < words.length; i++) {
     for (let n = 1; n <= 4 && i + n <= words.length; n++) {
       const phrase = words.slice(i, i + n).join(' ');
-      if (phraseIsRowBrand(phrase, brand)) hits.push({ start: i, length: n });
+      if (phraseIsRowBrand(phrase, brand)) hits.push({ start: i, length: n, phrase });
     }
   }
   return hits;
 }
 
+// An alias of 3 characters or fewer counts only as its own token at the start
+// or end of 品名. It does not count inside a longer official name this row's
+// look-up already returned. A brand or alias of 4 or more characters still
+// matches as a whole word anywhere.
+function shortAliasCounts(hit, words, name, officialName) {
+  const letters = hit.phrase.replace(/[^a-z0-9]/g, '');
+  if (letters.length > 3) return true;
+  const atEdge = hit.length === 1 && (hit.start === 0 || hit.start + hit.length === words.length);
+  if (!atEdge) return false;
+  if (officialName && fold(name) === fold(officialName)) {
+    const officialWords = wordsOf(officialName);
+    const phrase = officialWords.slice(hit.start, hit.start + hit.length).join(' ');
+    if (officialWords.length > hit.length && phrase === hit.phrase) return false;
+  }
+  return true;
+}
+
 // True when 品名 still contains the row's brand or a canonical alias, a
 // 9999999… code, an EAN or any run of 6+ digits, or no non-brand word.
 // An empty 品牌 still counts a known brand or alias left in the name.
-export function nameNeedsChecking(name, brand) {
+export function nameNeedsChecking(name, brand, options = {}) {
+  const officialName = options.officialName || null;
   const text = String(name ?? '').trim();
   if (!text) return true;
   if (/9999999\d*/.test(compact(text)) || /\d{6,}/.test(compact(text))) return true;
-  const hits = brandHits(text, brand);
-  if (hits.length) return true;
   const words = wordsOf(text);
+  const hits = brandHits(text, brand).filter(hit => shortAliasCounts(hit, words, text, officialName));
+  if (hits.length) return true;
   const letterIndexes = words.map((word, index) => (/[a-z]/.test(word) ? index : -1)).filter(index => index >= 0);
   if (!letterIndexes.length) return true;
   const consumed = new Set();
@@ -116,7 +134,7 @@ export function gateFindings(row) {
   const cells = row?.cells || {};
   const findings = [];
   if (!String(cells['品牌'] ?? '').trim()) findings.push({ col: '品牌', reason: BRAND_NOT_READ });
-  if (nameNeedsChecking(cells['品名'], cells['品牌'])) findings.push({ col: '品名', reason: NAME_NEEDS_CHECKING });
+  if (nameNeedsChecking(cells['品名'], cells['品牌'], { officialName: row?.raw?.officialName || null })) findings.push({ col: '品名', reason: NAME_NEEDS_CHECKING });
   const invalid = row?.raw?.invalidPrices || {};
   for (const col of PRICE_COLUMNS) {
     const value = cells[col];

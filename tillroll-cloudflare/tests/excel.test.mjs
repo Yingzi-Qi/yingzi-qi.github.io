@@ -450,7 +450,7 @@ test('P1: 品牌货号 prefers a style reference over an EAN or concession code'
   const { result } = await runSanity(env, { batchId: 'p1', mode: 'round1', receipts: [{
     receiptKey: 'p1', merchant: 'Synthetic Store', receiptReference: 'P1-1', date: '2026-07-03', time: '12:00', payment: 'Card', currency: 'GBP',
     items: [
-      { brand: 'Synthetic', item: 'Bag', itemId: '5012345678901', sku: 'ST-88', unitPrice: 20, amount: 20 },
+      { brand: 'Synthetic', item: 'Bag', itemId: '5012345678901', ean: '5012345678901', sku: 'ST-88', unitPrice: 20, amount: 20 },
       { brand: 'Synthetic', item: 'Scarf', itemId: '9999999001', unitPrice: 15, amount: 15 },
     ],
   }] }, { lookup });
@@ -537,7 +537,7 @@ test('2: a concession code never stays in 品牌货号; an official id, an EAN a
     items: [
       { rowId: 'id-official', brand: 'Synthetic', item: 'Coat', itemId: '9999999100', unitPrice: 30, amount: 30 },
       { rowId: 'id-none', brand: 'Synthetic', item: 'Scarf', itemId: '9999999200', unitPrice: 12, amount: 12 },
-      { rowId: 'id-ean', brand: 'Synthetic', item: 'Soap', itemId: '5011111111111', unitPrice: 5, amount: 5 },
+      { rowId: 'id-ean', brand: 'Synthetic', item: 'Soap', itemId: '5011111111111', ean: '5011111111111', unitPrice: 5, amount: 5 },
       { rowId: 'id-style', brand: 'Synthetic', item: 'Printed Style', itemId: 'SYN-STYLE', unitPrice: 40, amount: 40 },
       { rowId: 'id-pf-style', brand: 'Synthetic', item: 'Bag', itemId: 'SYN-PF', unitPrice: 40, amount: 40 },
       { rowId: 'id-pf-cc', brand: 'Synthetic', item: 'Hat', itemId: '9999999300', unitPrice: 22, amount: 22 },
@@ -605,8 +605,8 @@ test('Harrods 4+10 concession code stays out of 品牌货号; 000001 stays a sty
   const { result } = await runSanity(env, { batchId: 'h4', mode: 'round1', receipts: [{
     receiptKey: 'h4', merchant: 'Harrods', receiptReference: 'H4-1', date: '2026-07-08', time: '10:00', payment: 'Card', currency: 'GBP',
     items: [
-      { rowId: 'h-pair', brand: 'Synthetic', item: 'Coat', itemId: '2574 1234567890', styleRef: 'AB12', unitPrice: 40, amount: 40 },
-      { rowId: 'h-style', brand: 'Synthetic', item: 'Belt', itemId: '000001', unitPrice: 40, amount: 40 },
+      { rowId: 'h-pair', brand: 'Synthetic', item: 'Coat', styleRef: 'AB12', concessionCode: '2574', internalCode: '1234567890', unitPrice: 40, amount: 40 },
+      { rowId: 'h-style', brand: 'Synthetic', item: 'Belt', styleRef: '000001', unitPrice: 40, amount: 40 },
     ],
   }] }, { lookup: noLookup });
   const pair = result.agreedRows.find(r => r.rowId === 'h-pair');
@@ -675,7 +675,8 @@ test('gate (b): a name that still holds a brand, a code, or no product word is P
   for (const [id, name] of [['gb-alias', 'Christian Dior Saddle'], ['gb-empty', 'Christian Dior Book'], ['gb-cc', 'Saddle 9999999001'], ['gb-ean', 'Saddle 5012345678901'], ['gb-digits', 'Saddle 123456'], ['gb-only', 'Christian Dior']]) {
     assert.equal(by[id].cells['品名'], name);
     assert.equal(by[id].flags['品名'], PINK);
-    assert.equal(by[id].flagReasons['品名'], 'Name needs checking');
+    assert.match(by[id].flagReasons['品名'], /Name needs checking/);
+    assert.match(by[id].exportMeta.comments['品名'], /Name needs checking/);
   }
   assert.equal(by['gb-ok'].cells['品名'], 'Saddle bag');
   assert.notEqual(by['gb-ok'].flagReasons['品名'], 'Name needs checking');
@@ -743,4 +744,97 @@ test('gate (d): a human_verified_unflagged cell is not re-flagged by the gate', 
   assert.equal(locked.flagReasons['采购商品原价'], undefined);
   assert.equal(open.flags['品牌'], PINK);
   assert.equal(open.flagReasons['品牌'], 'Brand not read');
+});
+
+test('an unlabelled numeric-only 10-digit id stays out of 品牌货号 unless the format hook or look-up fills it', async () => {
+  const env = makeEnv();
+  const lookup = async (_env, body) => {
+    if (body.itemId === '1234567890') return { candidates: [{ brand: 'Synthetic', officialName: 'Official Coat', itemId: 'BR-10', price: 30, currency: 'GBP', matchType: 'id', confidence: 0.8, sourceUrls: ['https://synthetic.example/ten'], matchedFields: ['itemId'], onOfficialSite: true, weightGrams: null }], cacheHit: false, cacheKey: 'ten', sourcesQueried: ['brave'], printedItemId: body.itemId, canonicalBrand: 'Synthetic' };
+    return { candidates: [], cacheHit: false, cacheKey: 'none', sourcesQueried: [] };
+  };
+  const { result } = await runSanity(env, { batchId: 'ten', mode: 'round1', receipts: [{
+    receiptKey: 'ten', merchant: 'Synthetic Store', receiptReference: 'TEN-1', date: '2026-07-10', time: '10:00', payment: 'Card', currency: 'GBP',
+    items: [
+      { rowId: 'ten-none', brand: 'Synthetic', item: 'Scarf', itemId: '2222222222', unitPrice: 12, amount: 12 },
+      { rowId: 'ten-fill', brand: 'Synthetic', item: 'Coat', itemId: '1234567890', unitPrice: 30, amount: 30 },
+      { rowId: 'ten-style', brand: 'Synthetic', item: 'Belt', styleRef: '000001', unitPrice: 40, amount: 40 },
+    ],
+  }] }, { lookup });
+  const none = result.agreedRows.find(r => r.rowId === 'ten-none');
+  const fill = result.agreedRows.find(r => r.rowId === 'ten-fill');
+  const style = result.agreedRows.find(r => r.rowId === 'ten-style');
+  assert.equal(none.cells['品牌货号'], null);
+  assert.equal(none.flags['品牌货号'], PINK);
+  assert.equal(none.flagReasons['品牌货号'], 'no brand item ID printed');
+  assert.match(none.exportMeta.comments['品牌货号'], /2222222222/);
+  assert.match(none.exportMeta.alternates['品牌货号'].receipt, /2222222222/);
+  assert.equal(fill.cells['品牌货号'], 'BR-10');
+  assert.equal(fill.flags['品牌货号'], AMBER);
+  assert.match(fill.exportMeta.comments['品牌货号'], /1234567890/);
+  assert.equal(style.cells['品牌货号'], '000001');
+  const matched = await runSanity(env, { batchId: 'ten-fmt', mode: 'round1', receipts: [{
+    receiptKey: 'ten-fmt', merchant: 'Synthetic Store', receiptReference: 'TEN-FMT', date: '2026-07-10', time: '11:00', payment: 'Card', currency: 'GBP',
+    items: [{ rowId: 'ten-fmt', brand: 'Synthetic', item: 'Clip', itemId: '1111111111', unitPrice: 8, amount: 8 }],
+  }] }, { lookup: noLookup, brandIdFormat: (brand, value) => (brand === 'Synthetic' && value === '1111111111' ? 'synthetic' : 'no match') });
+  const kept = matched.result.agreedRows[0];
+  assert.equal(kept.cells['品牌货号'], '1111111111');
+  assert.notEqual(kept.flagReasons['品牌货号'], 'no brand item ID printed');
+});
+
+test('short brand aliases pink only at the start or end, and not inside the look-up official name', async () => {
+  const env = makeEnv();
+  const lookup = async (_env, body) => {
+    if (body.itemId !== 'SYN-OFF') return { candidates: [], cacheHit: false, cacheKey: 'none', sourcesQueried: [] };
+    return { candidates: [{ brand: 'MAC', officialName: 'MAC Rouge Coco', itemId: 'SYN-OFF', price: 20, currency: 'GBP', matchType: 'id', confidence: 0.95, sourceUrls: ['https://synthetic.example/mac'], matchedFields: ['itemId', 'price'], onOfficialSite: true, weightGrams: null }], cacheHit: false, cacheKey: 'mac', sourcesQueried: ['brave'], printedItemId: body.itemId, canonicalBrand: 'MAC' };
+  };
+  const { result } = await runSanity(env, { batchId: 'alias', mode: 'round1', receipts: [{
+    receiptKey: 'alias', merchant: 'Synthetic Store', receiptReference: 'AL-1', date: '2026-07-11', time: '10:00', payment: 'Card', currency: 'GBP',
+    items: [
+      { rowId: 'al-start', brand: null, item: 'MAC lipstick', itemId: 'SYN-A1', unitPrice: 20, amount: 20 },
+      { rowId: 'al-mid', brand: null, item: 'Big Mac print tee', itemId: 'SYN-A2', unitPrice: 20, amount: 20 },
+      { rowId: 'al-official', brand: null, item: 'lipstick', itemId: 'SYN-OFF', unitPrice: 20, amount: 20 },
+    ],
+  }] }, { lookup });
+  const start = result.agreedRows.find(r => r.rowId === 'al-start');
+  const mid = result.agreedRows.find(r => r.rowId === 'al-mid');
+  const official = result.agreedRows.find(r => r.rowId === 'al-official');
+  assert.equal(start.cells['品名'], 'MAC lipstick');
+  assert.equal(start.flags['品名'], PINK);
+  assert.match(start.flagReasons['品名'], /Name needs checking/);
+  assert.equal(mid.cells['品名'], 'Big Mac print tee');
+  assert.notEqual(mid.flagReasons['品名'], undefined);
+  assert.doesNotMatch(String(mid.flagReasons['品名'] || ''), /Name needs checking/);
+  assert.equal(official.cells['品名'], 'MAC Rouge Coco');
+  assert.equal(official.flags['品名'], undefined);
+  assert.doesNotMatch(String(official.flagReasons['品名'] || ''), /Name needs checking/);
+});
+
+test('a gate Pink keeps the look-up Amber reason and candidates in the comment and hidden metadata', async () => {
+  const env = makeEnv();
+  const lookup = async () => ({
+    candidates: [{ brand: 'Dior', officialName: 'Dior Saddle', itemId: 'OFF-1', price: 10, currency: 'GBP', matchType: 'price-fallback', confidence: 0.4, sourceUrls: ['https://synthetic.example/dior'], matchedFields: [], onOfficialSite: false, weightGrams: 100 }],
+    cacheHit: false, cacheKey: 'both', sourcesQueried: ['brave'], printedItemId: 'SYN-BOTH', canonicalBrand: 'Dior',
+  });
+  const { result } = await runSanity(env, { batchId: 'both', mode: 'round1', receipts: [{
+    receiptKey: 'both', merchant: 'Synthetic Store', receiptReference: 'BOTH-1', date: '2026-07-11', time: '12:00', payment: 'Card', currency: 'GBP',
+    items: [{ rowId: 'both-1', brand: 'Dior', item: 'Saddle', itemId: 'SYN-BOTH', unitPrice: 10, amount: 10 }],
+  }] }, { lookup });
+  const row = result.agreedRows[0];
+  assert.equal(row.cells['品名'], 'Dior Saddle');
+  assert.equal(row.flags['品名'], PINK);
+  assert.match(row.flagReasons['品名'], /Name needs checking/);
+  assert.match(row.flagReasons['品名'], /Price-fallback look-up/);
+  assert.match(row.exportMeta.comments['品名'], /Name needs checking/);
+  assert.match(row.exportMeta.comments['品名'], /Price-fallback look-up/);
+  assert.match(row.exportMeta.comments['品名'], /OFF-1/);
+  assert.equal(row.exportMeta.gateNotes['品名'].gate, 'Name needs checking');
+  assert.match(row.exportMeta.gateNotes['品名'].lookup, /Price-fallback look-up/);
+  assert.equal(row.exportMeta.gateNotes['品名'].candidates[0].itemId, 'OFF-1');
+  const parsed = await readV2Workbook(await buildV2XlsxBlob(result));
+  const saved = parsed.rows.find(r => r.rowId === 'both-1');
+  assert.equal(saved.baseline.gateNotes['品名'].gate, 'Name needs checking');
+  assert.match(saved.baseline.gateNotes['品名'].lookup, /Price-fallback look-up/);
+  assert.equal(saved.baseline.gateNotes['品名'].candidates[0].itemId, 'OFF-1');
+  assert.match(saved.comments['品名'], /Name needs checking/);
+  assert.match(saved.comments['品名'], /Price-fallback look-up/);
 });
