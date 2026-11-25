@@ -3,7 +3,7 @@
 // Excel Sync audit) and iterates until the audit converges. Only the final
 // agreed version leaves this module; the internal trail is stored in D1 only.
 import { canonicalBrand } from './brands.js';
-import { lookup as defaultLookup, invalidate, priceTolerance } from './lookup.js';
+import { lookup as defaultLookup, invalidate, priceFallbackIsTie, priceTolerance } from './lookup.js';
 import { nowIso, sha256Hex } from './http.js';
 import { expandReceipt, isConfirmedZero, joinPurchaseTime, supplierVisibleName } from '../../../tillroll/units.js';
 import { matchBrandIdFormat } from '../../../tillroll/brand-id-format.js';
@@ -136,10 +136,12 @@ function readerStage(receipt, rIndex, state, ctx) {
     const invalidPrices = {};
     if (unitRead.invalid) invalidPrices['采购商品原价'] = unitRead.raw;
     if (amountRead.invalid) invalidPrices['采购商品金额'] = amountRead.raw;
-    const row = { rowId: it.rowId || `${receipt.receiptKey}:${lineIndex}:u0`, receiptKey: receipt.receiptKey, lineIndex, unitIndex: it.unitIndex ?? 0, flags: {}, notes: [], _reading: [], _lookup: [], _alternates: {}, _comments: {}, _candidates: null, _officialBranch: null, lookup: null, discountKind: it.discountKind || 'none',
+    const estimated = it.estimated === true || it.discountKind === 'estimated';
+    const unitCount = it.unitCount || (receipt.items || []).filter(x => (x.lineIndex ?? 0) === lineIndex).length || 1;
+    const row = { rowId: it.rowId || `${receipt.receiptKey}:${lineIndex}:u0`, receiptKey: receipt.receiptKey, lineIndex, unitIndex: it.unitIndex ?? 0, unitCount, estimated, flags: {}, notes: [], _reading: [], _lookup: [], _alternates: {}, _comments: {}, _candidates: null, _officialBranch: null, lookup: null, mismatches: [], discountKind: it.discountKind || (estimated ? 'estimated' : 'none'),
       cells: { '采购小票id': receiptId, '采购时间': ts, '供应商': merchant, '品牌': brandRaw, '品名': str(it.item), '品牌货号': itemCell,
         '采购商品原价': unitCell ?? (amountCell !== null && !unitRead.invalid ? round2((amountCell + discount) / (qty || 1)) : null), '采购商品金额': amountCell, '采购商品方法': tender, '销售金额': null },
-      raw: { style: str(it.styleRef) || (str(it.sku) !== str(it.itemId) ? str(it.sku) : null), colour: str(it.colour), size: str(it.size), qty, currency: str(receipt.currency) || 'GBP', storeCodes: picked.storeCodes, idClass: picked.idClass, builder, itemLabels: { concessionCode: it.concessionCode ?? null, internalCode: it.internalCode ?? null, ean: it.ean ?? null, itemId: it.itemId ?? null, sku: it.sku ?? null, styleRef: it.styleRef ?? null }, invalidPrices, printedItemId: (picked.idClass === 'ean' || picked.idClass === 'concession' || picked.idClass === 'unlabelled10') ? picked.lookupId : (itemCell || picked.lookupId), extraUrls: builderUrls(it, builder) },
+      raw: { printedBrand: brandRaw, style: str(it.styleRef) || (str(it.sku) !== str(it.itemId) ? str(it.sku) : null), colour: str(it.colour), size: str(it.size), qty, currency: str(receipt.currency) || 'GBP', storeCodes: picked.storeCodes, idClass: picked.idClass, builder, itemLabels: { concessionCode: it.concessionCode ?? null, internalCode: it.internalCode ?? null, ean: it.ean ?? null, itemId: it.itemId ?? null, sku: it.sku ?? null, styleRef: it.styleRef ?? null }, invalidPrices, printedItemId: (picked.idClass === 'ean' || picked.idClass === 'concession' || picked.idClass === 'unlabelled10') ? picked.lookupId : (itemCell || picked.lookupId), extraUrls: builderUrls(it, builder) },
       storeClues: receipt.storeClues || null };
     if (!receiptId) addFlag(row, '采购小票id', PINK, /selfridges/i.test(merchant || '') ? 'Selfridges receipt number (below the barcode) not read.' : /harrods/i.test(merchant || '') ? 'Harrods receipt number (right of date/time) not read.' : 'Receipt ID not read.');
     if (!ts) addFlag(row, '采购时间', PINK, 'Date/time missing or not a valid date.');
@@ -165,8 +167,8 @@ function readerStage(receipt, rIndex, state, ctx) {
     else if (unit !== null && Math.abs(qty * unit - discount - amount) > 0.02 && Math.abs(qty * unit - amount) > 0.02) addFlag(row, '采购商品金额', PINK, `qty × unit price − discount (${round2(qty * unit - discount)}) does not match amount (${amount}).`);
     for (const col of it.readingFlags || []) if (COLUMNS.includes(col)) addFlag(row, col, PINK, it.baselineFlagReasons?.[col] || it.flagReasons?.[col] || 'Flagged by the reader.');
     // Printed per-unit discounts are exact. Only a proportional estimate is Amber.
-    if (it.discountKind === 'estimated' && typeof row.cells['采购商品金额'] === 'number') {
-      addFlag(row, '采购商品金额', AMBER, 'Discount allocated proportionally from a line or receipt total (not printed per unit).');
+    if (row.estimated && typeof row.cells['采购商品金额'] === 'number') {
+      addFlag(row, '采购商品金额', AMBER, 'Discount allocated proportionally from a line or receipt total (not printed per unit).', { estimated: true });
     }
     rows.push(row);
   });
@@ -306,7 +308,7 @@ async function verifierStage(rows, receipt, ctx) {
     if (ctx.mode === 'round2' && row.skipLookup) { settleBrandItemId(row, null, ctx); continue; }
     if (!row.raw.printedItemId && !c['品名']) { settleBrandItemId(row, null, ctx); continue; }
     if (ctx.lookupsUsed >= MAX_LOOKUPS_PER_RUN) { lookupFlag(row, '品名', AMBER, 'Look-up deferred: per-run cap reached.'); settleBrandItemId(row, null, ctx); continue; }
-    const req = { brand: c['品牌'], itemId: row.raw.printedItemId, name: c['品名'], style: row.raw.style, price: c['采购商品原价'], currency: row.raw.currency };
+    const req = { brand: row.raw.printedBrand || c['品牌'], itemId: row.raw.printedItemId, name: c['品名'], style: row.raw.style, price: c['采购商品原价'], currency: row.raw.currency };
     const res = await ctx.callLookup(req);
     if (!res) { settleBrandItemId(row, null, ctx); continue; }
     if (res.paused || res.unavailableReason) {
@@ -318,6 +320,8 @@ async function verifierStage(rows, receipt, ctx) {
     const top = res.candidates?.[0];
     if (top?.officialName) row.raw.officialName = top.officialName;
     row.lookup = { cacheKey: res.cacheKey, matchType: top?.matchType || null, confidence: top?.confidence ?? null, sourceUrls: top?.sourceUrls || [] };
+    row.mismatches = Array.isArray(res.mismatches) ? res.mismatches : [];
+    row.lookup.mismatches = row.mismatches;
     if ((res.candidates || []).some(x => x.matchType === 'price-fallback')) {
       row._candidates = res.candidates.map(x => ({ officialName: x.officialName, itemId: x.itemId, brand: x.brand, price: x.price, currency: x.currency, weightGrams: x.weightGrams, sourceUrls: x.sourceUrls || [] }));
     }
@@ -330,6 +334,7 @@ async function verifierStage(rows, receipt, ctx) {
       }
     }
     if (top.matchType === 'price-fallback') {
+      if (priceFallbackIsTie({ brand: row.raw.printedBrand || c['品牌'], itemId: row.raw.printedItemId, name: c['品名'], style: row.raw.style, price: c['采购商品原价'], currency: row.raw.currency }, res.candidates)) row._skipOfficialName = true;
       const samePrice = res.candidates.filter(x => Math.abs(x.price - top.price) < 0.005);
       if (samePrice.length > 1 && samePrice.every(x => x.weightGrams === null)) {
         lookupFlag(row, '品名', AMBER, 'Item ID matched nothing; several official items at this price and no published weight. Pick one.', { candidates: samePrice.map(x => ({ officialName: x.officialName, itemId: x.itemId, price: x.price, sourceUrls: x.sourceUrls })) });
@@ -348,7 +353,7 @@ async function verifierStage(rows, receipt, ctx) {
       lookupFlag(row, '品牌', AMBER, 'Brand recovered by look-up.', { confidence: top.confidence, sourceUrls: top.sourceUrls });
     }
     if (!ctx.locked(row.rowId, '品名') && row.flags['品名'] !== PINK) {
-      if (top.officialName && top.officialName !== c['品名']) {
+      if (!row._skipOfficialName && top.officialName && top.officialName !== c['品名']) {
         noteMismatch(row, '品名', c['品名'], top.officialName, 'official');
         row.previousName = c['品名'];
         c['品名'] = top.officialName;
@@ -629,7 +634,7 @@ export async function runSanity(env, input, deps = {}) {
       if (mode === 'round2') {
         const edited = new Set(it.editedCols || []);
         if (edited.has('品牌货号') && it.previousItemId) {
-          await invalidate(env, { brand: row.cells['品牌'], itemId: row.cells['品牌货号'], previousItemId: it.previousItemId, price: row.cells['采购商品原价'], currency: row.raw?.currency || r.currency });
+          await invalidate(env, { brand: row.raw?.printedBrand || row.cells['品牌'], itemId: row.cells['品牌货号'], previousItemId: it.previousItemId, price: row.cells['采购商品原价'], currency: row.raw?.currency || r.currency, name: row.cells['品名'], style: row.raw?.style, supplier: row.cells['供应商'], storeClues: r.storeClues });
         }
         const complete = row.cells['品牌'] && row.cells['品名'] && typeof row.cells['采购商品原价'] === 'number';
         const verified = ['品牌', '品名', '采购商品原价'].every(col => !(it.flaggedCols || []).includes(col) || ctx.locked(row.rowId, col) || (it.clearedCols || []).includes(col));
@@ -677,7 +682,7 @@ export async function runSanity(env, input, deps = {}) {
     for (const e of row._lookup) if (row.flags[e.col]) flagReasons[e.col] = e.reason;
     for (const e of [...row._reading, ...row._lookup]) if (e.pendingOwnerConfirmation && row.flags[e.col]) pendingOwnerConfirmation[e.col] = true;
     for (const e of row._reading) if (row.flags[e.col]) readingErrors.push({ rowId: row.rowId, col: e.col, reason: e.reason });
-    for (const e of row._lookup) if (row.flags[e.col]) lookupUncertainties.push({ rowId: row.rowId, col: e.col, reason: e.reason, confidence: e.confidence ?? row.lookup?.confidence ?? null, sourceUrls: e.sourceUrls || row.lookup?.sourceUrls || [], ...(e.candidates ? { candidates: e.candidates } : {}) });
+    for (const e of row._lookup) if (row.flags[e.col]) lookupUncertainties.push({ rowId: row.rowId, col: e.col, reason: e.reason, confidence: e.confidence ?? row.lookup?.confidence ?? null, sourceUrls: e.sourceUrls || row.lookup?.sourceUrls || [], estimated: Boolean(e.estimated || row.estimated), ...(e.candidates ? { candidates: e.candidates } : {}), ...(e.mismatches || row.mismatches?.length ? { mismatches: e.mismatches || row.mismatches } : {}) });
     const exportMeta = {
       discountKind: row.discountKind || 'none',
       currency: row.raw?.currency || 'GBP',
@@ -697,8 +702,8 @@ export async function runSanity(env, input, deps = {}) {
       pendingOwnerConfirmation: Object.keys(pendingOwnerConfirmation).length ? pendingOwnerConfirmation : null,
       storeClues: row.storeClues || null,
     };
-    return { rowId: row.rowId, receiptKey: row.receiptKey, lineIndex: row.lineIndex, unitIndex: row.unitIndex ?? 0, cells: row.cells, flags: row.flags, flagReasons, notes: row.notes,
-      lookup: row.lookup, exportMeta, ...(mode === 'round2' ? { round2Changed } : {}) };
+    return { rowId: row.rowId, receiptKey: row.receiptKey, lineIndex: row.lineIndex, unitIndex: row.unitIndex ?? 0, unitCount: row.unitCount, cells: row.cells, flags: row.flags, flagReasons, notes: row.notes,
+      lookup: row.lookup, estimated: Boolean(row.estimated), mismatches: row.mismatches || [], exportMeta, ...(mode === 'round2' ? { round2Changed } : {}) };
   });
   state.excludedZero = dedupeZero(state.excludedZero);
   const result = { agreedRows, excludedZero: state.excludedZero, excludedZeroCount: state.excludedZero.length, readingErrors, lookupUncertainties, workbookExportReady: finalIssues.length === 0 };

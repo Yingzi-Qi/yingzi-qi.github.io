@@ -56,6 +56,79 @@ export function matchedFields(req, c) {
   return out;
 }
 
+// Price-fallback ranking (Yingzi / Orchestrator 16:44, 25 Nov 2026).
+// Replaces min(2% of printed price, £1) with max(2% of printed price, £5).
+// Only used after a confirmed item-ID miss (see lookup()).
+export function priceFallbackGapBand(printedPrice) {
+  const p = Math.abs(Number(printedPrice));
+  if (!Number.isFinite(p)) return 5;
+  return Math.max(0.02 * p, 5);
+}
+
+export function isExactPrice(req, c) {
+  if (req?.price === null || req?.price === undefined || c?.price === null || c?.price === undefined) return false;
+  if (req.currency && c.currency && req.currency !== c.currency) return false;
+  return Math.abs(Number(c.price) - Number(req.price)) < 0.005;
+}
+
+export function priceGap(req, c) {
+  if (req?.price === null || req?.price === undefined || c?.price === null || c?.price === undefined) return Infinity;
+  return Math.abs(Number(c.price) - Number(req.price));
+}
+
+/** Description match: official name shares enough tokens with the printed name. */
+export function descriptionMatches(req, c) {
+  const mf = Array.isArray(c?.matchedFields) ? c.matchedFields : matchedFields(req, c);
+  return mf.includes('name');
+}
+
+/** Item-number match: printed style/SKU equals the official item id or style code. */
+export function itemNumberMatches(req, c) {
+  const style = req?.style;
+  if (style && c?.itemId && compact(style) === compact(c.itemId)) return true;
+  if (style && c?.style && compact(style) === compact(c.style)) return true;
+  return false;
+}
+
+// (a) count of {description, item number, exact price} matches. Higher ranks first.
+export function comboMatchCount(req, c) {
+  return (descriptionMatches(req, c) ? 1 : 0) + (itemNumberMatches(req, c) ? 1 : 0) + (isExactPrice(req, c) ? 1 : 0);
+}
+
+// Rank: (a) combo, then (b) exact price, then (c) smallest price gap.
+// Among a (a)+(b) group, if a candidate's gap is within max(2%, £5) of the
+// best gap, prefer the lighter published weight. Always leave the list intact
+// so the caller can flag Amber with every candidate.
+export function rankPriceFallback(req, candidates) {
+  const scored = (candidates || []).map((c, i) => ({
+    c, i,
+    combo: comboMatchCount(req, c),
+    exact: isExactPrice(req, c),
+    gap: priceGap(req, c),
+    weight: c.weightGrams === null || c.weightGrams === undefined ? Infinity : Number(c.weightGrams),
+  }));
+  scored.sort((a, b) => (b.combo - a.combo) || (Number(b.exact) - Number(a.exact)) || (a.gap - b.gap) || (a.i - b.i));
+  const groups = [];
+  for (const s of scored) {
+    const last = groups[groups.length - 1];
+    if (last && last[0].combo === s.combo && last[0].exact === s.exact) last.push(s);
+    else groups.push([s]);
+  }
+  const band = priceFallbackGapBand(req.price);
+  const out = [];
+  for (const g of groups) {
+    const bestGap = Math.min(...g.map(x => x.gap));
+    const inBand = x => (x.gap - bestGap) <= band + 1e-9;
+    g.sort((a, b) => {
+      const aIn = inBand(a), bIn = inBand(b);
+      if (aIn && bIn) return (a.weight - b.weight) || (a.gap - b.gap) || (a.i - b.i);
+      return (a.gap - b.gap) || (a.weight - b.weight) || (a.i - b.i);
+    });
+    out.push(...g.map(x => x.c));
+  }
+  return out;
+}
+
 function priceFromText(text, currency) {
   const sym = { GBP: '£', EUR: '€', USD: '$' }[currency || 'GBP'] || '£';
   const re = new RegExp(`\\${sym}\\s?([0-9]{1,3}(?:[,][0-9]{3})*(?:\\.[0-9]{2})?|[0-9]+(?:\\.[0-9]{2})?)`);
@@ -115,10 +188,9 @@ export function buildCandidates(req, stage, brave, gemini) {
       sourceUrls: [...new Set(c.sourceUrls)], onOfficialSite: c.onOfficialSite, matchedFields: mf, confidence: Math.round(Math.min(conf, cap) * 100) / 100, matchType });
   }
   if (stage === 'price-fallback') {
-    out.sort((a, b) => Math.abs(a.price - req.price) - Math.abs(b.price - req.price) || (a.weightGrams ?? Infinity) - (b.weightGrams ?? Infinity));
-  } else {
-    out.sort((a, b) => b.matchedFields.length - a.matchedFields.length || b.confidence - a.confidence);
+    return rankPriceFallback(req, out).slice(0, 8);
   }
+  out.sort((a, b) => b.matchedFields.length - a.matchedFields.length || b.confidence - a.confidence);
   return out.slice(0, 8);
 }
 
@@ -169,6 +241,49 @@ async function resolveBranch(env, req, deps) {
   return { ...v, cacheKey: key, cacheHit: false };
 }
 
+
+const display = v => (v === undefined || v === null || String(v).trim() === '') ? null : (typeof v === 'number' ? v : String(v).trim());
+const sameText = (a, b) => String(a).trim().toLowerCase() === String(b).trim().toLowerCase();
+export function officialMismatches(req, candidate) {
+  if (!candidate) return [];
+  const out = [];
+  const receiptBrand = display(req.brandRaw) || display(req.brand);
+  const officialBrand = display(candidate.brand);
+  // Only emit a field when the receipt printed a value; never receiptValue: null.
+  if (officialBrand && receiptBrand && !sameText(receiptBrand, officialBrand)) {
+    out.push({ field: 'brand', receiptValue: receiptBrand, officialValue: officialBrand });
+  }
+  const receiptName = display(req.name);
+  const officialName = display(candidate.officialName);
+  if (officialName && receiptName && !sameText(receiptName, officialName)) {
+    out.push({ field: 'name', receiptValue: receiptName, officialValue: officialName });
+  }
+  const receiptId = display(req.itemId);
+  const officialId = display(candidate.itemId);
+  if (officialId && receiptId && compact(receiptId) !== compact(officialId)) {
+    out.push({ field: 'itemId', receiptValue: receiptId, officialValue: officialId });
+  }
+  const receiptPrice = req.price, officialPrice = candidate.price;
+  if (officialPrice !== null && officialPrice !== undefined && receiptPrice !== null && receiptPrice !== undefined) {
+    const sameCurrency = !req.currency || !candidate.currency || req.currency === candidate.currency;
+    if (!sameCurrency || Math.abs(Number(officialPrice) - Number(receiptPrice)) > 0.005) {
+      out.push({ field: 'price', receiptValue: receiptPrice, officialValue: officialPrice });
+    }
+  }
+  return out;
+}
+
+/** True when the top two price-fallback candidates cannot be separated by (a)(b)(c) or weight. */
+export function priceFallbackIsTie(req, candidates) {
+  if (!candidates || candidates.length < 2) return false;
+  const a = candidates[0], b = candidates[1];
+  return comboMatchCount(req, a) === comboMatchCount(req, b)
+    && isExactPrice(req, a) === isExactPrice(req, b)
+    && Math.abs(priceGap(req, a) - priceGap(req, b)) < 0.005
+    && (a.weightGrams === null || a.weightGrams === undefined)
+    && (b.weightGrams === null || b.weightGrams === undefined);
+}
+
 export async function lookup(env, body, deps = {}) {
   const req = normaliseRequest(body);
   const trail = [];
@@ -176,32 +291,51 @@ export async function lookup(env, body, deps = {}) {
   if (req.itemId && req.brand !== undefined) stages.push(['id', keys.item(req.brand || '', req.itemId)]);
   if ((req.name || req.style) && req.brand) stages.push(['multi-field', keys.mf(req.brand, req.name || '', req.style || '')]);
   let result = { cacheHit: false, cacheKey: null, sourcesQueried: [], candidates: [] };
-  let idMatched = false, unavailable = [], paused = [];
+  let idMatched = false, idResult = null, unavailable = [], paused = [];
   for (const [stage, key] of stages) {
     const r = await runStage(env, req, stage, key, deps, trail);
     unavailable.push(...(r.unavailable || [])); paused.push(...(r.paused || []));
     result = { cacheHit: r.cacheHit, cacheKey: key, sourcesQueried: r.sourcesQueried, candidates: r.candidates };
-    if (stage === 'id' && r.candidates.length) { idMatched = true; break; }
-    if (stage === 'id' && !r.sourcesQueried.length && !r.cacheHit) break; // sources down: do not fall through and burn quota
+    if (stage === 'id') {
+      idResult = r;
+      if (r.candidates.length) { idMatched = true; break; }
+      // sources down / paused / skipped: do not fall through and burn quota
+      if (!r.cacheHit && !r.sourcesQueried.length) break;
+    }
     if (r.candidates.length) break;
   }
-  // Strict closest-price fallback: ONLY when a printed itemId matched nothing.
-  const idStageAnswered = trail.some(t => t.stage === 'id' && (t.cache || (t.problems || []).length < 2));
-  if (req.itemId && !idMatched && idStageAnswered && !result.candidates.length && req.price !== null && req.brand) {
+  // Clarification (Orchestrator, 25 Nov): price fallback runs ONLY after an item-ID
+  // lookup actually came back with no match — never when that lookup was unavailable or paused.
+  // A confirmed no-match is a cache hit (empty id results are only cached when both sources answered)
+  // or a live answer from both sources with no pause, error or skip.
+  const idConfirmedNoMatch = Boolean(
+    req.itemId && !idMatched && idResult && !idResult.candidates.length &&
+    (idResult.cacheHit || ((idResult.sourcesQueried || []).length === 2 && !(idResult.paused || []).length && !(idResult.unavailable || []).length))
+  );
+  if (idConfirmedNoMatch && !result.candidates.length && req.price !== null && req.brand) {
     const key = keys.pf(req.brand, req.currency, req.price);
     const r = await runStage(env, req, 'price-fallback', key, deps, trail);
     unavailable.push(...(r.unavailable || [])); paused.push(...(r.paused || []));
     result = { cacheHit: r.cacheHit, cacheKey: key, sourcesQueried: r.sourcesQueried, candidates: r.candidates };
   }
   const branch = await resolveBranch(env, req, deps);
-  const out = { ...result, flag: '#FDE68A', printedItemId: req.itemId, canonicalBrand: req.brand };
+  const candidates = (result.candidates || []).map(c => ({ ...c, mismatches: officialMismatches(req, c) }));
+  const mismatches = candidates[0]?.mismatches || [];
+  const out = { ...result, candidates, mismatches, flag: null, printedItemId: req.itemId, canonicalBrand: req.brand };
   if (branch) out.branch = branch;
-  const live = trail.filter(t => !t.cache);
-  if (live.length && live.every(t => (t.problems || []).length >= 2)) {
-    out.paused = paused.length > 0;
-    out.unavailableReason = [...new Set(unavailable)].join(' ');
+  // Any source pause (quota guard etc.) is reported, even when the other source or another stage still answered.
+  if (paused.length) {
+    out.paused = true;
+    out.unavailableReason = [...new Set(unavailable.filter(Boolean))].join(' ') || [...new Set(paused)].join(' ');
+    out.quotaGuard = [...new Set(paused)];
+  } else if (unavailable.length && !candidates.length) {
+    out.unavailableReason = [...new Set(unavailable.filter(Boolean))].join(' ');
   }
-  if (paused.length) out.quotaGuard = [...new Set(paused)];
+  const itemAttempted = Boolean(req.itemId || req.name || req.style || req.price !== null);
+  const priceFallback = out.candidates[0]?.matchType === 'price-fallback';
+  if (priceFallback || mismatches.length || (itemAttempted && !out.candidates.length) || out.paused || out.unavailableReason || out.quotaGuard?.length) {
+    out.flag = '#FDE68A';
+  }
   if (env?.DB) {
     try {
       await env.DB.prepare('INSERT INTO lookup_audit (created_at, cache_key, cache_hit, sources_queried, request_json, candidate_count, top_match_type, paused_reason) VALUES (?,?,?,?,?,?,?,?)')
@@ -214,10 +348,21 @@ export async function lookup(env, body, deps = {}) {
 export async function invalidate(env, body) {
   const brand = canonicalBrand(str(body?.brand)) || '';
   const ids = [str(body?.itemId), str(body?.previousItemId)].filter(Boolean);
-  if (!ids.length) throw Object.assign(new Error('Give itemId and/or previousItemId.'), { status: 400 });
+  const price = body?.price !== undefined && body?.price !== null ? num(body.price) : null;
+  const currency = str(body?.currency)?.toUpperCase() || null;
+  const name = str(body?.name);
+  const style = str(body?.style);
+  const supplier = str(body?.supplier);
+  const sc = body?.storeClues && typeof body.storeClues === 'object' ? body.storeClues : {};
+  const clue = str(sc.postcode) || str(body?.postcode) || (Array.isArray(sc.addressLines) ? str(sc.addressLines[0]) : null) || str(sc.storeNumber) || str(body?.clue);
+  if (!ids.length && price === null && !name && !style && !supplier) {
+    throw Object.assign(new Error('Give itemId, previousItemId, price, name, style or supplier.'), { status: 400 });
+  }
   const { cacheDelete } = await import('./cache.js');
   const removed = [];
   for (const id of ids) { const k = keys.item(brand, id); removed.push({ key: k, via: await cacheDelete(env, k) }); }
-  if (body?.price !== undefined && body?.price !== null && body?.currency) { const k = keys.pf(brand, body.currency, Number(body.price)); removed.push({ key: k, via: await cacheDelete(env, k) }); }
+  if (price !== null && currency) { const k = keys.pf(brand, currency, price); removed.push({ key: k, via: await cacheDelete(env, k) }); }
+  if (name || style) { const k = keys.mf(brand, name || '', style || ''); removed.push({ key: k, via: await cacheDelete(env, k) }); }
+  if (supplier) { const k = keys.branch(supplier, clue || ''); removed.push({ key: k, via: await cacheDelete(env, k) }); }
   return { invalidated: removed };
 }

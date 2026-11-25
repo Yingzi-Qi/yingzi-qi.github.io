@@ -111,7 +111,8 @@ function renderResult(out) {
     return `<td${f ? ` style="background:${f}" class="${f === '#FECDD3' ? 'v2-pink' : 'v2-amber'}"` : ''}${why ? ` title="${esc(why.join(' · '))}"` : ''}>${esc(typeof v === 'number' ? v.toFixed(2) : v ?? '')}</td>`;
   }).join('') + '</tr>').join('');
   const pinkList = out.readingErrors.slice(0, 30).map(e => `<li><b>${esc(e.col)}</b> · ${esc(e.reason)}</li>`).join('');
-  const amberList = out.lookupUncertainties.slice(0, 30).map(e => `<li><b>${esc(e.col)}</b> · ${esc(e.reason)}${(e.sourceUrls || []).slice(0, 2).map(u => ` <a href="${esc(u)}" target="_blank" rel="noopener noreferrer">source</a>`).join('')}</li>`).join('');
+  const mismatchText = e => (e.mismatches || []).map(m => `${m.field}: receipt ${m.receiptValue ?? '—'} vs official ${m.officialValue ?? '—'}`).join('; ');
+  const amberList = out.lookupUncertainties.slice(0, 30).map(e => `<li><b>${esc(e.col)}</b> · ${esc(e.reason)}${mismatchText(e) ? ' · ' + esc(mismatchText(e)) : ''}${(e.sourceUrls || []).slice(0, 2).map(u => ` <a href="${esc(u)}" target="_blank" rel="noopener noreferrer">source</a>`).join('')}</li>`).join('');
   panel.innerHTML = `
     <div class="v2-result-head"><h2>Final agreed version</h2>
       <div class="actions"><button id="v2-csv" class="quiet">Download CSV</button><button id="v2-xlsx" class="primary">Export Excel</button></div></div>
@@ -198,6 +199,7 @@ async function serverHistory(limit = 100) {
 }
 
 function init() {
+  $('#v2-run')?.addEventListener('click', runSanity);
   window.tillrollV2Hooks = Object.assign(window.tillrollV2Hooks || {}, {
     batchId: () => lastBatchId,
     lastResult: () => lastResult,
@@ -205,7 +207,6 @@ function init() {
     driveReplace: () => driveReplace,
     serverHistory,
   });
-  $('#v2-run')?.addEventListener('click', runSanity);
   $('#v2-workbooks')?.addEventListener('click', openWorkbooks);
   for (const b of document.querySelectorAll('[data-v2-close]')) b.onclick = () => document.getElementById(b.dataset.v2Close).close();
   const p = new URLSearchParams(location.search).get('drive');
