@@ -139,10 +139,10 @@ test('price fallback does not run when the item-ID lookup is fully unavailable',
 
 test('official mismatches: abbreviation, name upgrade, price and item-ID differences', () => {
   const req = { brandRaw: 'VCA', brand: 'Van Cleef & Arpels', itemId: '0012345', name: 'pendant', price: 3700, currency: 'GBP' };
-  const cand = { brand: 'Van Cleef & Arpels', officialName: 'Vintage Alhambra pendant', itemId: '0012345', price: 3600, currency: 'GBP' };
+  const cand = { brand: 'Van Cleef & Arpels', officialName: 'Vintage Laurel pendant', itemId: '0012345', price: 3600, currency: 'GBP' };
   const m = officialMismatches(req, cand);
   assert.deepEqual(m.find(x => x.field === 'brand'), { field: 'brand', receiptValue: 'VCA', officialValue: 'Van Cleef & Arpels' });
-  assert.deepEqual(m.find(x => x.field === 'name'), { field: 'name', receiptValue: 'pendant', officialValue: 'Vintage Alhambra pendant' });
+  assert.deepEqual(m.find(x => x.field === 'name'), { field: 'name', receiptValue: 'pendant', officialValue: 'Vintage Laurel pendant' });
   assert.deepEqual(m.find(x => x.field === 'price'), { field: 'price', receiptValue: 3700, officialValue: 3600 });
   assert.ok(!m.some(x => x.field === 'itemId'));
 });
