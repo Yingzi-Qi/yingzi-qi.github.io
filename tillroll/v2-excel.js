@@ -23,6 +23,7 @@
 
 import * as zipPackage from './export-vendor/jszip.min.js';
 import { expandReceipt, joinPurchaseTime, round2, saleAmount, supplierVisibleName } from './units.js';
+import { ALLOWED_TENDERS, TENDER_REASON, normaliseTender } from './tender.js';
 
 const JSZip = zipPackage.default ?? zipPackage ?? globalThis.JSZip;
 const MAIN = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
@@ -92,19 +93,23 @@ function agreedList(input) {
   return [];
 }
 
-// Card guard (local merge resolution): no card digits in 采购商品方法, its baseline or
-// any other cell. TODO(#1): switch to maskCardField from item-identifiers.js once
-// PR #1 is on main.
+// P4 tender first, then the card-digit backstop, on every row (receipts and
+// agreedRows / Round 2). Flags for cash/empty are applied in receiptToRows
+// (and already by the server); this step only rewrites the cell value.
+// TODO(#1): switch to maskCardField from item-identifiers.js once PR #1 is on main.
 function maskPaymentRow(row) {
   const v = row?.cells?.['采购商品方法'];
-  if (typeof v !== 'string' || !/\d/.test(v)) return row;
-  return { ...row, cells: { ...row.cells, '采购商品方法': v.replace(/\d/g, '*') } };
+  const tender = normaliseTender(v);
+  const masked = typeof tender === 'string' ? tender.replace(/\d/g, '*') : tender;
+  if (masked === (v ?? null) || (masked == null && (v == null || v === ''))) return row;
+  return { ...row, cells: { ...row.cells, '采购商品方法': masked } };
 }
 
 function receiptToRows(receipt) {
   const data = receipt.data || receipt;
   const expanded = expandReceipt({ ...data, receiptKey: receipt.receiptKey || receipt.hash || data.receiptKey || 'receipt' });
   const ts = data['采购时间'] || joinPurchaseTime(data.date, data.time);
+  const tender = normaliseTender(data.payment);
   return expanded.items.map(it => {
     const cells = {
       '采购小票id': data.receiptReference || data.orderNumber || data.orderId || null,
@@ -115,16 +120,21 @@ function receiptToRows(receipt) {
       '品牌货号': it.itemId || null,
       '采购商品原价': it.unitPrice,
       '采购商品金额': it.amount,
-      '采购商品方法': data.payment || null,
+      '采购商品方法': tender,
       '销售金额': saleAmount(it.unitPrice),
     };
     const flags = {};
+    const comments = {};
     if (it.discountKind === 'estimated' && typeof cells['采购商品金额'] === 'number') flags['采购商品金额'] = AMBER;
     if ((it.unitPrice === 0 || it.amount === 0) && it.zeroConfirmed !== true) flags['采购商品原价'] = PINK;
+    if (!tender || !ALLOWED_TENDERS.includes(tender)) {
+      flags['采购商品方法'] = PINK;
+      comments['采购商品方法'] = TENDER_REASON;
+    }
     return {
       rowId: it.rowId, receiptKey: data.receiptKey || receipt.receiptKey || 'receipt', lineIndex: it.lineIndex,
       cells, flags, notes: [], lookup: null,
-      exportMeta: { discountKind: it.discountKind || 'none', currency: data.currency || null, alternates: {}, comments: {} },
+      exportMeta: { discountKind: it.discountKind || 'none', currency: data.currency || null, alternates: {}, comments },
     };
   });
 }

@@ -8,6 +8,8 @@ import { nowIso, sha256Hex } from './http.js';
 import { expandReceipt, isConfirmedZero, joinPurchaseTime, supplierVisibleName } from '../../../tillroll/units.js';
 import { matchBrandIdFormat } from '../../../tillroll/brand-id-format.js';
 import { NAME_NEEDS_CHECKING, concessionReading, gateFindings, isUnlabelledTenDigits, selectBrandItem } from '../../../tillroll/export-gate.js';
+import { ALLOWED_TENDERS, TENDER_REASON, normaliseTender } from '../../../tillroll/tender.js';
+export { ALLOWED_TENDERS, TENDER_REASON, normaliseTender };
 
 export const COLUMNS = ['采购小票id', '采购时间', '供应商', '品牌', '品名', '品牌货号', '采购商品原价', '采购商品金额', '采购商品方法', '销售金额'];
 export const PINK = '#FECDD3', AMBER = '#FDE68A';
@@ -40,22 +42,9 @@ export function stripBrandFromItemId(itemId, brand) {
   }
   return out.trim() || id;
 }
-// P4. Card schemes and wallets map to Card with no fill. Cash and an empty
-// tender stay as printed or empty and are Pink.
-export const ALLOWED_TENDERS = ['UnionPay', 'Card', 'Alipay', 'WeChat'];
-export const TENDER_REASON = 'Payment method must be UnionPay, Card, Alipay or WeChat.';
-const SCHEME = /\b(visa|mastercard|master\s*card|maestro|amex|american express|debit|credit|card)\b/i;
-const WALLET = /\b(apple\s*pay|google\s*pay|samsung\s*pay|garmin\s*pay|android\s*pay|wallet)\b/i;
+// P4 tender rules live in tillroll/tender.js (imported above) and are applied
+// here and on every export path. Cash and an empty tender stay Pink.
 const CHANEL_BLOCKED_COMMENT = 'chanel.com blocked; confirmed on chanel.cn/gb';
-export function normaliseTender(p) {
-  const s = str(p);
-  if (!s) return null;
-  if (/union\s*pay/i.test(s)) return 'UnionPay';
-  if (/ali\s*pay/i.test(s)) return 'Alipay';
-  if (/we\s*chat|wechat/i.test(s)) return 'WeChat';
-  if (SCHEME.test(s) || WALLET.test(s)) return 'Card';
-  return s;
-}
 function priceReading(raw) {
   if (raw === null || raw === undefined || String(raw).trim() === '') return { invalid: false, missing: true };
   if (typeof raw === 'number') return Number.isFinite(raw) ? { invalid: false } : { invalid: true, raw: String(raw) };

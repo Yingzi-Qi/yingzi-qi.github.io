@@ -3,6 +3,7 @@ import {reviewForLine} from './checks.js?v=productcodes3';
 import {validateOrderPatterns} from './retail-rules.js?v=6';
 import {parsePrintedItemId} from './product-code.js?v=productcodes3';
 import * as zipPackage from './export-vendor/jszip.min.js';
+import { normaliseTender } from './tender.js';
 
 const JSZip = zipPackage.default ?? globalThis.JSZip;
 const REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
@@ -64,7 +65,12 @@ export function maskCardDigits(value) {
 function maskedReceiptData(data) {
   if (!data || typeof data!=='object') return data;
   const out={...data};
-  for (const key of CARD_FIELDS) if (key in out) out[key]=maskCardDigits(out[key]);
+  for (const key of CARD_FIELDS) {
+    if (!(key in out)) continue;
+    // P4 tender first, then the digit backstop. TODO(#1) stays on maskCardDigits.
+    const raw=key==='payment' ? (normaliseTender(out[key]) ?? out[key]) : out[key];
+    out[key]=maskCardDigits(raw);
+  }
   return out;
 }
 const editableColumns=receiptColumns.filter(([, ,scope='receipt'])=>scope==='receipt' || scope==='line');
@@ -115,6 +121,7 @@ function exportData(receipts,includeRefresh=false) {
       const baseline=includeRefresh ? {receipt:{},line:{},review:{},emptyReceipt:!r.data.items?.length,exportKey} : null;
       const cells=columns.map(([,key,source='receipt',type]) => {
         let value = sources[source]?.[key] ?? '';
+        if (source==='receipt' && key==='payment') value=normaliseTender(value) ?? '';
         if (source==='receipt' && CARD_FIELDS.has(key)) value=maskCardDigits(value) ?? '';
         const numeric = type && value !== '' && Number.isFinite(Number(value));
         value = numeric ? Number(value) : String(value);
@@ -254,6 +261,7 @@ function chinaExportData(receipts) {
       const visible=chinaColumns.map(([title,key,scope,type])=>{
         let value='';
         if(scope==='receipt') value=key==='purchaseTime' ? purchaseTimeValue(r.data) : (key==='orderNumber' ? receiptId : r.data[key]??'');
+        if(scope==='receipt' && key==='payment') value=normaliseTender(value) ?? '';
         if(scope==='receipt' && CARD_FIELDS.has(key)) value=maskCardDigits(value) ?? '';
         else if(scope==='line') value=line[key]??'';
         else if(scope==='derived' && key==='saleAmount') value=saleAmountValue(line);

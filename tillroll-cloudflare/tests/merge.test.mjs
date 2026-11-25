@@ -122,7 +122,8 @@ test('中文 Excel button handler is bound to exportChinaExcel, which calls the 
   const r = JSON.parse(out.trim().split('\n').pop());
   assert.equal(r.calls, 1, 'buildV2XlsxBlob called exactly once');
   assert.equal(r.returned, 'v2-spy', 'the downloaded blob is the v2 writer output');
-  assert.ok(!/\d/.test(r.payment) && !/\d/.test(r.card), 'receipts reach the v2 writer already masked');
+  assert.equal(r.payment, 'Card');
+  assert.ok(!/\d/.test(r.card || ''), 'card reaches the v2 writer already masked');
 });
 
 test('refresh routing: v2/中文 workbook -> v2 Round 2; main-era 中文 workbook -> legacy clearedFields path', async () => {
@@ -151,4 +152,72 @@ test('one Reading History control and dialog; server-backed with local fallback'
   assert.match(v2js, /serverHistory,/);
   assert.match(app, /window\.tillrollV2Hooks\?\.serverHistory/);
   for (const v of ['style.css?v=merge1', 'v2.css?v=merge1', 'app.js?v=merge1', 'v2.js?v=merge1']) assert.ok(html.includes(v), v);
+});
+
+test("P4: 'VISA ****1234' becomes Card with no digits on the server path, 中文 Excel and CSV", async () => {
+  const { runSanity } = await import('../functions/_lib/sanity.js');
+  const { makeEnv } = await import('./helpers.mjs');
+  const { result } = await runSanity(makeEnv(), { batchId: 'p4-visa-digits', mode: 'round1', receipts: [{
+    receiptKey: 'syn-visa', merchant: 'Example Goods Ltd', receiptReference: 'SYN-ORDER-A',
+    date: '2026-01-02', time: '10:20', payment: SYN_PAYMENT, currency: 'GBP',
+    items: [{ brand: 'Acme', item: 'Test Widget', itemId: 'TW-ABC', qty: 1, unitPrice: 20, amount: 20 }],
+  }] });
+  const row = result.agreedRows[0];
+  assert.equal(row.cells['采购商品方法'], 'Card');
+  assert.equal(row.flags['采购商品方法'], undefined);
+  const serverBook = await v2.buildV2XlsxBlob(result);
+  await assertWorkbookClean('p4-server', serverBook);
+  const serverParsed = await v2.readV2Workbook(serverBook);
+  assert.equal(serverParsed.rows[0].values['采购商品方法'], 'Card');
+  assert.equal(serverParsed.rows[0].fills['采购商品方法'], undefined);
+  assert.ok(!JSON.stringify(serverParsed.rows[0].baseline).includes('1234'));
+
+  const china = await ex.exportChinaExcel(receipts());
+  await assertWorkbookClean('p4-china', china);
+  const chinaParsed = await v2.readV2Workbook(china);
+  for (const r of chinaParsed.rows) {
+    assert.equal(r.values['采购商品方法'], 'Card');
+    assert.equal(r.fills['采购商品方法'], undefined);
+  }
+
+  const csv = await ex.buildCsvBlob(receipts()).text();
+  assertNoCardDigits('p4-csv', csv);
+  const rows = csv.replace(/^\uFEFF/, '').trim().split(/\r?\n/).map(line => {
+    const out = []; let cur = '', q = false;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (c === '"') { if (q && line[i + 1] === '"') { cur += '"'; i++; } else q = !q; }
+      else if (c === ',' && !q) { out.push(cur); cur = ''; }
+      else cur += c;
+    }
+    out.push(cur); return out;
+  });
+  const pay = rows[0].indexOf('Payment Type');
+  assert.ok(pay >= 0);
+  for (const r of rows.slice(1)) assert.equal(r[pay], 'Card');
+});
+
+test("P4: 'Apple Pay' becomes Card with no fill on 中文 Excel (and the server path)", async () => {
+  const apple = receipts();
+  apple[0].data.payment = 'Apple Pay';
+  delete apple[0].data.card;
+  const blob = await ex.exportChinaExcel(apple);
+  const parsed = await v2.readV2Workbook(blob);
+  for (const r of parsed.rows) {
+    assert.equal(r.values['采购商品方法'], 'Card');
+    assert.equal(r.fills['采购商品方法'], undefined);
+    assert.equal(r.comments['采购商品方法'], undefined);
+  }
+  const { runSanity } = await import('../functions/_lib/sanity.js');
+  const { makeEnv } = await import('./helpers.mjs');
+  const { result } = await runSanity(makeEnv(), { batchId: 'p4-apple', mode: 'round1', receipts: [{
+    receiptKey: 'syn-apple', merchant: 'Example Goods Ltd', receiptReference: 'SYN-APPLE',
+    date: '2026-01-02', time: '10:20', payment: 'Apple Pay', currency: 'GBP',
+    items: [{ brand: 'Acme', item: 'Test Widget', itemId: 'TW-ABC', qty: 1, unitPrice: 20, amount: 20 }],
+  }] });
+  assert.equal(result.agreedRows[0].cells['采购商品方法'], 'Card');
+  assert.equal(result.agreedRows[0].flags['采购商品方法'], undefined);
+  const book = await v2.readV2Workbook(await v2.buildV2XlsxBlob(result));
+  assert.equal(book.rows[0].values['采购商品方法'], 'Card');
+  assert.equal(book.rows[0].fills['采购商品方法'], undefined);
 });
