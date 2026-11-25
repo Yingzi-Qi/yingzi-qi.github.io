@@ -3,9 +3,9 @@
 // Excel Sync audit) and iterates until the audit converges. Only the final
 // agreed version leaves this module; the internal trail is stored in D1 only.
 import { canonicalBrand } from './brands.js';
-import { lookup as defaultLookup, invalidate } from './lookup.js';
+import { lookup as defaultLookup, invalidate, priceFallbackIsTie } from './lookup.js';
 import { nowIso, sha256Hex } from './http.js';
-import { splitReceiptToUnits } from '../../../tillroll/units.js';
+import { expandReceipt, joinPurchaseTime, supplierVisibleName } from '../../../tillroll/units.js';
 
 export const COLUMNS = ['采购小票id', '采购时间', '供应商', '品牌', '品名', '品牌货号', '采购商品原价', '采购商品金额', '采购商品方法', '销售金额'];
 export const PINK = '#FECDD3', AMBER = '#FDE68A';
@@ -14,27 +14,8 @@ const str = v => (v === undefined || v === null || String(v).trim() === '') ? nu
 const num = v => { if (v === null || v === undefined || v === '') return null; const n = Number(String(v).replace(/[£$€,\s]/g, '')); return Number.isFinite(n) ? n : null; };
 const round2 = n => Math.round((n + Number.EPSILON) * 100) / 100;
 
-export function normaliseTimestamp(date, time) {
-  const d = str(date);
-  if (!d) return null;
-  let m = d.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](.+))?$/);
-  let Y, M, D, t = str(time);
-  if (m) { [, Y, M, D] = m; t = t || m[4] || null; }
-  else if ((m = d.match(/^(\d{1,2})[/.](\d{1,2})[/.](\d{2,4})$/))) { D = m[1].padStart(2, '0'); M = m[2].padStart(2, '0'); Y = m[3].length === 2 ? '20' + m[3] : m[3]; }
-  else return null;
-  if (+M < 1 || +M > 12 || +D < 1 || +D > 31) return null;
-  let hh = 0, mm = 0, ss = 0;
-  if (t) {
-    const tm = String(t).trim().toLowerCase().match(/^(\d{1,2})[:.](\d{2})(?:[:.](\d{2}))?\s*([ap])?\.?m?\.?/);
-    if (!tm) return null;
-    hh = +tm[1]; mm = +tm[2]; ss = tm[3] ? +tm[3] : 0;
-    if (tm[4] === 'p' && hh < 12) hh += 12;
-    if (tm[4] === 'a' && hh === 12) hh = 0;
-    if (hh > 23 || mm > 59 || ss > 59) return null;
-  }
-  const p = n => String(n).padStart(2, '0');
-  return `${Y}-${M}-${D} ${p(hh)}:${p(mm)}:${p(ss)}`;
-}
+export const normaliseTimestamp = joinPurchaseTime;
+
 
 const JUNK_NAME = /^(amount|total|sub-?total|vat|tax|change|cash|card|balance|due|tender|discount|9{3,}|[\d\s.,£$€-]+)$/i;
 export function itemIdProblem(id) {
@@ -66,11 +47,33 @@ export function normaliseTender(p) {
   return s;
 }
 
+function prepareReceiptForSplit(source, receiptKey) {
+  return {
+    ...source,
+    receiptKey,
+    discount: source.discount ?? source.receiptDiscount ?? source.totalDiscount ?? null,
+    items: (source.items || []).map(it => ({
+      ...it,
+      unitDiscount: it.unitDiscount ?? it.discountEach ?? it.perItemDiscount ?? it.itemDiscount,
+    })),
+  };
+}
+
 function addFlag(row, col, colour, reason, extra = {}) {
   const prev = row.flags[col];
   // Mixed reading + look-up uncertainty is Amber (manual 7E.19).
   row.flags[col] = prev && prev !== colour ? AMBER : colour;
   (colour === PINK ? row._reading : row._lookup).push({ col, reason, ...extra });
+}
+// Receipt wins on prices and 品牌货号. Official site wins on 品牌 and 品名.
+// The value that is NOT in the cell is kept for the Excel comment and hidden column.
+function noteMismatch(row, col, receipt, official, shown) {
+  if (receipt === null || receipt === undefined || official === null || official === undefined) return;
+  if (String(receipt) === String(official)) return;
+  if (!row._alternates) row._alternates = {};
+  if (!row._comments) row._comments = {};
+  row._alternates[col] = { receipt, official, shown };
+  row._comments[col] = shown === 'official' ? `Receipt printed: ${receipt}` : `Official site: ${official}`;
 }
 
 // ---- Stage 1: Receipt Reader & Sanity Checker ------------------------------
@@ -90,11 +93,14 @@ function readerStage(receipt, rIndex, state) {
     const confirmedZero = (it.zeroConfirmed === true && (zeroUnit || zeroAmt)) || (zeroUnit && zeroAmt && it.zeroConfirmed !== false);
     if (confirmedZero) { state.excludedZero.push({ receiptKey: receipt.receiptKey, lineIndex, name: str(it.item) }); return; }
     const brandRaw = str(it.brand);
-    const row = { rowId: it.rowId || `${receipt.receiptKey}:${lineIndex}`, receiptKey: receipt.receiptKey, lineIndex, flags: {}, notes: [], _reading: [], _lookup: [], lookup: null,
+    const unitCount = it.unitCount || (receipt.items || []).filter(x => (x.lineIndex ?? 0) === lineIndex).length || 1;
+    const row = { rowId: it.rowId || `${receipt.receiptKey}:${lineIndex}:u${it.unitIndex ?? 0}`, receiptKey: receipt.receiptKey, lineIndex,
+      unitIndex: it.unitIndex ?? 0, unitCount, discountKind: it.discountKind || 'none', estimated: it.estimated === true || it.discountKind === 'estimated',
+      flags: {}, notes: [], _reading: [], _lookup: [], lookup: null,
       cells: { '采购小票id': receiptId, '采购时间': ts, '供应商': merchant, '品牌': brandRaw, '品名': str(it.item), '品牌货号': stripBrandFromItemId(it.itemId ?? it.sku, brandRaw),
         '采购商品原价': unit ?? (amount !== null ? round2((amount + discount) / (qty || 1)) : null), '采购商品金额': amount, '采购商品方法': tender, '销售金额': null },
       raw: { style: str(it.sku) !== str(it.itemId) ? str(it.sku) : null, colour: str(it.colour), size: str(it.size), qty, currency: str(receipt.currency),
-        amount, lineDiscount: num(it.lineDiscount ?? it.discount) , unitDiscount: num(it.unitDiscount ?? it.perItemDiscount ?? it.itemDiscount) } };
+        amount, lineDiscount: num(it.lineDiscount ?? it.discount), unitDiscount: num(it.unitDiscount ?? it.perItemDiscount ?? it.itemDiscount) } };
     if (!receiptId) addFlag(row, '采购小票id', PINK, /selfridges/i.test(merchant || '') ? 'Selfridges receipt number (below the barcode) not read.' : /harrods/i.test(merchant || '') ? 'Harrods receipt number (right of date/time) not read.' : 'Receipt ID not read.');
     if (!ts) addFlag(row, '采购时间', PINK, 'Date/time missing or not a valid date.');
     if (!merchant) addFlag(row, '供应商', PINK, 'Supplier not read.');
@@ -109,6 +115,9 @@ function readerStage(receipt, rIndex, state) {
     if (amount === null) addFlag(row, '采购商品金额', PINK, 'Line amount not read.');
     else if (unit !== null && Math.abs(qty * unit - discount - amount) > 0.02 && Math.abs(qty * unit - amount) > 0.02) addFlag(row, '采购商品金额', PINK, `qty × unit price − discount (${round2(qty * unit - discount)}) does not match amount (${amount}).`);
     for (const col of it.readingFlags || []) if (COLUMNS.includes(col)) addFlag(row, col, PINK, 'Flagged by the reader.');
+    if (row.estimated && typeof row.cells['采购商品金额'] === 'number') {
+      addFlag(row, '采购商品金额', AMBER, 'Discount allocated proportionally from a line or receipt total (not printed per unit).', { estimated: true });
+    }
     rows.push(row);
   });
   return rows;
@@ -122,9 +131,14 @@ async function verifierStage(rows, receipt, ctx) {
   if (rows.length && sc && (sc.postcode || (sc.addressLines || []).length || sc.storeNumber) && rows[0].cells['供应商']) {
     const res = await ctx.callLookup({ supplier: rows[0].cells['供应商'], storeClues: sc });
     const name = res?.branch?.officialStoreName;
-    if (name && name !== rows[0].cells['供应商']) for (const row of rows) {
+    const printedSupplier = rows[0].cells['供应商'];
+    const visible = supplierVisibleName(printedSupplier, name);
+    for (const row of rows) row._officialBranch = name || null;
+    if (visible && visible !== printedSupplier) for (const row of rows) {
       if (ctx.locked(row.rowId, '供应商')) continue;
-      row.cells['供应商'] = name; addFlag(row, '供应商', AMBER, 'Official UK branch name from look-up.', { sourceUrls: res.branch.sourceUrls || [] });
+      noteMismatch(row, '供应商', printedSupplier, visible, visible === name ? 'official' : 'receipt');
+      row.cells['供应商'] = visible;
+      addFlag(row, '供应商', AMBER, 'Official UK branch name from look-up.', { sourceUrls: res.branch.sourceUrls || [] });
     }
   }
   void canon;
@@ -153,12 +167,16 @@ async function verifierStage(rows, receipt, ctx) {
       }
     }
     if (top.matchType === 'price-fallback') {
-      const samePrice = res.candidates.filter(x => Math.abs(x.price - top.price) < 0.005);
-      if (samePrice.length > 1 && samePrice.every(x => x.weightGrams === null)) {
-        addFlag(row, '品名', AMBER, 'Item ID matched nothing; several official items at this price and no published weight. Pick one.', { candidates: samePrice.map(x => ({ officialName: x.officialName, itemId: x.itemId, price: x.price, sourceUrls: x.sourceUrls })) });
-        continue;
-      }
+      const list = (res.candidates || []).map(x => ({ officialName: x.officialName, itemId: x.itemId, price: x.price, weightGrams: x.weightGrams ?? null, sourceUrls: x.sourceUrls, mismatches: x.mismatches || [] }));
+      row._candidates = list;
       row.notes.push(top.weightGrams !== null ? `Closest-price fallback; lightest published weight ${top.weightGrams} g.` : 'Closest-price fallback.');
+      if (!ctx.locked(row.rowId, '品名')) {
+        addFlag(row, '品名', AMBER, 'Item ID matched nothing; closest-price fallback. Review the candidate list.', { candidates: list });
+      }
+      // No published weight and no other rank separator: do not guess 品名.
+      if (priceFallbackIsTie({ brand: c['品牌'], itemId: c['品牌货号'], name: row.previousName || c['品名'], style: row.raw?.style, price: c['采购商品原价'], currency: row.raw?.currency }, res.candidates)) {
+        row._skipOfficialName = true;
+      }
     }
     // Receipt is the source of truth for price and item ID. Brand/name take the official value on a mismatch.
     const mismatches = res.mismatches || [];
@@ -166,14 +184,18 @@ async function verifierStage(rows, receipt, ctx) {
     row.lookup.mismatches = mismatches;
     for (const m of mismatches) {
       if (m.field === 'brand' && !ctx.locked(row.rowId, '品牌')) {
+        noteMismatch(row, '品牌', c['品牌'], m.officialValue, 'official');
         c['品牌'] = m.officialValue;
         addFlag(row, '品牌', AMBER, `Receipt brand "${m.receiptValue ?? ''}" vs official "${m.officialValue}".`, { confidence: top.confidence, sourceUrls: top.sourceUrls, mismatches });
       } else if (m.field === 'name' && !ctx.locked(row.rowId, '品名')) {
-        row.previousName = c['品名']; c['品名'] = m.officialValue;
+        noteMismatch(row, '品名', c['品名'], m.officialValue, row._skipOfficialName ? 'receipt' : 'official');
+        if (!row._skipOfficialName) { row.previousName = c['品名']; c['品名'] = m.officialValue; }
         addFlag(row, '品名', AMBER, `Receipt name "${m.receiptValue ?? ''}" vs official "${m.officialValue}".`, { confidence: top.confidence, sourceUrls: top.sourceUrls, mismatches });
       } else if (m.field === 'price' && !ctx.locked(row.rowId, '采购商品原价')) {
+        noteMismatch(row, '采购商品原价', m.receiptValue, m.officialValue, 'receipt');
         addFlag(row, '采购商品原价', AMBER, `Receipt price ${m.receiptValue} vs official ${m.officialValue}; receipt value kept.`, { confidence: top.confidence, sourceUrls: top.sourceUrls, mismatches });
       } else if (m.field === 'itemId' && !ctx.locked(row.rowId, '品牌货号')) {
+        noteMismatch(row, '品牌货号', m.receiptValue, m.officialValue, 'receipt');
         addFlag(row, '品牌货号', AMBER, `Receipt item ID "${m.receiptValue}" vs official "${m.officialValue}"; receipt value kept.`, { confidence: top.confidence, sourceUrls: top.sourceUrls, mismatches });
       }
     }
@@ -250,8 +272,17 @@ export async function runSanity(env, input, deps = {}) {
     }
   }
   const receipts = [];
-  for (let i = 0; i < input.receipts.length; i++) receipts.push({ ...input.receipts[i], receiptKey: await receiptKeyFor(input.receipts[i], batchId, i) });
-  const rowIds = receipts.flatMap(r => (r.items || []).map((it, i) => it.rowId || `${r.receiptKey}:${it.lineIndex ?? i}`));
+  const state = { excludedZero: [] };
+  for (let i = 0; i < input.receipts.length; i++) {
+    const source = input.receipts[i];
+    const receiptKey = await receiptKeyFor(source, batchId, i);
+    const settled = mode === 'round2' && (source.items || []).length > 0 && (source.items || []).every(it => it.unitSettled || (it.rowId && !(Number(it.qty) > 1)));
+    const prepared = prepareReceiptForSplit(source, receiptKey);
+    const expanded = expandReceipt(prepared, { settled });
+    state.excludedZero.push(...(expanded.excludedZero || []));
+    receipts.push({ ...source, ...prepared, receiptKey, items: expanded.items, _unitAudit: expanded.audit });
+  }
+  const rowIds = receipts.flatMap(r => (r.items || []).map(it => it.rowId).filter(Boolean));
   if (env?.DB && rowIds.length) {
     for (let k = 0; k < rowIds.length; k += 90) {
       const chunk = rowIds.slice(k, k + 90);
@@ -274,16 +305,16 @@ export async function runSanity(env, input, deps = {}) {
     },
   };
   // Round 2: invalidate cache for edited 品牌货号 and set the skip gate.
-  const state = { excludedZero: [] };
   let allRows = [];
   for (const r of receipts) {
     const rows = readerStage(r, 0, state);
+    const byId = new Map((r.items || []).filter(it => it.rowId).map(it => [it.rowId, it]));
     const byLine = new Map((r.items || []).map((it, i) => [it.lineIndex ?? i, it]));
     for (const row of rows) {
-      const it = byLine.get(row.lineIndex) || {};
+      const it = byId.get(row.rowId) || byLine.get(row.lineIndex) || {};
       if (mode === 'round2') {
         const edited = new Set(it.editedCols || []);
-        if (edited.has('品牌货号') && it.previousItemId) await invalidate(env, { brand: row.cells['品牌'], itemId: row.cells['品牌货号'], previousItemId: it.previousItemId });
+        if (edited.has('品牌货号') && it.previousItemId) await invalidate(env, { brand: row.cells['品牌'], itemId: row.cells['品牌货号'], previousItemId: it.previousItemId, price: row.cells['采购商品原价'], currency: row.raw?.currency, name: row.cells['品名'], style: row.raw?.style, supplier: row.cells['供应商'], storeClues: r.storeClues });
         const complete = row.cells['品牌'] && row.cells['品名'] && typeof row.cells['采购商品原价'] === 'number';
         const verified = ['品牌', '品名', '采购商品原价'].every(col => !(it.flaggedCols || []).includes(col) || ctx.locked(row.rowId, col) || (it.clearedCols || []).includes(col));
         row.skipLookup = Boolean(complete && verified && !edited.has('品牌货号'));
@@ -295,41 +326,7 @@ export async function runSanity(env, input, deps = {}) {
     allRows.push(...rows);
   }
   readerReview(allRows, trail);
-  // Split printed lines into per-unit rows before locks and agreedRows (rule 10a).
-  const byReceipt = new Map();
-  for (const row of allRows) {
-    if (!byReceipt.has(row.receiptKey)) byReceipt.set(row.receiptKey, []);
-    byReceipt.get(row.receiptKey).push(row);
-  }
-  const unitRows = [];
-  for (const r of receipts) {
-    const lines = (byReceipt.get(r.receiptKey) || []).map(row => ({
-      ...row,
-      qty: row.raw?.qty,
-      unitPrice: row.cells['采购商品原价'],
-      amount: row.raw?.amount,
-      lineDiscount: row.raw?.lineDiscount,
-      unitDiscount: row.raw?.unitDiscount,
-    }));
-    const units = splitReceiptToUnits({ receiptKey: r.receiptKey, receiptDiscount: r.receiptDiscount ?? r.discount ?? r.totalDiscount }, lines);
-    for (const u of units) {
-      if (u.estimated) {
-        u.notes = [...(u.notes || []), 'Discount estimated (not printed per item).'];
-        (u._lookup ||= []).push({ col: '采购商品金额', reason: 'Discount estimated (not printed per item).', estimated: true });
-      }
-    }
-    unitRows.push(...units);
-  }
-  allRows = unitRows;
   // Locks apply to unit rowIds (Excel Sync lines up row for row).
-  if (env?.DB && allRows.length) {
-    const unitIds = [...new Set(allRows.map(row => row.rowId))];
-    for (let k = 0; k < unitIds.length; k += 90) {
-      const chunk = unitIds.slice(k, k + 90);
-      const res = await env.DB.prepare(`SELECT row_id, col_key FROM human_verified_unflagged WHERE row_id IN (${chunk.map(() => '?').join(',')})`).bind(...chunk).all();
-      for (const l of res.results || []) locks.add(`${l.row_id}\u0000${l.col_key}`);
-    }
-  }
   for (const row of allRows) {
     for (const col of Object.keys(row.flags || {})) if (ctx.locked(row.rowId, col)) delete row.flags[col];
   }
@@ -346,9 +343,20 @@ export async function runSanity(env, input, deps = {}) {
     for (const e of row._reading) if (row.flags[e.col]) readingErrors.push({ rowId: row.rowId, col: e.col, reason: e.reason });
     for (const e of row._lookup) if (row.flags[e.col]) lookupUncertainties.push({ rowId: row.rowId, col: e.col, reason: e.reason, confidence: e.confidence ?? row.lookup?.confidence ?? null, sourceUrls: e.sourceUrls || row.lookup?.sourceUrls || [], estimated: Boolean(e.estimated), ...(e.candidates ? { candidates: e.candidates } : {}), ...(e.mismatches || row.mismatches ? { mismatches: e.mismatches || row.mismatches } : {}) });
     const round2Changed = row.previous ? COLUMNS.filter(col => row.previous[col] !== undefined && row.previous[col] !== row.cells[col]) : [];
+    const exportMeta = {
+      discountKind: row.discountKind || (row.estimated ? 'estimated' : 'none'),
+      currency: row.raw?.currency || null,
+      matchType: row.lookup?.matchType || null,
+      confidence: row.lookup?.confidence ?? null,
+      sourceUrls: row.lookup?.sourceUrls || [],
+      candidates: row._candidates || null,
+      alternates: row._alternates || {},
+      comments: row._comments || {},
+      officialBranch: row._officialBranch || null,
+    };
     return { rowId: row.rowId, receiptKey: row.receiptKey, lineIndex: row.lineIndex, unitIndex: row.unitIndex, unitCount: row.unitCount,
       cells: row.cells, flags: row.flags, notes: row.notes, lookup: row.lookup, estimated: Boolean(row.estimated),
-      mismatches: row.mismatches || [], ...(mode === 'round2' ? { round2Changed } : {}) };
+      exportMeta, mismatches: row.mismatches || [], ...(mode === 'round2' ? { round2Changed } : {}) };
   });
   const result = { agreedRows, excludedZeroCount: state.excludedZero.length, readingErrors, lookupUncertainties, workbookExportReady: finalIssues.length === 0 };
   if (ctx.paused.size) { result.lookupsPaused = true; result.pausedReasons = [...ctx.paused]; }

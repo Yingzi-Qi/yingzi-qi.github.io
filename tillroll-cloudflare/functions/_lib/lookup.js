@@ -49,6 +49,79 @@ export function matchedFields(req, c) {
   return out;
 }
 
+// Price-fallback ranking (Yingzi / Orchestrator 16:44, 25 Nov 2026).
+// Replaces min(2% of printed price, £1) with max(2% of printed price, £5).
+// Only used after a confirmed item-ID miss (see lookup()).
+export function priceFallbackGapBand(printedPrice) {
+  const p = Math.abs(Number(printedPrice));
+  if (!Number.isFinite(p)) return 5;
+  return Math.max(0.02 * p, 5);
+}
+
+export function isExactPrice(req, c) {
+  if (req?.price === null || req?.price === undefined || c?.price === null || c?.price === undefined) return false;
+  if (req.currency && c.currency && req.currency !== c.currency) return false;
+  return Math.abs(Number(c.price) - Number(req.price)) < 0.005;
+}
+
+export function priceGap(req, c) {
+  if (req?.price === null || req?.price === undefined || c?.price === null || c?.price === undefined) return Infinity;
+  return Math.abs(Number(c.price) - Number(req.price));
+}
+
+/** Description match: official name shares enough tokens with the printed name. */
+export function descriptionMatches(req, c) {
+  const mf = Array.isArray(c?.matchedFields) ? c.matchedFields : matchedFields(req, c);
+  return mf.includes('name');
+}
+
+/** Item-number match: printed style/SKU equals the official item id or style code. */
+export function itemNumberMatches(req, c) {
+  const style = req?.style;
+  if (style && c?.itemId && compact(style) === compact(c.itemId)) return true;
+  if (style && c?.style && compact(style) === compact(c.style)) return true;
+  return false;
+}
+
+// (a) count of {description, item number, exact price} matches. Higher ranks first.
+export function comboMatchCount(req, c) {
+  return (descriptionMatches(req, c) ? 1 : 0) + (itemNumberMatches(req, c) ? 1 : 0) + (isExactPrice(req, c) ? 1 : 0);
+}
+
+// Rank: (a) combo, then (b) exact price, then (c) smallest price gap.
+// Among a (a)+(b) group, if a candidate's gap is within max(2%, £5) of the
+// best gap, prefer the lighter published weight. Always leave the list intact
+// so the caller can flag Amber with every candidate.
+export function rankPriceFallback(req, candidates) {
+  const scored = (candidates || []).map((c, i) => ({
+    c, i,
+    combo: comboMatchCount(req, c),
+    exact: isExactPrice(req, c),
+    gap: priceGap(req, c),
+    weight: c.weightGrams === null || c.weightGrams === undefined ? Infinity : Number(c.weightGrams),
+  }));
+  scored.sort((a, b) => (b.combo - a.combo) || (Number(b.exact) - Number(a.exact)) || (a.gap - b.gap) || (a.i - b.i));
+  const groups = [];
+  for (const s of scored) {
+    const last = groups[groups.length - 1];
+    if (last && last[0].combo === s.combo && last[0].exact === s.exact) last.push(s);
+    else groups.push([s]);
+  }
+  const band = priceFallbackGapBand(req.price);
+  const out = [];
+  for (const g of groups) {
+    const bestGap = Math.min(...g.map(x => x.gap));
+    const inBand = x => (x.gap - bestGap) <= band + 1e-9;
+    g.sort((a, b) => {
+      const aIn = inBand(a), bIn = inBand(b);
+      if (aIn && bIn) return (a.weight - b.weight) || (a.gap - b.gap) || (a.i - b.i);
+      return (a.gap - b.gap) || (a.weight - b.weight) || (a.i - b.i);
+    });
+    out.push(...g.map(x => x.c));
+  }
+  return out;
+}
+
 function priceFromText(text, currency) {
   const sym = { GBP: '£', EUR: '€', USD: '$' }[currency || 'GBP'] || '£';
   const re = new RegExp(`\\${sym}\\s?([0-9]{1,3}(?:[,][0-9]{3})*(?:\\.[0-9]{2})?|[0-9]+(?:\\.[0-9]{2})?)`);
@@ -108,10 +181,9 @@ export function buildCandidates(req, stage, brave, gemini) {
       sourceUrls: [...new Set(c.sourceUrls)], onOfficialSite: c.onOfficialSite, matchedFields: mf, confidence: Math.round(Math.min(conf, cap) * 100) / 100, matchType });
   }
   if (stage === 'price-fallback') {
-    out.sort((a, b) => Math.abs(a.price - req.price) - Math.abs(b.price - req.price) || (a.weightGrams ?? Infinity) - (b.weightGrams ?? Infinity));
-  } else {
-    out.sort((a, b) => b.matchedFields.length - a.matchedFields.length || b.confidence - a.confidence);
+    return rankPriceFallback(req, out).slice(0, 8);
   }
+  out.sort((a, b) => b.matchedFields.length - a.matchedFields.length || b.confidence - a.confidence);
   return out.slice(0, 8);
 }
 
@@ -170,17 +242,14 @@ export function officialMismatches(req, candidate) {
   const out = [];
   const receiptBrand = display(req.brandRaw) || display(req.brand);
   const officialBrand = display(candidate.brand);
+  // Only emit a field when the receipt printed a value; never receiptValue: null.
   if (officialBrand && receiptBrand && !sameText(receiptBrand, officialBrand)) {
     out.push({ field: 'brand', receiptValue: receiptBrand, officialValue: officialBrand });
-  } else if (officialBrand && !receiptBrand) {
-    out.push({ field: 'brand', receiptValue: null, officialValue: officialBrand });
   }
   const receiptName = display(req.name);
   const officialName = display(candidate.officialName);
   if (officialName && receiptName && !sameText(receiptName, officialName)) {
     out.push({ field: 'name', receiptValue: receiptName, officialValue: officialName });
-  } else if (officialName && !receiptName) {
-    out.push({ field: 'name', receiptValue: null, officialValue: officialName });
   }
   const receiptId = display(req.itemId);
   const officialId = display(candidate.itemId);
@@ -195,6 +264,17 @@ export function officialMismatches(req, candidate) {
     }
   }
   return out;
+}
+
+/** True when the top two price-fallback candidates cannot be separated by (a)(b)(c) or weight. */
+export function priceFallbackIsTie(req, candidates) {
+  if (!candidates || candidates.length < 2) return false;
+  const a = candidates[0], b = candidates[1];
+  return comboMatchCount(req, a) === comboMatchCount(req, b)
+    && isExactPrice(req, a) === isExactPrice(req, b)
+    && Math.abs(priceGap(req, a) - priceGap(req, b)) < 0.005
+    && (a.weightGrams === null || a.weightGrams === undefined)
+    && (b.weightGrams === null || b.weightGrams === undefined);
 }
 
 export async function lookup(env, body, deps = {}) {
@@ -232,17 +312,21 @@ export async function lookup(env, body, deps = {}) {
     result = { cacheHit: r.cacheHit, cacheKey: key, sourcesQueried: r.sourcesQueried, candidates: r.candidates };
   }
   const branch = await resolveBranch(env, req, deps);
-  const mismatches = officialMismatches(req, result.candidates[0]);
-  const out = { ...result, mismatches, flag: null, printedItemId: req.itemId, canonicalBrand: req.brand };
+  const candidates = (result.candidates || []).map(c => ({ ...c, mismatches: officialMismatches(req, c) }));
+  const mismatches = candidates[0]?.mismatches || [];
+  const out = { ...result, candidates, mismatches, flag: null, printedItemId: req.itemId, canonicalBrand: req.brand };
   if (branch) out.branch = branch;
-  const live = trail.filter(t => !t.cache);
-  if (live.length && live.every(t => (t.problems || []).length >= 2)) {
-    out.paused = paused.length > 0;
-    out.unavailableReason = [...new Set(unavailable)].join(' ');
+  // Any source pause (quota guard etc.) is reported, even when the other source or another stage still answered.
+  if (paused.length) {
+    out.paused = true;
+    out.unavailableReason = [...new Set(unavailable.filter(Boolean))].join(' ') || [...new Set(paused)].join(' ');
+    out.quotaGuard = [...new Set(paused)];
+  } else if (unavailable.length && !candidates.length) {
+    out.unavailableReason = [...new Set(unavailable.filter(Boolean))].join(' ');
   }
-  if (paused.length) out.quotaGuard = [...new Set(paused)];
   const itemAttempted = Boolean(req.itemId || req.name || req.style || req.price !== null);
-  if (mismatches.length || (itemAttempted && !out.candidates.length) || out.paused || out.unavailableReason || out.quotaGuard?.length) {
+  const priceFallback = out.candidates[0]?.matchType === 'price-fallback';
+  if (priceFallback || mismatches.length || (itemAttempted && !out.candidates.length) || out.paused || out.unavailableReason || out.quotaGuard?.length) {
     out.flag = '#FDE68A';
   }
   if (env?.DB) {
@@ -257,10 +341,21 @@ export async function lookup(env, body, deps = {}) {
 export async function invalidate(env, body) {
   const brand = canonicalBrand(str(body?.brand)) || '';
   const ids = [str(body?.itemId), str(body?.previousItemId)].filter(Boolean);
-  if (!ids.length) throw Object.assign(new Error('Give itemId and/or previousItemId.'), { status: 400 });
+  const price = body?.price !== undefined && body?.price !== null ? num(body.price) : null;
+  const currency = str(body?.currency)?.toUpperCase() || null;
+  const name = str(body?.name);
+  const style = str(body?.style);
+  const supplier = str(body?.supplier);
+  const sc = body?.storeClues && typeof body.storeClues === 'object' ? body.storeClues : {};
+  const clue = str(sc.postcode) || str(body?.postcode) || (Array.isArray(sc.addressLines) ? str(sc.addressLines[0]) : null) || str(sc.storeNumber) || str(body?.clue);
+  if (!ids.length && price === null && !name && !style && !supplier) {
+    throw Object.assign(new Error('Give itemId, previousItemId, price, name, style or supplier.'), { status: 400 });
+  }
   const { cacheDelete } = await import('./cache.js');
   const removed = [];
   for (const id of ids) { const k = keys.item(brand, id); removed.push({ key: k, via: await cacheDelete(env, k) }); }
-  if (body?.price !== undefined && body?.price !== null && body?.currency) { const k = keys.pf(brand, body.currency, Number(body.price)); removed.push({ key: k, via: await cacheDelete(env, k) }); }
+  if (price !== null && currency) { const k = keys.pf(brand, currency, price); removed.push({ key: k, via: await cacheDelete(env, k) }); }
+  if (name || style) { const k = keys.mf(brand, name || '', style || ''); removed.push({ key: k, via: await cacheDelete(env, k) }); }
+  if (supplier) { const k = keys.branch(supplier, clue || ''); removed.push({ key: k, via: await cacheDelete(env, k) }); }
   return { invalidated: removed };
 }

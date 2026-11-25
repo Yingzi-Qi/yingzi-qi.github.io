@@ -71,8 +71,8 @@ test('look-ups enrich rows (Amber) without overwriting printed prices or item ID
   assert.equal(result.excludedZeroCount, 1);
   assert.equal(chanel.cells['采购时间'], '2026-11-20 15:15:00');
   assert.equal(chanel.cells['采购商品方法'], 'Visa');
-  assert.equal(chanel.cells['供应商'], 'Selfridges London Oxford Street');
-  assert.equal(chanel.flags['供应商'], AMBER);
+  assert.equal(chanel.cells['供应商'], 'Selfridges');
+  assert.equal(chanel.exportMeta.officialBranch, 'Selfridges London Oxford Street');
   assert.equal(chanel.cells['品牌'], 'Chanel'); assert.equal(chanel.flags['品牌'], AMBER);
   assert.equal(chanel.cells['品牌货号'], 'A69900');
   assert.equal(chanel.cells['品名'], 'Classic Flap Mini Bag'); assert.equal(chanel.flags['品名'], AMBER);
@@ -140,7 +140,7 @@ test('qty 3 line becomes 3 unit rows, look-up runs once, no qty>1 Amber on 原�
     items: [{ brand: 'Chanel', item: 'Classic Flap Mini Bag', itemId: 'A69900', qty: 3, unitPrice: 4950, amount: 14850 }],
   }] }, { fetchImpl: f, lookup });
   assert.equal(result.agreedRows.length, 3);
-  assert.deepEqual(result.agreedRows.map(r => r.rowId), ['q3:0:0', 'q3:0:1', 'q3:0:2']);
+  assert.deepEqual(result.agreedRows.map(r => r.rowId), ['q3:0:u0', 'q3:0:u1', 'q3:0:u2']);
   assert.ok(result.agreedRows.every(r => r.cells['采购小票id'] === 'T1' && r.cells['采购时间'] === '2026-11-20 12:00:00'));
   assert.ok(result.agreedRows.every(r => r.cells['采购商品原价'] === 4950 && r.cells['采购商品金额'] === 4950 && r.cells['销售金额'] === 4356));
   assert.equal(audit.lookupsUsed, 1);
@@ -174,4 +174,58 @@ test('brand/name take official values on mismatch; price and item ID stay as pri
   assert.equal(row.cells['品牌货号'], '0012345');
   assert.ok(row.mismatches.some(m => m.field === 'price' && m.receiptValue === 3700 && m.officialValue === 3600));
   assert.ok(row.mismatches.some(m => m.field === 'brand' && m.receiptValue === 'VCA' && m.officialValue === 'Van Cleef & Arpels'));
+});
+
+test('qty N becomes N unit rows sharing receipt id and time; line discount is estimated', async () => {
+  const env = makeEnv();
+  const { result } = await runSanity(env, { batchId: 'qty', mode: 'round1', receipts: [{
+    receiptKey: 'q1', merchant: 'Harrods', receiptReference: 'H-1', date: '2026-03-02', time: '7:05 pm', payment: 'Visa', currency: 'GBP',
+    items: [
+      { brand: 'Notes', item: 'Card holder', itemId: 'CH1', qty: 2, unitPrice: 100, amount: 190 },
+      { brand: 'Notes', item: 'Cotton', itemId: 'CT1', qty: 3, unitPrice: 7, amount: 21 },
+    ],
+  }] });
+  assert.equal(result.agreedRows.length, 5);
+  const holders = result.agreedRows.filter(r => r.cells['品名'] === 'Card holder');
+  assert.equal(holders.length, 2);
+  assert.deepEqual(holders.map(r => r.cells['采购商品原价']), [100, 100]);
+  assert.equal(holders.reduce((s, r) => s + r.cells['采购商品金额'], 0), 190);
+  assert.ok(holders.every(r => r.flags['采购商品金额'] === AMBER && r.estimated && r.exportMeta.discountKind === 'estimated'));
+  assert.ok(holders.every(r => r.cells['采购时间'] === '2026-03-02 19:05:00' && r.cells['采购小票id'] === 'H-1'));
+  assert.equal(holders[0].rowId, 'q1:0:u0');
+  assert.equal(holders[1].rowId, 'q1:0:u1');
+  const cotton = result.agreedRows.filter(r => r.cells['品名'] === 'Cotton');
+  assert.equal(cotton.length, 3);
+  assert.ok(cotton.every(r => r.cells['采购商品金额'] === 7 && r.exportMeta.discountKind === 'none' && !r.flags['采购商品金额']));
+  assert.equal(cotton[0].cells['销售金额'], 6.16);
+});
+
+test('printed per-item discount is exact; a shared receipt discount is Amber and sums to the paid total', async () => {
+  const samples = JSON.parse(readFileSync(new URL('../../tillroll/real-samples/index.json', import.meta.url), 'utf8'));
+  const sample = name => samples.find(e => e.filename === name);
+  const mac = sample('open-prices-58120.jpg');
+  const jack = sample('open-prices-14480.jpg');
+  const env = makeEnv();
+  const macRun = await runSanity(env, { batchId: 'mac', mode: 'round1', receipts: [{ ...mac.data, receiptKey: 'mac' }] });
+  const priced = macRun.result.agreedRows.filter(r => typeof r.cells['采购商品金额'] === 'number' && r.cells['采购商品金额'] !== 0);
+  assert.ok(priced.length >= 3);
+  for (const row of priced) {
+    assert.equal(row.exportMeta.discountKind, 'printed');
+    assert.notEqual(row.flags['采购商品金额'], AMBER);
+    assert.equal(row.estimated, false);
+  }
+  assert.equal(Math.round(priced.reduce((s, r) => s + r.cells['采购商品金额'], 0) * 100) / 100, 88.2);
+
+  const jackRun = await runSanity(env, { batchId: 'jack', mode: 'round1', receipts: [{ ...jack.data, receiptKey: 'jack' }] });
+  const rows = jackRun.result.agreedRows;
+  assert.equal(rows.length, 2);
+  for (const row of rows) {
+    assert.equal(row.exportMeta.discountKind, 'estimated');
+    assert.equal(row.estimated, true);
+    assert.equal(row.flags['采购商品金额'], AMBER);
+    assert.equal(row.cells['采购商品原价'], 59.99);
+  }
+  assert.equal(Math.round(rows.reduce((s, r) => s + r.cells['采购商品金额'], 0) * 100) / 100, 89.98);
+  assert.equal(rows[0].cells['采购小票id'], rows[1].cells['采购小票id']);
+  assert.equal(rows[0].cells['采购时间'], rows[1].cells['采购时间']);
 });
