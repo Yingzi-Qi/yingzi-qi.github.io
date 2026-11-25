@@ -26,6 +26,7 @@ const receiptFields = [
 const itemFields = [
   ['brand','Brand'], ['item','Item'], ['itemId','Item ID / barcode'], ['sku','Style / SKU'], ['colour','Colour'],
   ['size','Size'], ['qty','Quantity','number'], ['unitPrice','Unit price','number'], ['amount','Line amount','number'],
+  ['lineDiscount','Line discount','number'],
 ];
 const blankItem = () => Object.fromEntries(itemFields.map(([key,,type]) => [key, type === 'number' ? null : '']));
 
@@ -216,6 +217,9 @@ function showReading(panel, r) {
     return;
   }
   const reasons = [...(r.reasons || []), ...(r.notes || [])];
+  const clues = r.data?.storeClues;
+  if (clues && (clues.addressLines?.length || clues.postcode || clues.storeNumber || clues.phone))
+    reasons.push('Printed store details: '+[...(clues.addressLines||[]),clues.postcode&&'Postcode '+clues.postcode,clues.storeNumber&&'Store '+clues.storeNumber,clues.phone&&'Tel '+clues.phone].filter(Boolean).join(' · '));
   const elapsed = Number(r.elapsed);
   const sub = [r.method, Number.isFinite(elapsed) && elapsed > 0 ? elapsed.toFixed(1)+' s' : ''].filter(Boolean).join(' · ');
   if (sub) panel.append(element('p', sub, 'hint'));

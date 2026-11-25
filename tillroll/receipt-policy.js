@@ -50,6 +50,8 @@ export function referenceHint(merchant) {
 
 export function kindForFlag(flag) {
   if (flag?.kind==='reading' || flag?.kind==='lookup') return flag.kind;
+  if (flag?.category==='lookup') return reviewKinds.lookup;
+  if (flag?.category==='reading') return reviewKinds.reading;
   if (flag?.stage==='Order comparison' || flag?.stage==='Product lookup' || flag?.stage==='Independent reference') return reviewKinds.lookup;
   const message=folded(flag?.message);
   if (/lookup|catalogue|order list|independent reference|official name|near[- ]price|candidate brand|candidate item|retailer has no configured/.test(message)) return reviewKinds.lookup;

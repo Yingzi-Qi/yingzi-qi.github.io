@@ -3,6 +3,7 @@ import {isPrintedItemNumber,parsePrintedItemId,printedBarcodeDetail,barcodesBelo
 import {referenceFormat} from './retail-rules.js?v=6';
 import {validCalendarDate} from './purchase-date.js?v=6';
 import {inspectReference} from './reference.js?v=6';
+import {normalizeTender,cleanProductCode,nonItemName,storeReceiptId} from './receipt-rules.js?v=1';
 // Geometry is normalized to the upright photo, with the origin at its top left.
 const PHOTO_CONFIDENCE = 0.8;
 const ID_LABEL = /^order\s+i\.?d\.?\s*[:#]?$/i;
@@ -495,12 +496,53 @@ function printedOrderNumbers(ocr) {
   return printedNumbers;
 }
 
+// Flag categories: 'reading' (Pink #FECDD3: OCR doubt, pass mismatch, sanity failure),
+// 'lookup' (Amber #FDE68A: comparison with an order list, catalogue or imported format)
+// and 'info' (no colour).
+export function flagCategory(flag) {
+  if (!flag || flag.severity === 'info') return 'info';
+  return flag.category === 'lookup' ? 'lookup' : 'reading';
+}
+
+// Field issues raised by the readers that always need a reading check.
+const readerIssueMessages = {
+  rejected_code:'This value is not a product code and was cleared',
+  doubtful_code:'Check the printed product code',
+  doubtful_zero_price:'Check this zero price',
+  channel_not_tender:'Payment must be the tender, not the purchase channel',
+  unreadable_time:'Purchase time is unreadable',
+  ambiguous_time:'Purchase time is ambiguous',
+};
+
+// A line amount must be printed on the item's own row or its short detail block.
+// Only clear, unique matches are compared; missing evidence is neutral.
+function rowAlignment(items, ocr, add) {
+  const lines = visualLines(ocr);
+  if (lines.length < 3) return;
+  const words = value => ' '+itemWording(value)+' ';
+  const moneyForms = value => {
+    const fixed = Math.abs(value).toFixed(2);
+    return [fixed, fixed.replace('.', ','), Number(fixed).toLocaleString('en-GB',{minimumFractionDigits:2})];
+  };
+  items.forEach((item, i) => {
+    const wanted = itemWording(item.item), amount = number(item.amount);
+    if (wanted.length < 4 || !/\p{L}{3}/u.test(wanted) || amount === null || amount === 0) return;
+    const nameRows = lines.map((line, j) => words(line.text).includes(' '+wanted+' ') ? j : -1).filter(j => j >= 0);
+    const forms = moneyForms(amount);
+    const priceRows = lines.map((line, j) => forms.some(f => new RegExp('(?<![\\d.,])'+f.replace(/[.,]/g, '[.,]')+'(?![\\d])').test(line.text)) ? j : -1).filter(j => j >= 0);
+    if (nameRows.length !== 1 || !priceRows.length) return;
+    const at = nameRows[0];
+    if (priceRows.some(j => j >= at - 1 && j <= at + 3)) return;
+    add('items.'+i+'.amount', 'The line amount is printed on a row that does not align with this item.', 'check');
+  });
+}
+
 export function checkReceipt(data, ocr, previous = null, {independentPhoto = false, today = new Date(), orders = null, demoFormats = false, reference = inspectReference(data,ocr)} = {}) {
   const items = data.items || [], flags = [], confirmedFields = [];
   const repeats = Array(items.length).fill(null);
-  const add = (field, message, severity, escalate = severity !== 'info') => {
+  const add = (field, message, severity, escalate = severity !== 'info', category = severity === 'info' ? 'info' : 'reading') => {
     if (!flags.some(flag => flag.field === field && flag.message === message))
-      flags.push({field, message, severity, escalate});
+      flags.push({field, message, severity, escalate, category});
   };
   if (!items.length) add('receipt','No line items were read.', 'fix');
   if (!text(data.merchant)) add('merchant','Retailer is missing.', 'fix');
@@ -513,7 +555,7 @@ export function checkReceipt(data, ocr, previous = null, {independentPhoto = fal
     if (!rule || !value) continue;
     const matches=rule.test(value);
     const description=rule.source+' format for '+text(data.merchant)+' ('+rule.description+').';
-    add(key,label+(matches?' matches the ':' does not match the ')+description,matches?'info':'check');
+    add(key,label+(matches?' matches the ':' does not match the ')+description,matches?'info':'check',!matches,matches?'info':'lookup');
   }
   const printedNumbers = printedOrderNumbers(ocr);
   if(reference.status==='found' && data[reference.kind] && name(data[reference.kind])!==name(reference.value)) {
@@ -542,15 +584,48 @@ export function checkReceipt(data, ocr, previous = null, {independentPhoto = fal
     if (!text(item.item)) add(path+'item',text(item.sku) ? 'Only the product code was read.' : 'Item description is missing.', 'fix');
     else if ((text(item.sku) && name(item.item) === name(item.sku)) || /^(?:\d{4,}|[A-Z]{1,6}[-/.]?\d{3,}[A-Z0-9]*(?:[-/.][A-Z0-9]+)*)$/i.test(text(item.item)))
       add(path+'item','The item description looks like a product code.', 'check');
+    const blocked = text(item.item) && nonItemName(item.item);
+    if (blocked) add(path+'item', blocked, 'fix');
     if (text(item.item) && !text(item.brand)) add(path+'brand','No brand was read for this item.', 'info');
+    for (const key of ['itemId','sku']) {
+      if (!text(item[key])) continue;
+      const code = cleanProductCode(item[key], {brand:item.brand, card:data.card, phone:data.storeClues?.phone, date:data.date});
+      if (code.rejected) add(path+key, code.issue, 'fix');
+      else if (code.issue) add(path+key, code.issue, 'check');
+      else if (code.code !== text(item[key])) add(path+key, 'The product code repeats the brand name ('+text(item[key])+'). Use '+code.code+'.', 'check');
+    }
+    if (number(item.amount) === 0 && !(data.fieldIssues || []).some(f => f.field === path+'amount'))
+      add(path+'amount', 'A zero price was kept because it could not be confirmed as printed. Check this line.', 'check');
     const amount = number(item.amount), qty = number(item.qty), unit = number(item.unitPrice);
     if (amount === null) add(path+'amount','Line amount is missing or unreadable.', 'fix');
     else if (qty !== null && unit !== null && !near(qty*unit-includedLineDiscount(item), amount)) add(path+'amount','Quantity multiplied by unit price differs from the line amount.', 'fix');
   });
   arithmetic(data, items, add, repeats);
+  rowAlignment(items, ocr, add);
+  if (text(data.time) && !/^(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d$/.test(text(data.time)))
+    add('time','Purchase time must be HH:MM:SS in 24-hour format.', 'check');
+  if (text(data.payment)) {
+    const tender = normalizeTender(data.payment);
+    if (tender.channel) add('payment','“'+text(data.payment)+'” is a purchase channel, not a payment tender.', 'fix');
+    else if (!tender.known) add('payment','The payment tender “'+text(data.payment)+'” is not recognised.', 'check');
+  }
+  // Store-specific 采购小票id layouts. An uncertain or contradicting number is a reading error.
+  const storeId = storeReceiptId(data.merchant, ocr);
+  if (storeId && ocr?.lines?.length) {
+    const recorded = text(data.receiptReference);
+    if (storeId.status === 'found' && recorded && name(recorded) !== name(storeId.value))
+      add('receiptReference', storeId.reason+' The photo shows '+storeId.value+'.', 'check');
+    else if (storeId.status === 'unclear') add('receiptReference', storeId.reason, 'check');
+    else if (storeId.status === 'missing' && !recorded) add('receiptReference', storeId.reason, 'check');
+  }
   for (const issue of Array.isArray(data.fieldIssues) ? data.fieldIssues : []) {
     const field = text(issue?.field);
-    if (!/^(merchant|orderId|orderNumber|date|total|items\.\d+\.(item|amount))$/.test(field) || issue.reason === 'missing_on_receipt') continue;
+    if (!/^(merchant|orderId|orderNumber|receiptReference|date|time|payment|total|items\.\d+\.(item|amount|itemId|sku))$/.test(field) || issue.reason === 'missing_on_receipt') continue;
+    const known = readerIssueMessages[issue.reason];
+    if (known) {
+      add(field, known + (issue.evidence ? '. '+text(issue.evidence) : '.'), issue.reason === 'rejected_code' || issue.reason === 'channel_not_tender' ? 'fix' : 'check');
+      continue;
+    }
     if (!(reference.basis==='user-confirmed' && reference.kind===field) && !flags.some(f => f.field === field && f.severity !== 'info'))
       add(field,'Hard to read' + (issue.evidence ? '. '+text(issue.evidence) : '.') , 'check');
   }

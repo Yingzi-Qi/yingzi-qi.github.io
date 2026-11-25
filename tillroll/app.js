@@ -2,6 +2,8 @@ import {oldestPurchaseFirst,purchaseDateText} from './receipt-date-display.js?v=
 import {inspectReference,combineReferenceReadings} from './reference.js?v=6';
 import {readPhoto,secondReadPhoto,extractLocal,extractAI,reconcileReadings,photoFieldConflicts,recoverPhotoItemIds} from './extract.js?v=curatedphotos1';
 import {checkReceipt,samePurchase,reviewForLine,verifyImportedItemIds} from './checks.js?v=productcodes3';
+import {normalizeReading} from './extract.js?v=curatedphotos1';
+import {applyZeroPriceExclusion,normalizePurchaseTime,readStoreClues} from './receipt-rules.js?v=1';
 import {exportExcel,exportCSV,readOrderFile,readAchungWorkbook,readTillrollEdits} from './exports.js?v=policy1';
 import {planWorkbookRefresh,restoreWorkbookReceipts,nextWorkbookBaseline,withLegacyWorkbookBaseline,nextLegacyWorkbookBaseline} from './workbook-refresh.js?v=2';
 import {bindExcelRefresh} from './excel-refresh-ui.js?v=1';
@@ -23,7 +25,7 @@ let referenceHash=null,referenceRevision=0;
 const excelBaselines=new Map();
 const legacyBaselines=new Map();
 const emptyOCR=()=>({text:'',confidence:0,lines:[]});
-const blankItem=()=>({brand:'',item:'',sku:'',itemId:'',colour:'',size:'',qty:null,unitPrice:null,amount:null});
+const blankItem=()=>({brand:'',item:'',sku:'',itemId:'',colour:'',size:'',qty:null,unitPrice:null,amount:null,lineDiscount:null});
 const referenceLabels={orderId:'Order ID',orderNumber:'Order number',receiptReference:'Receipt reference'};
 const sameReference=(a,b)=>String(a??'').trim().toLowerCase()===String(b??'').trim().toLowerCase();
 const get=(obj,key)=>key.split('.').reduce((v,k)=>v?.[k],obj);
@@ -85,7 +87,23 @@ function verifyFinalOutput(r) {
   });
 }
 
+// Model and saved readings get the same printed-store clues and true-zero audit as on-device OCR.
+function prepareModelReading(data,ocr) {
+  let out=data;
+  const clues=out.storeClues;
+  if(ocr?.lines?.length && !(clues?.addressLines?.length || clues?.postcode || clues?.storeNumber || clues?.phone))
+    out={...out,storeClues:readStoreClues(ocr.lines,out.merchant)};
+  return ocr?.lines?.length ? applyZeroPriceExclusion(out,ocr) : out;
+}
+function zeroPriceNotes(r) {
+  const excluded=r.data?.excludedZeroItems || [];
+  if(!excluded.length)return;
+  const note='Excluded '+excluded.length+' confirmed zero-price line'+(excluded.length===1?'':'s')+' from the table and export: '+
+    excluded.map(z=>[z.item?.brand,z.item?.item||z.item?.itemId||z.item?.sku].filter(Boolean).join(' ')||'unnamed line').join(', ')+'.';
+  r.notes=[...(r.notes||[]).filter(n=>!n.startsWith('Excluded ')),note];
+}
 function finalizeOutput(r) {
+  zeroPriceNotes(r);
   r.priorLineChecks=captureLineWarnings(r);
   verifyFinalOutput(r);
 }
@@ -135,7 +153,7 @@ function evaluateReceipt(r,fillMissing){
   if(r.origin==='ai' && ocr.text) {
     for(const issue of photoFieldConflicts(r.record,ocr)) extra.push({...issue,stage:'Model compared with photo OCR'});
   }
-  if(r.verifyIssue)extra.push({field:'verification',message:r.verifyIssue,severity:'check',escalate:false});
+  if(r.verifyIssue)extra.push({field:'verification',message:r.verifyIssue,severity:'check',escalate:false,category:'reading'});
   for(const issue of extra){
     if(choice && issue.field===choice.kind)continue;
     if(!r.review.flags.some(f=>f.field===issue.field && f.message===issue.message))r.review.flags.push(issue);
@@ -175,7 +193,7 @@ async function run(r){
     const owner=hashOwners.get(r.hash);
     if(owner && owner!==r.id){r.exactOf=owner;r.duplicateOf=owner;r.state='duplicate';return;}
     hashOwners.set(r.hash,r.id);
-    if(r.useSaved){r.data=normalData(structuredClone(r.demo.data));r.ocr=r.demo.ocr;r.otherOcr=r.demo.referenceOcr;r.origin='sample';r.method='Saved reading';}
+    if(r.useSaved){r.data=normalData(normalizeReading(structuredClone(r.demo.data)));r.ocr=r.demo.ocr;r.otherOcr=r.demo.referenceOcr;r.origin='sample';r.method='Saved reading';}
     else{
       const modelEnabled=chosenMode==='ai'&&!!chosenKey;
       const [ocrRead,aiRead]=await Promise.allSettled([readPhoto(r.file),modelEnabled?extractAI(r.file,chosenKey,1,[]):Promise.resolve(null)]);if(!current())return;
@@ -185,7 +203,7 @@ async function run(r){
       else if(r.ocr.text){r.data=normalData(extractLocal(r.ocr));r.origin='local';r.method='Local OCR';if(modelEnabled)r.notes.push('Gemini was unavailable. This result uses on-device OCR.');}
       else throw new Error('No readable extraction. Try a brighter, sharper photo or check the reader settings.');
     }
-    if (r.origin==='ai' || r.origin==='sample') r.data=recoverPhotoItemIds(r.data,r.ocr);
+    if (r.origin==='ai' || r.origin==='sample') r.data=prepareModelReading(recoverPhotoItemIds(r.data,r.ocr),r.ocr);
     r.firstData=structuredClone(r.data);evaluate(r);
     const failures=r.review.flags.filter(f=>f.escalate);const hasPhotoIssues=r.review.photo.some(p=>p.status==='Needs review');
     const orderIssue=r.orders?.some(orderNeedsReview);
@@ -201,7 +219,7 @@ async function run(r){
       try{
         let next;
         if(r.usedAI){
-          next=recoverPhotoItemIds(await extractAI(r.file,chosenKey,2,r.reasons),r.ocr);
+          next=prepareModelReading(recoverPhotoItemIds(await extractAI(r.file,chosenKey,2,r.reasons),r.ocr),r.ocr);
         }else{
           const other=await secondReadPhoto(r.file);
           if(!current())return;
@@ -380,6 +398,7 @@ function updateReceiptFields(r,data,removeIndex=null){
     }));
   }
   if(data.date!==r.record.date)delete data.dateIssue;
+  if(data.time!==r.record.time){const time=normalizePurchaseTime(data.time);if(time)data.time=time;}
   r.readingConflicts=(r.readingConflicts||[]).filter(f=>JSON.stringify(get(data,f.field))===JSON.stringify(get(r.record,f.field)));
   if(data.merchant!==r.data.merchant || (r.confirmedReference && data[r.confirmedReference.kind]!==r.record[r.confirmedReference.kind]))r.confirmedReference=null;
   for(const key of Object.keys(referenceLabels)){
