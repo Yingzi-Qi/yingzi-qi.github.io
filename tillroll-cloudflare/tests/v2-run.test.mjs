@@ -62,7 +62,7 @@ test("upload with default reader mode 'local' makes zero /api/* fetches", () => 
   assert.match(app, /const modelEnabled=chosenMode==='server'&&!!chosenKey;/);
   // extractAI (the only /api/ocr caller) is only scheduled when modelEnabled is true.
   assert.match(app, /modelEnabled\?extractAI\(r\.file,chosenKey,1,\[\]\):Promise\.resolve\(null\)/);
-  assert.match(app, /if\(r\.usedAI\)\{\s*next=recoverPhotoItemIds\(await extractAI\(r\.file,chosenKey,2,r\.reasons\),r\.ocr\);/);
+  assert.match(app, /if\(r\.usedAI\)\{\s*next=prepareModelReading\(recoverPhotoItemIds\(await extractAI\(r\.file,chosenKey,2,r\.reasons\),r\.ocr\),r\.ocr\);/);
 
   const ocrFetch = extract.match(/const viaServer = apiKey\.trim\(\)==='__server__';\s*const response = viaServer\s*\? await fetch\('\/api\/ocr'/s);
   assert.ok(ocrFetch, '/api/ocr must be gated on the Tillroll-server key, not called for on-device OCR');
