@@ -431,6 +431,11 @@ async function prepareExcelRefresh(file){
   const currentGeneration=generation;
   const [workbook,hash]=await Promise.all([readTillrollEdits(file),fingerprint(file)]);
   if(currentGeneration!==generation)throw new Error('The batch changed. Choose the workbook again.');
+  if(workbook.kind==='v2'){
+    const {applyV2Refresh}=await import('./v2-excel.js');
+    const outcome=await applyV2Refresh(workbook,{batchId:window.tillrollV2Hooks?.batchId?.()||null,replace:window.tillrollV2Hooks?.driveReplace?.()||null});
+    return {filename:file.name,hash,currentGeneration,v2Outcome:outcome};
+  }
   const previousLegacy=workbook.exportKey ? null : legacyBaselines.get(file.name);
   const parsed=previousLegacy ? withLegacyWorkbookBaseline(workbook,previousLegacy) : workbook;
   const previous=excelBaselines.get(parsed.exportKey);
@@ -450,7 +455,14 @@ async function prepareExcelRefresh(file){
   return prepared;
 }
 
-function finishExcelRefresh({filename,hash,parsed,currentGeneration,records,patches}){
+function finishExcelRefresh({filename,hash,parsed,currentGeneration,records,patches,v2Outcome}){
+  if(v2Outcome){
+    if(currentGeneration!==generation)throw new Error('The batch changed. Choose the workbook again.');
+    receiptFileHashes.add(hash);
+    note(v2Outcome.message);
+    if(v2Outcome.result)window.tillrollV2Hooks?.showResult?.(v2Outcome.result);
+    return;
+  }
   if(currentGeneration!==generation || (records && batch.length))throw new Error('The batch changed. Choose the workbook again.');
   const nextBaseline=parsed.exportKey ? nextWorkbookBaseline(parsed) : null;
   let nextLegacy=null;

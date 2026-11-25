@@ -5,14 +5,7 @@ import {parsePrintedItemId} from './product-code.js?v=productcodes3';
 import * as zipPackage from './export-vendor/jszip.min.js';
 
 const JSZip = zipPackage.default ?? globalThis.JSZip;
-const MAIN = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
 const REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
-const PACKAGE = 'http://schemas.openxmlformats.org/package/2006/relationships';
-const XML = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
-const WORKBOOK_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-
-const excelColumnWidth = 28;
-const excelRowHeight = 32;
 
 const receiptColumns = [
   ['Source','merchant'], ['Date','date'], ['Time','time'],
@@ -56,9 +49,6 @@ function baselineParts(baseline) {
   parts.push(json);
   return parts;
 }
-const esc = value => String(value ?? '').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]/g,'')
-  .replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
-const colName = n => n > 26 ? colName(Math.floor((n-1)/26)) + colName((n-1)%26+1) : String.fromCharCode(64+n);
 function exportData(receipts,includeRefresh=false) {
   const includeOrders = receipts.some(r => r.orders?.length);
   const columns = [...receiptColumns,...(includeOrders ? orderColumns : []),...verificationColumns];
@@ -148,43 +138,12 @@ export function buildCsvBlob(receipts) {
     {type:'text/csv;charset=utf-8'});
 }
 
-function cellXml(row,col,{value,numeric,style}) {
-  const attrs = ' r="'+colName(col)+row+'" s="'+style+'"';
-  if (numeric) return '<c'+attrs+'><v>'+value+'</v></c>';
-  if (value==='') return '<c'+attrs+'/>';
-  return '<c'+attrs+' t="inlineStr"><is><t xml:space="preserve">'+esc(String(value).slice(0,32767))+'</t></is></c>';
-}
-const styles = XML + `<styleSheet xmlns="${MAIN}">
-  <fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><color rgb="FFFFFFFF"/><sz val="11"/><name val="Calibri"/></font></fonts>
-  <fills count="6"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>${['FF1E4946','FFFFEDC0','FFFDE68A','FFFECDD3'].map(rgb=>'<fill><patternFill patternType="solid"><fgColor rgb="'+rgb+'"/><bgColor indexed="64"/></patternFill></fill>').join('')}</fills>
-  <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
-  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-  <cellXfs count="10">
-    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf>
-    <xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment wrapText="1" vertical="center"/></xf>
-    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf>
-    <xf numFmtId="4" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyAlignment="1"><alignment vertical="top"/></xf>
-    ${[3,4,5].map(fill=>'<xf numFmtId="0" fontId="0" fillId="'+fill+'" borderId="0" xfId="0" applyFill="1" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf><xf numFmtId="4" fontId="0" fillId="'+fill+'" borderId="0" xfId="0" applyNumberFormat="1" applyFill="1" applyAlignment="1"><alignment vertical="top"/></xf>').join('')}
-  </cellXfs>
-  <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`;
+// The .xlsx contract is the 10 Chinese columns (v2-excel.js). This file no longer
+// writes English headers or the legacy #FFEDC0 fill. CSV and the Achung/legacy
+// readers below still recognise the historical English headers so older workbooks open.
 export async function buildXlsxBlob(receipts) {
-  const {columns,rows,visibleCount} = exportData(receipts,true);
-  const range = 'A1:'+colName(columns.length)+(rows.length+1);
-  const rowXml = (number, cells) =>
-    `<row r="${number}" ht="${excelRowHeight}" customHeight="1">${cells.map((cell,i)=>cellXml(number,i+1,cell)).join('')}</row>`;
-  const header = rowXml(1, columns.map(([title])=>({value:title,style:1})));
-  const contents = rows.map((row,i)=>rowXml(i+2,row)).join('');
-  const widths = columns.map((_,i)=>
-    `<col min="${i+1}" max="${i+1}" width="${excelColumnWidth}" customWidth="1"${i>=visibleCount?' hidden="1"':''}/>`).join('');
-  const worksheet = XML + `<worksheet xmlns="${MAIN}"><dimension ref="${range}"/><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" state="frozen" topLeftCell="A2" activePane="bottomLeft"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="${excelRowHeight}" defaultColWidth="${excelColumnWidth}"/><cols>${widths}</cols><sheetData>${header}${contents}</sheetData><autoFilter ref="${range}"/></worksheet>`;
-  const zip = new JSZip();
-  zip.file('[Content_Types].xml',XML+`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`);
-  zip.file('_rels/.rels',XML+`<Relationships xmlns="${PACKAGE}"><Relationship Id="rId1" Type="${REL}/officeDocument" Target="xl/workbook.xml"/></Relationships>`);
-  zip.file('xl/workbook.xml',XML+`<workbook xmlns="${MAIN}" xmlns:r="${REL}"><sheets><sheet name="Line items" sheetId="1" r:id="rId1"/></sheets></workbook>`);
-  zip.file('xl/_rels/workbook.xml.rels',XML+`<Relationships xmlns="${PACKAGE}"><Relationship Id="rId1" Type="${REL}/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="${REL}/styles" Target="styles.xml"/></Relationships>`);
-  zip.file('xl/worksheets/sheet1.xml',worksheet);
-  zip.file('xl/styles.xml',styles);
-  return new Blob([await zip.generateAsync({type:'uint8array',compression:'DEFLATE'})],{type:WORKBOOK_MIME});
+  const { buildV2XlsxBlob } = await import('./v2-excel.js');
+  return buildV2XlsxBlob(receipts);
 }
 function download(blob,extension) {
   const url=URL.createObjectURL(blob);
@@ -438,6 +397,11 @@ function refreshBaseline(parts,rowNumber) {
 
 export async function readTillrollEdits(file) {
   if (file?.name && !/\.xlsx$/i.test(file.name)) throw new Error('Choose an edited Tillroll Excel (.xlsx) export.');
+  const { readV2Workbook } = await import('./v2-excel.js');
+  try {
+    const v2 = await readV2Workbook(file);
+    if (v2.kind === 'v2') return v2;
+  } catch (e) { if (e.v2) throw e; }
   const book=await openWorkbook(file);
   const sheet=book.sheets.find(s=>s.getAttribute('name')?.toLowerCase()==='line items');
   if (!sheet) throw new Error('Choose a Tillroll Excel export with a Line items worksheet.');

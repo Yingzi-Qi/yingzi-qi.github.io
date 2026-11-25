@@ -114,17 +114,31 @@ function renderResult(out) {
   const amberList = out.lookupUncertainties.slice(0, 30).map(e => `<li><b>${esc(e.col)}</b> · ${esc(e.reason)}${(e.sourceUrls || []).slice(0, 2).map(u => ` <a href="${esc(u)}" target="_blank" rel="noopener noreferrer">source</a>`).join('')}</li>`).join('');
   panel.innerHTML = `
     <div class="v2-result-head"><h2>Final agreed version</h2>
-      <div class="actions"><button id="v2-csv" class="quiet">Download CSV</button><button id="v2-json" class="quiet">Download JSON (for Excel export)</button></div></div>
+      <div class="actions"><button id="v2-csv" class="quiet">Download CSV</button><button id="v2-xlsx" class="primary">Export Excel</button></div></div>
     ${out.lookupsPaused ? `<p class="v2-paused" style="background:#FDE68A">Look-ups are paused: ${esc((out.pausedReasons || []).join(' '))} Affected cells are flagged Amber.</p>` : ''}
     <p class="v2-summary">${out.agreedRows.length} rows · <span class="v2-chip" style="background:#FECDD3">${out.readingErrors.length} reading errors</span> · <span class="v2-chip" style="background:#FDE68A">${out.lookupUncertainties.length} look-up flags</span> · ${out.excludedZeroCount} zero-price line(s) excluded</p>
     ${pinkList ? `<details open><summary>Reading errors to check first (Pink)</summary><ul>${pinkList}</ul></details>` : ''}
     ${amberList ? `<details><summary>Look-up uncertainty (Amber)</summary><ul>${amberList}</ul></details>` : ''}
     <div class="table-wrap"><table class="v2-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
   $('#v2-csv').onclick = () => download('tillroll-agreed.csv', toCsv(out), 'text/csv;charset=utf-8');
-  $('#v2-json').onclick = () => download('tillroll-agreed.json', JSON.stringify(out, null, 2), 'application/json');
+  $('#v2-xlsx').onclick = () => exportAgreed(out);
 }
 const toCsv = out => '\ufeff' + [COLUMNS, ...out.agreedRows.map(r => COLUMNS.map(c => r.cells[c] ?? ''))].map(row => row.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\r\n');
 function download(name, text, type) { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000); }
+let driveReplace = null;
+async function exportAgreed(out) {
+  const { buildV2XlsxBlob, uploadExport } = await import('./v2-excel.js');
+  const blob = await buildV2XlsxBlob(out);
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'Tillroll receipts.xlsx'; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  try {
+    const saved = await uploadExport(blob, { name: 'Tillroll receipts.xlsx', batchId: lastBatchId });
+    if (saved?.file?.id) driveReplace = { driveFileId: saved.file.id, name: saved.file.name || 'Tillroll receipts.xlsx' };
+    note('Excel saved to Google Drive (Tillroll/Exports).');
+  } catch (e) {
+    note(e.message && /not set up|Drive|OAuth|sign/i.test(e.message) ? e.message : 'Excel downloaded. Connect Google Drive to store it in Tillroll/Exports.');
+  }
+}
 
 // ---- Quota pill, Drive, Workbooks, History -------------------------------
 async function refreshQuota() {
@@ -156,11 +170,17 @@ async function openWorkbooks() {
     <span>${w.web_view_link ? `<a href="${esc(w.web_view_link)}" target="_blank" rel="noopener noreferrer">Open</a> ` : ''}<button data-wb="${esc(w.workbook_id)}">Update / Refresh</button></span></li>`).join('') + '</ul>';
   for (const btn of list.querySelectorAll('[data-wb]')) btn.onclick = async () => {
     btn.disabled = true; btn.textContent = 'Refreshing…';
+    const wb = data.workbooks.find(w => w.workbook_id === btn.dataset.wb);
     const res = await api(`/api/workbooks/${encodeURIComponent(btn.dataset.wb)}/refresh`, { method: 'POST' });
     if (!res.ok) { btn.textContent = (await res.json().catch(() => ({}))).error || 'Refresh failed'; return; }
-    const file = new File([await res.blob()], 'linked-workbook.xlsx', { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-    d.close();
-    window.tillrollV2Hooks?.refreshFromFile?.(file);
+    try {
+      const { readV2Workbook, applyV2Refresh } = await import('./v2-excel.js');
+      const planned = await readV2Workbook(await res.arrayBuffer());
+      if (planned.kind !== 'v2') throw new Error('This linked workbook is not a Tillroll v2 export.');
+      driveReplace = { driveFileId: wb?.drive_file_id, name: wb?.name };
+      const outcome = await applyV2Refresh(planned, { batchId: wb?.batch_id || lastBatchId, replace: driveReplace, download: true });
+      lastResult = outcome.result; renderResult(outcome.result); d.close(); note(outcome.message);
+    } catch (e) { btn.disabled = false; btn.textContent = e.message || 'Refresh failed'; }
   };
 }
 async function openHistory() {
@@ -173,6 +193,12 @@ async function openHistory() {
 }
 
 function init() {
+  window.tillrollV2Hooks = Object.assign(window.tillrollV2Hooks || {}, {
+    batchId: () => lastBatchId,
+    lastResult: () => lastResult,
+    showResult: out => { lastResult = out; const panel = $('#v2-panel'); if (panel) panel.hidden = false; renderResult(out); },
+    driveReplace: () => driveReplace,
+  });
   $('#v2-run')?.addEventListener('click', runSanity);
   $('#v2-workbooks')?.addEventListener('click', openWorkbooks);
   $('#v2-history')?.addEventListener('click', openHistory);
