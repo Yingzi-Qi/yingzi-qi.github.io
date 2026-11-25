@@ -19,35 +19,58 @@ function renderHistory(){
     return `<article class="history-entry"><strong>${escape(entry.filename||entry.merchant||'Receipt')}</strong><small>${escape(entry.merchant||'')}</small><div class="history-meta"><ul>${eventHtml}</ul></div>${preview}</article>`;
   }).join('')||'<p class="history-empty">No reading or workbook history yet.</p>';
 }
-// One Reading History dialog. Server-backed (v2 /api/history) when signed in;
-// the browser-local history (reading-history.js) is the offline fallback.
-// Exactly one of #history-server-list / #history-list is shown at a time.
+// One Reading History dialog. A dismissed unlock shows neither list.
+// 5xx and network errors are the only local fallback.
 function renderServerHistory(entries){
   const list=$('#history-server-list');if(!list)return;
   list.innerHTML=entries.length?entries.map(e=>`<article class="history-entry"><strong>${escape(e.kind||'Event')}</strong> · ${escape(e.summary||'')}<small>${escape(formatHistoryTime(e.created_at))}${e.batch_id?' · '+escape(e.batch_id):''}</small></article>`).join(''):'<p class="history-empty">No reading or workbook history yet.</p>';
 }
+function historyUnlockButton(){
+  let btn=$('#history-unlock');
+  if(btn)return btn;
+  btn=document.createElement('button');
+  btn.id='history-unlock';
+  btn.type='button';
+  btn.className='primary';
+  btn.textContent='Unlock';
+  btn.hidden=true;
+  btn.addEventListener('click', ()=>{retryLockedHistory().catch(()=>{});});
+  $('#history-status')?.insertAdjacentElement('afterend', btn);
+  return btn;
+}
 function showHistoryMode(mode, errorText){
-  const s=$('#history-server-list'),l=$('#history-list'),c=$('#history-clear'),st=$('#history-status');
-  const server=mode==='server', local=mode==='offline'||mode==='locked';
+  const s=$('#history-server-list'),l=$('#history-list'),c=$('#history-clear'),st=$('#history-status'),btn=historyUnlockButton();
+  const server=mode==='server', local=mode==='offline', locked=mode==='locked';
   if(s)s.hidden=!server;
   if(l)l.hidden=!local;
   if(c)c.hidden=!local;
+  if(btn)btn.hidden=!locked;
   if(!st)return;
   st.textContent=server?'Showing the reading history saved on the Tillroll server.'
-    :mode==='locked'?'Showing the history kept in this browser (offline, locked).'
+    :locked?'locked: unlock to view history'
     :mode==='error'?(errorText||'Could not load reading history.')
     :'Showing the history kept in this browser (offline).';
 }
 let historyMode='local';
+function applyHistoryResult(server){
+  if(server?.ok){historyMode='server';renderServerHistory(server.entries);showHistoryMode('server');}
+  else if(server?.error){historyMode='error';showHistoryMode('error', server.error);}
+  else if(server?.locked){historyMode='locked';showHistoryMode('locked');}
+  else{historyMode='local';renderHistory();showHistoryMode('offline');}
+}
+async function loadServerHistory(){
+  const hook=window.tillrollV2Hooks?.serverHistory;
+  if(typeof hook!=='function')return null;
+  try{return await hook();}catch{return {ok:false,offline:true,status:0};}
+}
+async function retryLockedHistory(){
+  applyHistoryResult(await loadServerHistory());
+}
 async function openHistory(){
   const dialog=$('#history-dialog');
   const hook=window.tillrollV2Hooks?.serverHistory;
-  let server=null;
-  if(typeof hook==='function'){try{server=await hook();}catch{server={ok:false,offline:true,status:0};}}
-  if(server?.ok){historyMode='server';renderServerHistory(server.entries);showHistoryMode('server');}
-  else if(server?.error){historyMode='error';showHistoryMode('error', server.error);}
-  else if(server?.locked){historyMode='local';renderHistory();showHistoryMode('locked');}
-  else{historyMode='local';renderHistory();showHistoryMode('offline');}
+  if(typeof hook==='function')applyHistoryResult(await loadServerHistory());
+  else applyHistoryResult(null);
   if(dialog && !dialog.open)dialog.showModal();
 }
 function refreshHistoryView(){if(historyMode==='local')renderHistory();}
