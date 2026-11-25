@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {makeOcr} from './ocr-fixture.mjs';
 import {
-  normalizePurchaseTime, readPurchaseTime, normalizeTender, readTender, toPaymentMethod, dropCardDigits, brandItemIdCandidate, readPrintedStyleRef, cleanProductCode,
+  normalizePurchaseTime, readPurchaseTime, normalizeTender, readTender, toPaymentMethod, dropCardDigits, brandItemIdCandidate, readPrintedStyleRef, cleanProductCode, confusableDigitAlternative,
   nonItemName, readStoreClues, mergeStoreClues, storeReceiptId, confirmedStoreReceiptId, classifyZeroPrice, applyZeroPriceExclusion,
 } from '../receipt-rules.js';
 import {extractLocal, cleanReceipt, geminiSchema, geminiPrompt, prepareModelReading, reconcileReadings} from '../extract.js';
@@ -17,6 +17,16 @@ const read = rows => { const ocr = makeOcr(rows); const data = extractLocal(ocr)
 const flagsFor = (review, field) => review.flags.filter(f => f.field === field && f.severity !== 'info');
 
 // ---- 2. 采购时间 -----------------------------------------------------------
+test('receipt numbers keep O and I and offer the digit reading', () => {
+  const shop = read(['ATELIER', '15/11/2026 14:03', 'Wool hat 25.00', 'Receipt # AT-1O0I', 'TOTAL 25.00']);
+  assert.equal(shop.data.receiptReference, 'AT-1O0I');
+  assert.ok(shop.data.receiptReferenceAlternatives.includes('AT-1001'));
+  assert.equal(confusableDigitAlternative('IO-100'), null);
+  assert.equal(confusableDigitAlternative('OI-1O'), 'OI-10');
+  const prepared = prepareModelReading({merchant: 'ATELIER', receiptReference: 'AT-1O0I', items: []}, makeOcr(['ATELIER', 'Receipt # AT-1O0I']));
+  assert.equal(prepared.receiptReference, 'AT-1O0I');
+  assert.ok(prepared.receiptReferenceAlternatives.includes('AT-1001'));
+});
 test('time: 24-hour HH:MM:SS, seconds default to :00, am/pm converted', () => {
   assert.equal(normalizePurchaseTime('14:03'), '14:03:00');
   assert.equal(normalizePurchaseTime('9:05'), '09:05:00');

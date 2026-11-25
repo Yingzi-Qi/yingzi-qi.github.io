@@ -3,7 +3,7 @@ import {inspectReference} from './reference.js?v=6';
 import {isGtin,isPrintedItemNumber,parsePrintedItemId,printedBarcodeDetail,barcodesBelowNames} from './product-code.js?v=productcodes3';
 import {readPurchaseDate} from './purchase-date.js?v=8';
 import {comparePhotoFields,mergeReadings} from './reading-comparison.js?v=discounts1';
-import {readPurchaseTime,normalizePurchaseTime,readTender,normalizeTender,toPaymentMethod,dropCardDigits,brandItemIdCandidate,readPrintedStyleRef,readStoreClues,mergeStoreClues,storeReceiptId,cleanProductCode,applyZeroPriceExclusion,isUkPurchase} from './receipt-rules.js?v=1';
+import {readPurchaseTime,normalizePurchaseTime,readTender,normalizeTender,toPaymentMethod,dropCardDigits,brandItemIdCandidate,readPrintedStyleRef,readStoreClues,mergeStoreClues,storeReceiptId,cleanProductCode,applyZeroPriceExclusion,isUkPurchase,confusableDigitAlternative} from './receipt-rules.js?v=1';
 import {sortItemFields} from './field-sorter.js';
 import {applyItemIdentifiers, isUntrustedReceiptText, maskCardField, cardScheme} from './item-identifiers.js';
 // OCR assets resolve on this site. Receipt images remain in the tab unless the
@@ -943,6 +943,7 @@ export function extractLocal(ocr) {
   const reference=inspectReference(result,ocr);
   if (reference.status==='found' && !result[reference.kind] && !(storeId && reference.kind==='receiptReference'))
     result[reference.kind]=reference.value;
+  Object.assign(result, attachConfusableReceiptAlternative(result));
   result.imageQuality=ocr.confidence<.65?'poor':'unknown';
   result.model='On-device OCR'; result.cost=0;
   return applyItemIdentifiers(applyZeroPriceExclusion(normalizeReading(result),ocr), ocr);
@@ -959,6 +960,13 @@ export function applyStoreReceiptId(data, ocr) {
   } else next.receiptReference=null;
   return next;
 }
+function attachConfusableReceiptAlternative(receipt) {
+  const confusable=confusableDigitAlternative(receipt?.receiptReference);
+  if(!confusable) return receipt;
+  const list=receipt.receiptReferenceAlternatives||[];
+  if(list.includes(confusable)) return receipt;
+  return {...receipt, receiptReferenceAlternatives:[...list, confusable]};
+}
 export function prepareModelReading(data, ocr) {
   let out=data ? {...data} : {};
   if(ocr?.lines?.length){
@@ -967,7 +975,7 @@ export function prepareModelReading(data, ocr) {
     out=applyZeroPriceExclusion(out, ocr);
     out=applyItemIdentifiers(out, ocr);
   }
-  return out;
+  return attachConfusableReceiptAlternative(out);
 }
 
 // Shared clean-up for every reader (on-device OCR and Gemini): 24-hour HH:MM:SS time,
