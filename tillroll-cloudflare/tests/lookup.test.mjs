@@ -115,3 +115,22 @@ test('branch suffix from storeClues (known table and grounded lookup)', async ()
   assert.equal(b.branch.officialStoreName, 'Rolex Canary Wharf');
   assert.equal(b.branch.cacheKey, 'lookup:v2:branch:rolex:e14-5ny');
 });
+
+test('price fallback does not run when the item-ID lookup is paused or only one source answered', async () => {
+  const env = makeEnv({ ...KEYS, BRAVE_MONTHLY_LIMIT: '1' }); const f = mockFetch(CATALOGUE);
+  await lookup(env, { brand: 'Chanel', itemId: 'A69900' }, { fetchImpl: f });
+  const afterFirst = { brave: f.calls.brave, gemini: f.calls.gemini };
+  const r = await lookup(env, { brand: 'Gucci', itemId: 'NOMATCH', price: 1350, currency: 'GBP' }, { fetchImpl: f });
+  assert.ok(!String(r.cacheKey || '').includes(':pf:'), r.cacheKey);
+  assert.ok(!(r.candidates || []).some(c => c.matchType === 'price-fallback'));
+  assert.equal(f.calls.brave, afterFirst.brave, 'Brave already at the monthly guard; must not retry on fallback');
+  assert.equal(f.calls.gemini, afterFirst.gemini + 1, 'only the item-ID Gemini call, not a price-fallback call');
+});
+
+test('price fallback does not run when the item-ID lookup is fully unavailable', async () => {
+  const env = makeEnv(); const f = mockFetch(CATALOGUE);
+  const r = await lookup(env, { brand: 'Gucci', itemId: 'NOMATCH', price: 1350, currency: 'GBP' }, { fetchImpl: f });
+  assert.equal(f.calls.brave + f.calls.gemini, 0);
+  assert.ok(!String(r.cacheKey || '').includes(':pf:'));
+  assert.equal((r.candidates || []).length, 0);
+});

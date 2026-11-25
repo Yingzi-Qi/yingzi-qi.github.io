@@ -169,18 +169,28 @@ export async function lookup(env, body, deps = {}) {
   if (req.itemId && req.brand !== undefined) stages.push(['id', keys.item(req.brand || '', req.itemId)]);
   if ((req.name || req.style) && req.brand) stages.push(['multi-field', keys.mf(req.brand, req.name || '', req.style || '')]);
   let result = { cacheHit: false, cacheKey: null, sourcesQueried: [], candidates: [] };
-  let idMatched = false, unavailable = [], paused = [];
+  let idMatched = false, idResult = null, unavailable = [], paused = [];
   for (const [stage, key] of stages) {
     const r = await runStage(env, req, stage, key, deps, trail);
     unavailable.push(...(r.unavailable || [])); paused.push(...(r.paused || []));
     result = { cacheHit: r.cacheHit, cacheKey: key, sourcesQueried: r.sourcesQueried, candidates: r.candidates };
-    if (stage === 'id' && r.candidates.length) { idMatched = true; break; }
-    if (stage === 'id' && !r.sourcesQueried.length && !r.cacheHit) break; // sources down: do not fall through and burn quota
+    if (stage === 'id') {
+      idResult = r;
+      if (r.candidates.length) { idMatched = true; break; }
+      // sources down / paused / skipped: do not fall through and burn quota
+      if (!r.cacheHit && !r.sourcesQueried.length) break;
+    }
     if (r.candidates.length) break;
   }
-  // Strict closest-price fallback: ONLY when a printed itemId matched nothing.
-  const idStageAnswered = trail.some(t => t.stage === 'id' && (t.cache || (t.problems || []).length < 2));
-  if (req.itemId && !idMatched && idStageAnswered && !result.candidates.length && req.price !== null && req.brand) {
+  // Clarification (Orchestrator, 25 Nov): price fallback runs ONLY after an item-ID
+  // lookup actually came back with no match — never when that lookup was unavailable or paused.
+  // A confirmed no-match is a cache hit (empty id results are only cached when both sources answered)
+  // or a live answer from both sources with no pause, error or skip.
+  const idConfirmedNoMatch = Boolean(
+    req.itemId && !idMatched && idResult && !idResult.candidates.length &&
+    (idResult.cacheHit || ((idResult.sourcesQueried || []).length === 2 && !(idResult.paused || []).length && !(idResult.unavailable || []).length))
+  );
+  if (idConfirmedNoMatch && !result.candidates.length && req.price !== null && req.brand) {
     const key = keys.pf(req.brand, req.currency, req.price);
     const r = await runStage(env, req, 'price-fallback', key, deps, trail);
     unavailable.push(...(r.unavailable || [])); paused.push(...(r.paused || []));
