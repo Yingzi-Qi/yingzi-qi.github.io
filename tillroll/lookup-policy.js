@@ -99,8 +99,8 @@ export function prepareUnitRows(items, { currency = '', merchant = '', storeClue
         sourceIndex,
         unitIndex,
         unitCount: copies,
-        brand: String(item?.brand ?? item?.['品牌'] ?? '').trim(),
-        name: String(item?.item ?? item?.name ?? item?.['品名'] ?? '').trim(),
+        brand: String(item?.receiptBrand ?? item?.brand ?? item?.['品牌'] ?? '').trim(),
+        name: String(item?.receiptItem ?? item?.item ?? item?.name ?? item?.['品名'] ?? '').trim(),
         itemId: String(item?.itemId ?? item?.['品牌货号'] ?? '').trim(),
         style: String(item?.sku ?? item?.style ?? '').trim(),
         currency: String(item?.currency ?? currency ?? '').trim().toUpperCase(),
@@ -174,7 +174,7 @@ export function buildLookupRequest(row, { bypassCache = false } = {}) {
   const supplier = clip(row.supplier);
   if (recovery !== 'missing-brand' && brand) body.brand = brand;
   if (itemId) body.itemId = itemId;
-  if (recovery !== 'missing-name' && name) body.name = name;
+  if ((recovery !== 'missing-name' || bypassCache) && name) body.name = name;
   if (style) body.style = style;
   if (row.price != null) body.price = roundMoney(row.price);
   if (row.currency) body.currency = clip(row.currency);

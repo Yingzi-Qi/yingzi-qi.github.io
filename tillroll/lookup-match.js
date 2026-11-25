@@ -3,7 +3,7 @@
 // and only after the item id matched nothing. It does not run on a paused or partial result.
 
 import { fold, normaliseItemId } from './brand-aliases.js';
-import { AMBER, canonicalDisplayBrand, roundMoney } from './lookup-policy.js';
+import { canonicalDisplayBrand, roundMoney } from './lookup-policy.js';
 
 export const CLOSE_GAP = { percent: 0.02, floor: 5 };
 
@@ -23,8 +23,9 @@ const FIELD_NAMES = {
 };
 
 export function flagColour(response) {
-  const value = String(response?.flag ?? '').trim();
-  return /^#[0-9A-Fa-f]{6}$/.test(value) ? value.toUpperCase() : AMBER;
+  const value = response && typeof response === 'object' ? response.flag : response;
+  if (value == null || value === '') return null;
+  return value === '#FDE68A' ? '#FDE68A' : null;
 }
 
 export function closeGapWidth(printedPrice, closeGap = CLOSE_GAP) {
@@ -146,11 +147,18 @@ export function normaliseMismatchField(field) {
 
 export function parseMismatches(value) {
   if (!Array.isArray(value)) return [];
-  return value.map(entry => ({
-    field: normaliseMismatchField(entry?.field),
-    receiptValue: entry?.receiptValue ?? '',
-    officialValue: entry?.officialValue ?? '',
-  })).filter(entry => entry.field);
+  const parsed = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object' || entry.receiptValue === null) continue;
+    const field = normaliseMismatchField(entry.field);
+    if (!field) continue;
+    parsed.push({
+      field,
+      receiptValue: entry.receiptValue ?? '',
+      officialValue: entry.officialValue ?? '',
+    });
+  }
+  return parsed;
 }
 
 export function computeMismatches(receipt, official) {
@@ -184,9 +192,17 @@ export function computeMismatches(receipt, official) {
   return mismatches;
 }
 
-export function mergeMismatches(fromServer, computed) {
-  const seen = new Set((fromServer || []).map(entry => entry.field));
-  return [...(fromServer || []), ...(computed || []).filter(entry => !seen.has(entry.field))];
+export function mergeMismatches(...groups) {
+  const seen = new Set();
+  const merged = [];
+  for (const group of groups) {
+    for (const entry of group || []) {
+      if (!entry?.field || entry.receiptValue === null || seen.has(entry.field)) continue;
+      seen.add(entry.field);
+      merged.push(entry);
+    }
+  }
+  return merged;
 }
 
 function idMatch(candidate, itemId) {

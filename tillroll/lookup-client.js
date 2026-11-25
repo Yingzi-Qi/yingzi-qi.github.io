@@ -67,7 +67,7 @@ function normaliseBranch(raw) {
 
 export function parseLookupResponse(payload) {
   const body = payload && typeof payload === 'object' ? payload : {};
-  const known = new Set(['cacheHit', 'cacheKey', 'sourcesQueried', 'candidates', 'flag', 'printedItemId', 'canonicalBrand', 'branch', 'paused', 'unavailableReason', 'quotaGuard']);
+  const known = new Set(['cacheHit', 'cacheKey', 'sourcesQueried', 'candidates', 'flag', 'printedItemId', 'canonicalBrand', 'branch', 'paused', 'unavailableReason', 'quotaGuard', 'mismatches']);
   const extra = {};
   for (const [key, value] of Object.entries(body)) if (!known.has(key)) extra[key] = value;
   const quotaGuard = Array.isArray(body.quotaGuard) ? body.quotaGuard.map(String)
@@ -77,36 +77,49 @@ export function parseLookupResponse(payload) {
     cacheKey: body.cacheKey == null ? null : String(body.cacheKey),
     sourcesQueried: Array.isArray(body.sourcesQueried) ? body.sourcesQueried.map(entry => typeof entry === 'string' ? entry : text(entry?.name || entry?.url || '')) : [],
     candidates: Array.isArray(body.candidates) ? body.candidates.map(normaliseCandidate).filter(Boolean) : [],
-    flag: text(body.flag),
+    flag: body.flag == null ? null : body.flag,
     printedItemId: body.printedItemId == null ? null : String(body.printedItemId),
     canonicalBrand: body.canonicalBrand == null ? null : text(body.canonicalBrand) || null,
     branch: normaliseBranch(body.branch),
     paused: asBool(body.paused),
     unavailableReason: text(body.unavailableReason),
     quotaGuard,
+    mismatches: parseMismatches(body.mismatches),
     extra,
   };
 }
 
-function slug(value) {
-  return String(value ?? '').normalize('NFKC').trim().toLowerCase().replace(/\s+/g, '-');
+export function slug(value) {
+  return String(value ?? '').normalize('NFKC').trim().toLowerCase().replace(/\s+/g, '-').replace(/[^\p{L}\p{N}&+._-]/gu, '');
 }
+
+function brandSlug(brand) {
+  return slug(canonicalBrand(brand) || brand || '');
+}
+
+export const cacheKeys = {
+  item: (brand, itemId) => `lookup:v2:item:${brandSlug(brand)}:${normaliseItemId(itemId)}`,
+  mf: (brand, name, style) => `lookup:v2:mf:${brandSlug(brand)}:${slug(name)}:${slug(style)}`,
+  pf: (brand, currency, price) => `lookup:v2:pf:${brandSlug(brand)}:${String(currency || '').trim().toUpperCase()}:${Number(price).toFixed(2)}`,
+  branch: (supplier, clue) => `lookup:v2:branch:${slug(supplier)}:${slug(clue)}`,
+};
 
 function cacheKind(parsed) {
   const types = new Set((parsed.candidates || []).map(candidate => candidate.matchType));
-  if (types.has('price-fallback') && !types.has('id') && !types.has('multi-field')) return 'price-fallback';
   if (!parsed.candidates.length) return 'miss';
+  if (types.has('id')) return 'match';
+  if (types.has('price-fallback')) return 'price-fallback';
+  if (types.has('multi-field')) return 'multi-field';
   return 'match';
 }
 
 export function cacheStorageKey(request, kind) {
-  const brand = slug(canonicalBrand(request.brand) || request.brand || '');
   const itemId = normaliseItemId(request.itemId);
-  if (kind === 'price-fallback' || (!itemId && kind !== 'match')) {
-    const price = request.price == null ? '' : Number(request.price).toFixed(2);
-    return `pf:${brand}:${itemId}:${String(request.currency || '').toUpperCase()}:${price}`;
-  }
-  return `id:${brand}:${itemId}`;
+  if (kind === 'price-fallback') return cacheKeys.pf(request.brand, request.currency, request.price);
+  if (kind === 'multi-field') return cacheKeys.mf(request.brand, request.name, request.style);
+  if (!itemId && (request.name || request.style)) return cacheKeys.mf(request.brand, request.name, request.style);
+  if (!itemId && request.price != null) return cacheKeys.pf(request.brand, request.currency, request.price);
+  return cacheKeys.item(request.brand, request.itemId);
 }
 
 function requestKey(body) {
@@ -150,10 +163,10 @@ export function createLookupClient({ baseUrl = '', fetchImpl = globalThis.fetch,
 
   function recall(body) {
     if (body.bypassCache) return null;
-    const itemId = normaliseItemId(body.itemId);
-    const keys = itemId
-      ? [cacheStorageKey(body, 'match'), cacheStorageKey(body, 'price-fallback')]
-      : [cacheStorageKey(body, 'price-fallback')];
+    const keys = [];
+    if (normaliseItemId(body.itemId)) keys.push(cacheKeys.item(body.brand, body.itemId));
+    if (body.name || body.style) keys.push(cacheKeys.mf(body.brand, body.name, body.style));
+    if (body.price != null && body.price !== '') keys.push(cacheKeys.pf(body.brand, body.currency, body.price));
     for (const key of keys) {
       const hit = cache.get(key);
       if (!hit) continue;
@@ -164,13 +177,14 @@ export function createLookupClient({ baseUrl = '', fetchImpl = globalThis.fetch,
     return null;
   }
 
-  function forget(brand, itemId) {
-    if (!itemId) return;
-    const prefixId = `id:${slug(canonicalBrand(brand) || brand || '')}:${normaliseItemId(itemId)}`;
-    const prefixPf = `pf:${slug(canonicalBrand(brand) || brand || '')}:${normaliseItemId(itemId)}:`;
-    for (const key of [...cache.keys()]) {
-      if (key === prefixId || key.startsWith(prefixPf)) cache.delete(key);
-    }
+  function forget(request) {
+    if (!request) return;
+    if (request.itemId) cache.delete(cacheKeys.item(request.brand, request.itemId));
+    if (request.previousItemId) cache.delete(cacheKeys.item(request.brand, request.previousItemId));
+    cache.delete(cacheKeys.mf(request.brand, request.name, request.style));
+    if (request.price != null && request.price !== '') cache.delete(cacheKeys.pf(request.brand, request.currency, request.price));
+    const clue = request.postcode || request.addressLine1 || request.storeNumber;
+    if (request.supplier && clue) cache.delete(cacheKeys.branch(request.supplier, clue));
   }
 
   function halt(code, message) {
@@ -258,8 +272,12 @@ export function createLookupClient({ baseUrl = '', fetchImpl = globalThis.fetch,
     if (request?.brand) body.brand = String(request.brand);
     if (request?.itemId) body.itemId = String(request.itemId);
     if (request?.previousItemId) body.previousItemId = String(request.previousItemId);
-    forget(body.brand, body.itemId);
-    forget(body.brand, body.previousItemId);
+    if (request?.name) body.name = String(request.name);
+    if (request?.style) body.style = String(request.style);
+    if (request?.supplier) body.supplier = String(request.supplier);
+    if (request?.currency) body.currency = String(request.currency);
+    if (request?.price != null && request.price !== '') body.price = Number(request.price);
+    forget(request);
     const url = endpointFor(baseUrl, 'invalidate');
     if (!url) return { ok: false, skipped: true, error: { code: 'unconfigured', message: 'Look-up base URL is not set.' } };
     if (state.locked) return halt('locked', 'Unlock Tillroll first.');

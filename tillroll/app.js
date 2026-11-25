@@ -2,15 +2,16 @@ import {oldestPurchaseFirst,purchaseDateText} from './receipt-date-display.js?v=
 import {inspectReference,combineReferenceReadings} from './reference.js?v=6';
 import {readPhoto,secondReadPhoto,extractLocal,extractAI,reconcileReadings,photoFieldConflicts,recoverPhotoItemIds} from './extract.js?v=curatedphotos1';
 import {checkReceipt,samePurchase,reviewForLine,verifyImportedItemIds} from './checks.js?v=productcodes3';
-import {exportExcel,exportCSV,readOrderFile,readAchungWorkbook,readTillrollEdits} from './exports.js?v=excelrefresh1';
+import {exportExcel,exportCSV,readOrderFile,readAchungWorkbook,readTillrollEdits} from './exports.js?v=policy1';
 import {planWorkbookRefresh,restoreWorkbookReceipts,nextWorkbookBaseline,withLegacyWorkbookBaseline,nextLegacyWorkbookBaseline} from './workbook-refresh.js?v=2';
 import {bindExcelRefresh} from './excel-refresh-ui.js?v=1';
 import {loadSamples} from './samples.js?v=curatedphotos1';
 import {compareOrder,orderNeedsReview} from './orders.js?v=lineverify1';
-import {verifyOutputItems} from './item-verification.js?v=curatedphotos1';
-import {createLookupClient, enrichReceipt} from './lookup-enrich.js?v=lookup1';
+import {verifyOutputItems} from './item-verification.js?v=policy1';
+import {createLookupClient, enrichReceipt} from './lookup-enrich.js?v=lookup2';
 import {photoVerificationRows} from './verification-photo.js?v=curatedphotos1';
 import {captureLineWarnings,classifyVerification,hasVerificationMismatch} from './verification-history.js?v=lineverify1';
+import {normalizeReceiptData,kindForFlag,kindForVerification,reviewKinds} from './receipt-policy.js?v=policy1';
 const $ = s=>document.querySelector(s);
 const escape = v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const paths={settings:'<path d="M4 7h5m4 0h7M4 17h9m4 0h3"/><circle cx="11" cy="7" r="2"/><circle cx="15" cy="17" r="2"/>',upload:'<path d="M12 15V3m-5 5 5-5 5 5M4 14v5a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5"/>',plus:'<path d="M12 5v14M5 12h14"/>',download:'<path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/>',search:'<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>',link:'<path d="m10 14 4-4m-4-3 2-2a5 5 0 0 1 7 7l-2 2m-3 3-2 2a5 5 0 0 1-7-7l2-2"/>',play:'<path d="m8 5 10 7-10 7z"/>'};
@@ -31,7 +32,7 @@ const referenceLabels={orderId:'Order ID',orderNumber:'Order number',receiptRefe
 const sameReference=(a,b)=>String(a??'').trim().toLowerCase()===String(b??'').trim().toLowerCase();
 const get=(obj,key)=>key.split('.').reduce((v,k)=>v?.[k],obj);
 function set(obj,key,value){const keys=key.split('.'); const end=keys.pop(); let cur=obj;for(const k of keys)cur=cur[k];cur[end]=value;}
-const normalData=data=>({...data,items:Array.isArray(data?.items)?data.items.map(x=>({...blankItem(),...x})):[]});
+const normalData=data=>normalizeReceiptData({...data,items:Array.isArray(data?.items)?data.items.map(x=>({...blankItem(),...x})):[]});
 const confidenceOptions = r=>({independentPhoto:r.origin==='ai'||r.origin==='sample'});
 const active = ()=>batch.filter(r=>r.state==='done' && !r.duplicateOf).sort(oldestPurchaseFirst);
 const notDone = r=>['queued','reading','checking','second'].includes(r.state);
@@ -89,7 +90,7 @@ function noteItemIdEdits(r, before, after) {
   }
 }
 function scheduleLookup(r) {
-  if (!r || r.state!=='done' || !batch.includes(r) || !(r.record || r.data)) return;
+  if (!r || r.state!=='done' || !r.lookupReady || !batch.includes(r) || !(r.record || r.data)) return;
   const token=(r.lookupToken=(r.lookupToken || 0)+1);
   enrichReceipt(r.record || r.data, {
     ocrText:[r.ocr?.text, r.otherOcr?.text].filter(Boolean).join('\n'),
@@ -110,6 +111,7 @@ function scheduleLookup(r) {
   }).catch(()=>{});
 }
 function verifyFinalOutput(r) {
+  if (!r.lookupReady) { r.verification=[]; return; }
   let readings=r.itemIdReadings || [r.ocr,r.otherOcr].filter(Boolean);
   const local=r.origin==='local';
   if (local && readings.length<2) readings=[];
@@ -118,6 +120,8 @@ function verifyFinalOutput(r) {
     r.photoWitnessCache={readings,rows:photoVerificationRows(readings,{requireAgreement:local})};
   }
   const results=verifyOutputItems(r.record,orderList,r.photoWitnessCache.rows);
+  const branch=results.find(result=>result.storeAddress)?.storeAddress;
+  if(branch && r.data.merchant) r.data.merchantDisplay=r.data.merchant+' · '+String(branch).split(',').slice(0,2).join(',').trim();
   r.verification=results.map((result,i)=>{
     const line=classifyVerification(result,r.priorLineChecks[i]);
     const sources=[...new Set(result.fields.map(field=>field.source))];
@@ -145,7 +149,7 @@ function evaluateReceipt(r,fillMissing){
   if(r.origin==='achung'){
     r.record=r.duplicateRecord=r.data;
     r.review={flags:r.nativeFlags,photo:importedPhotoChecks(r,fillMissing),repeats:[]};
-    r.orders=comparePurchase(r.record);
+  r.orders=r.lookupReady ? comparePurchase(r.record) : null;
     return;
   }
   if(r.origin==='workbook' && fillMissing)importedPhotoChecks(r,true);
@@ -186,7 +190,7 @@ function evaluateReceipt(r,fillMissing){
   }
   r.review.flags=r.review.flags.filter(f=>!r.ack.has(f.field+'|'+f.message));
   if(r.data.items.length && !r.review.photo.length)r.review.photo=r.data.items.map(()=>({status:'Not verified',reason:'No photo evidence available.'}));
-  r.orders=comparePurchase(r.record);
+  r.orders=r.lookupReady ? comparePurchase(r.record) : null;
 }
 function duplicates(){
   const canonical=[];
@@ -205,7 +209,7 @@ function startInput(entries, useSaved=savedSamples){
   else if(finishedTime)startTime+=Date.now()-finishedTime;
   finishedTime=0;
   for(const entry of entries){const file=entry.file;if(!file)continue;
-    const r={id:++seq,filename:file.name,file,url:URL.createObjectURL(file),state:'queued',method:'Queued',review:{flags:[],photo:[],repeats:[]},ack:new Set(),notes:[],reasons:[],generation,origin:'',usedAI:false};
+    const r={id:++seq,filename:file.name,file,url:URL.createObjectURL(file),state:'queued',method:'Queued',review:{flags:[],photo:[],repeats:[]},ack:new Set(),notes:[],reasons:[],generation,origin:'',usedAI:false,lookupReady:Boolean(entry.sample&&useSaved)};
     r.demo=entry.sample?entry:null;r.useSaved=Boolean(r.demo && useSaved);r.readerSettings={mode,key:apiKey};batch.push(r);queue.push(r);
   }
   filter='all';render();pump();
@@ -268,16 +272,38 @@ async function run(r){
 const filt = (r,f)=>f==='all'||(f==='review'&&isReview(r))||(f==='verification'&&!r.duplicateOf&&r.verification?.some(line=>line.status==='Verification error'))||(f==='photo'&&!r.duplicateOf&&r.review.photo.some(p=>p.status==='Needs review'))||(f==='dupes'&&!!r.duplicateOf)||(f==='second'&&r.second);
 const filterTitles={all:'All',review:'Needs review',verification:'Verification errors',photo:'Photo flags',dupes:'Duplicates',second:'Second pass'};
 const textOf=r=>[r.filename,r.data?.merchant,r.data?.date,r.data?.time,r.record?.orderNumber,r.record?.orderId,r.record?.receiptReference,r.reference?.value,...(r.reference?.candidates||[]).map(c=>c.value),...r.review.photo.map(x=>x.idEvidence),...(r.data?.items||[]).flatMap(i=>[i.brand,i.item,i.sku,i.itemId])].join(' ').toLowerCase();
+function fieldReviewKinds(r,path,index=null){
+  const kinds=new Set();
+  for(const flag of r.review?.flags||[])if(flag.field===path && flag.severity!=='info')kinds.add(kindForFlag(flag));
+  if(index!==null && r.review?.photo?.[index]?.status==='Needs review')kinds.add(reviewKinds.reading);
+  const verification=index!==null ? r.verification?.[index] : null;
+  if(verification && hasVerificationMismatch(verification))kinds.add(kindForVerification(verification));
+  return kinds;
+}
+function reviewKindClass(kinds){
+  if(kinds.has(reviewKinds.reading))return 'reading-error';
+  if(kinds.has(reviewKinds.lookup))return 'lookup-uncertainty';
+  return '';
+}
+function receiptReviewKinds(r){
+  const kinds=new Set();
+  for(const flag of r.review?.flags||[])if(flag.severity!=='info')kinds.add(kindForFlag(flag));
+  for(const photo of r.review?.photo||[])if(photo.status==='Needs review')kinds.add(reviewKinds.reading);
+  for(const result of r.verification||[])if(hasVerificationMismatch(result))kinds.add(kindForVerification(result));
+  for(const order of r.orders||[])if(orderNeedsReview(order))kinds.add(reviewKinds.lookup);
+  return kinds;
+}
 function badge(label,style='',reason=''){return `<span class="status ${style}" title="${escape(reason)}">${escape(label)}</span>`;}
 function cell(r,path,txt,title,extraClass=''){
   const idLine=/^items\.(\d+)\.itemId$/.exec(path);
   const product=/^items\.(\d+)\.(item|brand|amount|itemId)$/.exec(path);
   const mismatch=product && r.verification?.[Number(product[1])]?.fields.some(f=>f.key===product[2] && f.status==='mismatch');
-  const lookupField=/^items\.(\d+)\.(brand|item|amount|itemId)$/.exec(path);
+const lookupField=/^items\.(\d+)\.(brand|item|amount|itemId)$/.exec(path);
   const lookupKey=lookupField && {brand:'品牌',item:'品名',amount:'采购商品原价',itemId:'品牌货号'}[lookupField[2]];
   const lookupAmber=lookupKey && (r.lookup?.unitRows || []).some(row=>row.sourceIndex===Number(lookupField[1]) && row.fields?.[lookupKey]?.flag==='amber');
-  const warning=mismatch || r.review.flags.some(f=>f.field===path && f.severity!=='info') || (r.itemIdReadings && idLine && r.review.photo[Number(idLine[1])]?.status==='Needs review');
-  return `<button class="cell ${extraClass} ${warning?'marked':''} ${lookupAmber?'lookup-fill':''}" data-id="${r.id}" data-path="${escape(path)}" title="${escape(title??txt??'Edit')}">${escape(txt??'')||'—'}</button>`;
+  const kinds=fieldReviewKinds(r,path,idLine?Number(idLine[1]):null);
+  const warning=mismatch || kinds.size>0;
+  return `<button class="cell ${extraClass} ${warning?'marked':''} ${reviewKindClass(kinds)} ${lookupAmber?'lookup-fill':''}" data-id="${r.id}" data-path="${escape(path)}" title="${escape(title??txt??'Edit')}">${escape(txt??'')||'—'}</button>`;
 }
 function orderNumberCell(r){
   const value=(r.record || r.data).orderNumber;
@@ -311,7 +337,7 @@ function itemRow(r,item,i,shared=''){
   const field='items.'+i+'.';
   const price=item.amount==null ? '' : [r.data.currency,amountFormat.format(item.amount)].filter(Boolean).join(' ');
   const check=r.verification?.[i];
-  const status=check ? `<button class="line-verification ${hasVerificationMismatch(check)?'line-warning':''}" data-id="${r.id}" data-path="verification.${i}" title="${escape(check.reason)}" aria-label="${escape('Line '+(i+1)+' verification: '+check.status)}">${escape(check.status)}</button>` : '';
+const status=check ? `<button class="line-verification ${hasVerificationMismatch(check)?'line-warning':''} ${kindForVerification(check)==='reading'?'reading-error':'lookup-uncertainty'}" data-id="${r.id}" data-path="verification.${i}" title="${escape(check.reason)}" aria-label="${escape('Line '+(i+1)+' verification: '+check.status)}">${escape(check.status)}</button>` : '';
   const lookupRows=(r.lookup?.unitRows || []).filter(row=>row.sourceIndex===i);
   const lookupLabel=lookupRows.some(row=>row.flag==='amber') ? `<span class="lookup-pill" title="${escape(lookupRows.map(row=>row.reviewNote).filter(Boolean).join(' '))}">Look-up</span>` : '';
   return `<tr>${shared}<td>${cell(r,field+'brand',item.brand,'Edit brand')}</td><td class="item-id">${productCodeCell(r,item,field)}</td><td>${cell(r,field+'item',item.item,'Edit item')}${status}${lookupLabel}</td><td class="money">${cell(r,field+'amount',price,'Line amount including quantity')}</td></tr>`;
@@ -337,7 +363,7 @@ function rowHTML(r){
   const date=cell(r,'date',purchaseDateText(d),d.dateIssue||d.date||'Enter purchase date');
   const time=d.time?cell(r,'time',d.time,'Purchase time','purchase-time'):'';
   const shared=`<th scope="rowgroup" ${span}><div class="receipt-controls">${open}${receiptStatus(r)}</div></th>
-    <td ${span} class="purchase-date">${date}${time}</td><td ${span}>${cell(r,'merchant',d.merchant,'Edit shop')}</td>
+    <td ${span} class="purchase-date">${date}${time}</td><td ${span}>${cell(r,'merchant',d.merchantDisplay||d.merchant,'Edit shop')}</td>
     <td ${span} class="order-number"><span class="mobile-order-label" aria-hidden="true">Order number</span>${orderNumberCell(r)}</td>`;
   if(!d.items.length)return `<tbody aria-label="Receipt ${r.id}"><tr>${shared}<td colspan="4" class="no-items">No items read</td></tr></tbody>`;
   return `<tbody aria-label="Receipt ${r.id}">${visible.map(({item,index},position)=>itemRow(r,item,index,position===0?shared:'')).join('')}</tbody>`;
@@ -359,10 +385,13 @@ function render(){
   $('#verify-import-photos').hidden=!batch.some(r=>r.origin==='achung' || r.origin==='workbook');
   $('#verify-import-photos').disabled=verifyingPhotos;
   const done=active(), work=batch.some(notDone)||verifyingPhotos,nRows=done.reduce((n,r)=>n+Math.max(1,r.data.items.length),0);
+  const readingCount=done.filter(r=>receiptReviewKinds(r).has(reviewKinds.reading)).length;
+  const lookupCount=done.filter(r=>receiptReviewKinds(r).has(reviewKinds.lookup)).length;
+  const pendingLookup=done.filter(r=>!r.lookupReady).length;
   const dollars=batch.reduce((n,r)=>n+Number(r.firstData?.cost||0)+(r.previous?Number(r.data?.cost||0):0),0);
   const checkedDemo=batch.every(r=>r.demo?.set==='featured' && r.useSaved) ? '<span>Checked demo readings</span>' : '';
   const timing=work?'<span>Processing…</span>':startTime?`<span>${((Math.max(finishedTime||Date.now(),startTime)-startTime)/1000).toFixed(1)} s</span>`:'';
-  $('#summary').innerHTML=`<span><b>${batch.length}</b> receipt${batch.length===1?'':'s'}</span><span><b>${nRows}</b> export row${nRows===1?'':'s'}</span><span><b>${batch.filter(isReview).length}</b> to review</span>${checkedDemo}${timing}${dollars?`<span>Est. model cost $${dollars.toFixed(4)}</span>`:''}${orderList?`<span>Order list · ${escape(orderFilename)}</span>`:''}`;
+  $('#summary').innerHTML=`<span><b>${batch.length}</b> receipt${batch.length===1?'':'s'}</span><span><b>${nRows}</b> export row${nRows===1?'':'s'}</span><span><b>${batch.filter(isReview).length}</b> to review</span><span class="review-count reading-error"><b>${readingCount}</b> reading error${readingCount===1?'':'s'}</span><span class="review-count lookup-uncertainty"><b>${lookupCount}</b> lookup uncertaint${lookupCount===1?'y':'ies'}</span>${pendingLookup?`<span class="lookup-uncertainty">Lookup pending · refresh corrected Excel</span>`:''}${checkedDemo}${timing}${dollars?`<span>Est. model cost $${dollars.toFixed(4)}</span>`:''}${orderList?`<span>Order list · ${escape(orderFilename)}</span>`:''}`;
   $('#filters').innerHTML=Object.entries(filterTitles).map(([k,t])=>`<button data-filter="${k}" aria-pressed="${filter===k}">${t} <span class="num">${batch.filter(r=>filt(r,k)).length}</span></button>`).join('');
   const q=$('#search').value.trim().toLowerCase(), shown=batch.filter(r=>filt(r,filter)&&(!q||textOf(r).includes(q))).sort(oldestPurchaseFirst);
   const headers=['Receipt','Purchase date','Shop','Order number','Brand','Item ID','Item','Price'].map(title=>
@@ -411,7 +440,7 @@ function updateReceiptFields(r,data,removeIndex=null){
     if(data[key]===r.record[key])data[key]=r.data[key];
     else (r.editedReferences??=new Set()).add(key);
   }
-  r.data=normalData(data);removeReceiptLine(r,removeIndex);r.ack.clear();evaluate(r);
+  r.data=normalData(data);removeReceiptLine(r,removeIndex);r.ack.clear();r.lookupReady=true;evaluate(r);
 }
 async function openDetail(id,path=''){
   const r=batch.find(x=>x.id===Number(id));if(!r)return;
@@ -515,7 +544,7 @@ function finishExcelRefresh({filename,hash,parsed,currentGeneration,records,patc
     if(records){
       const group=Symbol();
       restored=records.map((entry,i)=>{
-        const r={...entry,id:seq+i+1,data:normalData(entry.data),origin:'workbook',state:'done',
+        const r={...entry,id:seq+i+1,data:normalData(entry.data),origin:'workbook',state:'done',lookupReady:true,
           method:'Tillroll Excel',workbookName:filename,importGroup:group,editedReferences:new Set(Object.keys(referenceLabels)),
           ack:new Set(),notes:[],reasons:[]};
         evaluate(r);finalizeOutput(r);return r;
@@ -633,7 +662,7 @@ $('#achung-input').onchange=async e=>{
     const imported=records.map(entry=>{
       const r={id:++seq,filename:entry.filename,workbookName:file.name,importGroup:group,
         data:normalData(entry.data),nativeFlags:entry.flags,sourceNotes:entry.sourceNotes,
-        state:'done',origin:'achung',method:'Achung Excel',ack:new Set(),notes:[],reasons:[]};
+        state:'done',origin:'achung',method:'Achung Excel',lookupReady:true,ack:new Set(),notes:[],reasons:[]};
       evaluate(r);finalizeOutput(r);
       return r;
     });
@@ -656,7 +685,7 @@ $('#orders-input').onchange=async e=>{
     if (revision!==referenceRevision || current!==generation) return;
     if (receiptFileHashes.has(hash)) throw new Error('Choose an independent order or product list for this batch.');
     referenceHash=hash;orderFilename=file.name;orderList=rows;
-    batch.forEach(r=>{evaluate(r);if(r.state==='done')scheduleLookup(r);});duplicates();render();$('#orders-dialog').close();
+batch.forEach(r=>{r.lookupReady=true;evaluate(r);if(r.state==='done')scheduleLookup(r);});duplicates();render();$('#orders-dialog').close();
     note(`${rows.length} reference lines loaded. Item verification updated.`);
   } catch(err) { if (revision===referenceRevision) $('#order-error').textContent=err.message; }
 };

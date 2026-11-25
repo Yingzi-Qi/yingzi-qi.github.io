@@ -78,10 +78,17 @@ function finish(result, row, { response = null, selection = null, orders = null,
     || result.skipped === 'reading-error'
     || result.skipped === 'doubtful-zero';
   const accepted = selection?.winner || null;
-  const officialBrand = accepted
+  const reported = mergeMismatches(response?.mismatches, accepted?.mismatches);
+  const reportedBrand = reported.find(entry => entry.field === '品牌')?.officialValue;
+  const reportedName = reported.find(entry => entry.field === '品名')?.officialValue;
+  const reportedPrice = reported.find(entry => entry.field === '采购商品原价')?.officialValue;
+  const reportedId = reported.find(entry => entry.field === '品牌货号')?.officialValue;
+  const officialBrand = reportedBrand || (accepted
     ? (canonicalDisplayBrand(row.brand, response?.canonicalBrand || accepted.brand) || accepted.brand)
-    : (lockedSkip ? row.brand : (canonicalBrand(row.brand) || row.brand));
-  const officialName = accepted?.officialName || '';
+    : (lockedSkip ? row.brand : (canonicalBrand(row.brand) || row.brand)));
+  const officialName = reportedName || accepted?.officialName || '';
+  const officialPrice = reportedPrice != null && reportedPrice !== '' ? reportedPrice : accepted?.price;
+  const officialId = reportedId || accepted?.itemId || '';
   const supplier = resolveSupplier({
     merchant: row.supplier || merchant,
     brand: officialBrand || row.brand,
@@ -93,13 +100,13 @@ function finish(result, row, { response = null, selection = null, orders = null,
     '供应商': cell('供应商', row.supplier, supplier.supplier, { locked: fieldLocked(row.locks, '供应商'), colour }),
     '品牌': cell('品牌', row.brand, officialBrand, { locked: fieldLocked(row.locks, '品牌'), colour }),
     '品名': cell('品名', row.name, officialName, { locked: fieldLocked(row.locks, '品名'), colour, forceAmber: forceName && !fieldLocked(row.locks, '品名') }),
-    '品牌货号': cell('品牌货号', row.itemId, accepted?.itemId || '', {
+    '品牌货号': cell('品牌货号', row.itemId, officialId, {
       locked: fieldLocked(row.locks, '品牌货号'), colour, keepReceipt: true,
     }),
-    '采购商品原价': cell('采购商品原价', row.listUnit, row.priceField === '采购商品原价' ? accepted?.price : null, {
+    '采购商品原价': cell('采购商品原价', row.listUnit, row.priceField === '采购商品金额' && reportedPrice == null ? null : officialPrice, {
       locked: fieldLocked(row.locks, '采购商品原价'), colour, keepReceipt: true,
     }),
-    '采购商品金额': cell('采购商品金额', row.paidUnit, row.priceField === '采购商品金额' ? accepted?.price : null, {
+    '采购商品金额': cell('采购商品金额', row.paidUnit, row.priceField === '采购商品金额' && reportedPrice == null ? officialPrice : null, {
       locked: fieldLocked(row.locks, '采购商品金额'), colour, keepReceipt: true,
     }),
   };
@@ -125,7 +132,7 @@ function finish(result, row, { response = null, selection = null, orders = null,
     computed.push({ field: '供应商', receiptValue: row.supplier, officialValue: supplier.supplier });
   }
   result.fields = fields;
-  result.mismatches = mergeMismatches(accepted?.mismatches, computed);
+  result.mismatches = mergeMismatches(reported, computed);
   result.accepted = accepted;
   result.supplierResolution = supplier;
   result.catalogue = catalogueNote(merchant || row.supplier, row, orders);
@@ -259,6 +266,14 @@ export async function enrichLines({
         brand: primary.brand,
         itemId: primary.itemId,
         previousItemId: primary.previousItemId,
+        name: primary.name,
+        style: primary.style,
+        supplier: primary.supplier,
+        currency: primary.currency,
+        price: primary.price,
+        postcode: primary.storeClues?.postcode,
+        addressLine1: primary.storeClues?.addressLines?.[0],
+        storeNumber: primary.storeClues?.storeNumber,
       });
       if (invalidated?.locked) {
         locked = true;
@@ -297,7 +312,7 @@ export async function enrichLines({
     if (response?.deferred) lookupsDeferred += 1;
     else if (!deduped && !response?.skipped) lookupsUsed += 1;
     const unconfigured = response?.skipped && response.error?.code === 'unconfigured';
-    const colour = flagColour(response);
+    const colour = flagColour(response) || AMBER;
     if (unconfigured) {
       for (const index of indexes) results[index].request = built.body;
       continue;

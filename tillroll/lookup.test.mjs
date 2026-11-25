@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { canonicalBrand, normaliseItemId } from './brand-aliases.js';
 import { resolveSupplier } from './uk-branches.js';
-import { createLookupClient } from './lookup-client.js';
-import { rankPriceFallback, selectCandidate } from './lookup-match.js';
+import { cacheKeys, createLookupClient, parseLookupResponse } from './lookup-client.js';
+import { flagColour, parseMismatches, rankPriceFallback, selectCandidate } from './lookup-match.js';
 import { chooseUnitPrice } from './lookup-policy.js';
 import { enrichLines } from './lookup-enrich.js';
 import { reviewLoop } from './review-loop.js';
@@ -61,6 +61,20 @@ describe('brand aliases', () => {
 
   it('keeps leading zeros when normalising an item id', () => {
     assert.equal(normaliseItemId(' ab 0123 '), 'AB0123');
+  });
+});
+
+describe('response flag', () => {
+  it('keeps null and only treats the exact amber hex as a fill', () => {
+    assert.equal(parseLookupResponse({ flag: null, candidates: [] }).flag, null);
+    assert.equal(parseLookupResponse({ candidates: [] }).flag, null);
+    assert.equal(parseLookupResponse({ flag: '', candidates: [] }).flag, '');
+    assert.equal(flagColour({ flag: null }), null);
+    assert.equal(flagColour({ flag: '' }), null);
+    assert.equal(flagColour({}), null);
+    assert.equal(flagColour({ flag: '#112233' }), null);
+    assert.equal(flagColour({ flag: 'amber' }), null);
+    assert.equal(flagColour({ flag: '#FDE68A' }), '#FDE68A');
   });
 });
 
@@ -408,7 +422,7 @@ describe('enrichment', () => {
     });
     assert.ok(calls.some(call => call.url.endsWith('/api/lookup/invalidate')));
     assert.deepEqual(calls.find(call => call.url.endsWith('/invalidate')).body, {
-      brand: 'Chanel', itemId: 'A01112', previousItemId: 'OLD',
+      brand: 'Chanel', itemId: 'A01112', previousItemId: 'OLD', name: 'mini', currency: 'GBP', price: 5200,
     });
     assert.ok(enriched.unitRows[0].round2Changed.includes('品名'));
   });
@@ -505,6 +519,63 @@ describe('enrichment', () => {
     assert.equal(fetches, 2);
   });
 
+  it('merges a top-level mismatch list and ignores a null receipt value', async () => {
+    const { result } = trackingClient(() => json({
+      ...miniFixture,
+      flag: null,
+      mismatches: [
+        { field: 'brand', receiptValue: 'VCA', officialValue: 'Van Cleef & Arpels' },
+        { field: 'name', receiptValue: null, officialValue: 'Should be ignored' },
+        { field: 'price', receiptValue: 5200, officialValue: 5300 },
+      ],
+      candidates: [{ ...miniFixture.candidates[0], brand: 'Van Cleef & Arpels', mismatches: [
+        { field: 'itemId', receiptValue: 'A01112', officialValue: 'DIFFERENT' },
+      ] }],
+    }));
+    const enriched = await enrichLines({
+      items: [line({ brand: 'VCA' })],
+      currency: 'GBP',
+      client: result,
+    });
+    const row = enriched.unitRows[0];
+    assert.equal(row.fields['品牌'].value, 'Van Cleef & Arpels');
+    assert.equal(row.fields['品牌'].flag, 'amber');
+    assert.equal(row.fields['采购商品原价'].value, 5200);
+    assert.equal(row.fields['采购商品原价'].officialValue, 5300);
+    assert.equal(row.fields['品牌货号'].value, 'A01112');
+    assert.equal(row.mismatches.some(entry => entry.officialValue === 'Should be ignored'), false);
+    assert.equal(row.mismatches.find(entry => entry.field === '品牌货号').officialValue, 'DIFFERENT');
+    assert.equal(row.flagColour, '#FDE68A');
+    assert.deepEqual(parseMismatches([{ field: 'name', receiptValue: null, officialValue: 'Mini' }]), []);
+  });
+
+  it('pauses the run when only unavailableReason or only quotaGuard is set', async () => {
+    const unavailable = trackingClient(() => json({
+      cacheHit: false, candidates: [], flag: null, sourcesQueried: [], unavailableReason: 'Both sources are down.',
+    }));
+    const paused = await enrichLines({
+      items: [line(), line({ itemId: 'B2' })],
+      currency: 'GBP',
+      client: unavailable.result,
+    });
+    assert.equal(unavailable.calls.length, 1);
+    assert.equal(paused.lookupsPaused, true);
+    assert.equal(paused.unitRows[1].deferred, true);
+
+    const quota = trackingClient(() => json({
+      cacheHit: false, candidates: [], flag: '#FDE68A', sourcesQueried: ['brave'], quotaGuard: ['Brave Search monthly guard reached.'],
+    }));
+    const guarded = await enrichLines({
+      items: [line(), line({ itemId: 'B3' })],
+      currency: 'GBP',
+      client: quota.result,
+    });
+    assert.equal(quota.calls.length, 1);
+    assert.equal(guarded.lookupsPaused, true);
+    assert.equal(guarded.unitRows[0].flag, 'amber');
+    assert.equal(guarded.unitRows[1].deferred, true);
+  });
+
   it('puts price in the client cache key only for a price-fallback result', async () => {
     let fetches = 0;
     const client = createLookupClient({
@@ -522,7 +593,13 @@ describe('enrichment', () => {
     await client.lookup({ brand: 'Chanel', itemId: 'A01112', price: 10, currency: 'GBP' });
     await client.lookup({ brand: 'Chanel', itemId: 'A01112', price: 10, currency: 'GBP' });
     await client.lookup({ brand: 'Chanel', itemId: 'A01112', price: 12, currency: 'GBP' });
+    await client.lookup({ brand: 'Chanel', itemId: 'OTHER', price: 12, currency: 'GBP' });
     assert.equal(fetches, 2);
+    assert.equal(cacheKeys.item('Van Cleef & Arpels', ' ab 0123 '), 'lookup:v2:item:van-cleef-&-arpels:AB0123');
+    assert.equal(cacheKeys.mf('Chanel', 'Mini Bag', 'A01112'), 'lookup:v2:mf:chanel:mini-bag:a01112');
+    assert.equal(cacheKeys.pf('Chanel', 'gbp', 10), 'lookup:v2:pf:chanel:GBP:10.00');
+    assert.equal(cacheKeys.pf('Chanel', 'GBP', 10).includes('A01112'), false);
+    assert.equal(cacheKeys.branch('Rolex', 'E14 5AB'), 'lookup:v2:branch:rolex:e14-5ab');
   });
 
   it('refuses to call Brave or Gemini from the browser', async () => {
