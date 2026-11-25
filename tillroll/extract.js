@@ -1125,12 +1125,21 @@ export async function extractAI(file, apiKey, tier = 1, reasons = []) {
   const timeout = setTimeout(() => controller.abort(), 120000);
   let result;
   try {
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,{
+    const payload={contents:[{role:'user',parts:[{text:prompt + notes},{inlineData:{mimeType:'image/jpeg',data:imageData}}]}],
+        generationConfig:{responseMimeType:'application/json',responseJsonSchema:schema}};
+    // Tillroll v2: the Gemini key lives in the Cloudflare Worker; the browser never holds it.
+    const viaServer = apiKey.trim()==='__server__';
+    const response = viaServer
+      ? await fetch('/api/ocr',{method:'POST',credentials:'same-origin',signal:controller.signal,headers:{'Content-Type':'application/json'},body:JSON.stringify({model,...payload})})
+      : await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,{
       method:'POST',credentials:'omit',referrerPolicy:'no-referrer',signal:controller.signal,
       headers:{'Content-Type':'application/json','x-goog-api-key':apiKey.trim()},
-      body:JSON.stringify({contents:[{role:'user',parts:[{text:prompt + notes},{inlineData:{mimeType:'image/jpeg',data:imageData}}]}],
-        generationConfig:{responseMimeType:'application/json',responseJsonSchema:schema}}),
+      body:JSON.stringify(payload),
     });
+    if(viaServer && !response.ok) {
+      let detail=''; try { detail=(await response.json()).error||''; } catch {}
+      throw new Error(`Tillroll server OCR unavailable (${response.status}). ${detail}`.trim());
+    }
     if(!response.ok) {
       const message = {400:'Check your API key and model access.',401:'The API key was rejected.',403:'The API key cannot use this model.',429:'The Google quota or rate limit was reached.'}[response.status] || 'Try again or switch to on-device OCR.';
       throw new Error(`Google could not read this photo (${response.status}). ${message}`);
