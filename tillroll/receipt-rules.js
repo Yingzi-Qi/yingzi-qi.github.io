@@ -14,11 +14,18 @@ const pad = value => String(value).padStart(2, '0');
 const clockPattern = /(?<![\d:.,])([01]?\d|2[0-3])\s*[:h]\s*([0-5]\d)(?:\s*:\s*([0-5]\d))?(?:\s*([ap])\.?\s*m\.?(?![a-z]))?(?![\d:]|[.,]\d)/i;
 
 // Normalise one printed clock value. Returns null when the value is not a valid time.
-// Keep the printed receipt number. O and I are also offered as 0 and 1.
+// Keep the printed receipt number. O and I inside the digit section are also offered as 0 and 1.
+// Letters before the first digit, including an alphabetic prefix, stay as printed.
 export function confusableDigitAlternative(value) {
   const text = String(value ?? '');
-  if (!/[OI]/i.test(text)) return null;
-  const swapped = text.replace(/O/gi, '0').replace(/I/gi, '1');
+  const digitAt = text.search(/\d/);
+  if (digitAt < 0) return null;
+  const prefix = text.slice(0, digitAt);
+  const body = text.slice(digitAt);
+  const swappedBody = body.replace(/[0-9OI]+/gi, cluster => (
+    /\d/.test(cluster) ? cluster.replace(/O/gi, '0').replace(/I/gi, '1') : cluster
+  ));
+  const swapped = prefix + swappedBody;
   return swapped === text ? null : swapped;
 }
 

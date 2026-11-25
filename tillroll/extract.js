@@ -929,11 +929,7 @@ export function extractLocal(ocr) {
   const reference=inspectReference(result,ocr);
   if (reference.status==='found' && !result[reference.kind] && !(storeId && reference.kind==='receiptReference'))
     result[reference.kind]=reference.value;
-  const confusable=confusableDigitAlternative(result.receiptReference);
-  if(confusable){
-    const list=result.receiptReferenceAlternatives||[];
-    if(!list.includes(confusable)) result.receiptReferenceAlternatives=[...list, confusable];
-  }
+  Object.assign(result, attachConfusableReceiptAlternative(result));
   result.imageQuality=ocr.confidence<.65?'poor':'unknown';
   result.model='On-device OCR'; result.cost=0;
   return applyItemIdentifiers(applyZeroPriceExclusion(normalizeReading(result),ocr), ocr);
@@ -950,6 +946,13 @@ export function applyStoreReceiptId(data, ocr) {
   } else next.receiptReference=null;
   return next;
 }
+function attachConfusableReceiptAlternative(receipt) {
+  const confusable=confusableDigitAlternative(receipt?.receiptReference);
+  if(!confusable) return receipt;
+  const list=receipt.receiptReferenceAlternatives||[];
+  if(list.includes(confusable)) return receipt;
+  return {...receipt, receiptReferenceAlternatives:[...list, confusable]};
+}
 export function prepareModelReading(data, ocr) {
   let out=data ? {...data} : {};
   if(ocr?.lines?.length){
@@ -958,7 +961,7 @@ export function prepareModelReading(data, ocr) {
     out=applyZeroPriceExclusion(out, ocr);
     out=applyItemIdentifiers(out, ocr);
   }
-  return out;
+  return attachConfusableReceiptAlternative(out);
 }
 
 // Shared clean-up for every reader (on-device OCR and Gemini): 24-hour HH:MM:SS time,
