@@ -202,7 +202,9 @@ export async function buildV2XlsxBlob(input, { exportKey = (globalThis.crypto?.r
       const colour = row.flags?.[col] === PINK || row.flags?.[col] === AMBER ? row.flags[col] : null;
       const comment = meta.comments?.[col];
       if (comment) comments.push({ ref: `${colName(VISIBLE_COLUMNS.indexOf(col) + 1)}${i + 2}`, text: comment });
-      return { value, numeric: money && typeof value === 'number', style: styleIndex(colour, money && typeof value === 'number') };
+      // A price cell is a finite number or empty. Never inline text.
+      const numeric = money && typeof value === 'number' && Number.isFinite(value);
+      return { value: numeric || !money ? value : null, numeric, style: styleIndex(colour, numeric) };
     }).concat(hidden.map(value => ({ value, numeric: false, style: 0 })));
     return cells;
   });

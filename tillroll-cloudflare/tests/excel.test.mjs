@@ -597,3 +597,150 @@ test("P6: Chanel confirmed only on chanel.cn or chanel.com/gb gets the blocked-s
   assert.match(diff.exportMeta.comments['品名'], /chanel.com blocked; confirmed on chanel.cn\/gb/);
   assert.equal(fr.exportMeta.comments['品名'], undefined);
 });
+
+const noLookup = async () => ({ candidates: [], cacheHit: false, cacheKey: 'none', sourcesQueried: [] });
+
+test('Harrods 4+10 concession code stays out of 品牌货号; 000001 stays a style ref', async () => {
+  const env = makeEnv();
+  const { result } = await runSanity(env, { batchId: 'h4', mode: 'round1', receipts: [{
+    receiptKey: 'h4', merchant: 'Harrods', receiptReference: 'H4-1', date: '2026-07-08', time: '10:00', payment: 'Card', currency: 'GBP',
+    items: [
+      { rowId: 'h-pair', brand: 'Synthetic', item: 'Coat', itemId: '2574 1234567890', styleRef: 'AB12', unitPrice: 40, amount: 40 },
+      { rowId: 'h-style', brand: 'Synthetic', item: 'Belt', itemId: '000001', unitPrice: 40, amount: 40 },
+    ],
+  }] }, { lookup: noLookup });
+  const pair = result.agreedRows.find(r => r.rowId === 'h-pair');
+  const style = result.agreedRows.find(r => r.rowId === 'h-style');
+  assert.equal(pair.cells['品牌货号'], 'AB12');
+  assert.doesNotMatch(String(pair.cells['品牌货号']), /2574|1234567890/);
+  assert.match(pair.exportMeta.comments['品牌货号'], /2574/);
+  assert.match(pair.exportMeta.comments['品牌货号'], /1234567890/);
+  assert.match(pair.exportMeta.alternates['品牌货号'].receipt, /2574/);
+  assert.match(pair.exportMeta.alternates['品牌货号'].receipt, /1234567890/);
+  assert.equal(style.cells['品牌货号'], '000001');
+  assert.notEqual(style.flagReasons['品牌货号'], 'no brand item ID printed');
+});
+
+test('a reader concessionCode label never stays in the 品牌货号 cell', async () => {
+  const env = makeEnv();
+  const { result } = await runSanity(env, { batchId: 'cc', mode: 'round1', receipts: [{
+    receiptKey: 'cc', merchant: 'Synthetic Store', receiptReference: 'CC-1', date: '2026-07-08', time: '11:00', payment: 'Card', currency: 'GBP',
+    items: [
+      { rowId: 'cc-only', brand: 'Synthetic', item: 'Scarf', itemId: 'DEPT-77', concessionCode: 'DEPT-77', unitPrice: 15, amount: 15 },
+      { rowId: 'cc-keep', brand: 'Synthetic', item: 'Hat', itemId: 'ST-KEEP', concessionCode: '2574', internalCode: '1234567890', unitPrice: 15, amount: 15 },
+    ],
+  }] }, { lookup: noLookup });
+  const only = result.agreedRows.find(r => r.rowId === 'cc-only');
+  const keep = result.agreedRows.find(r => r.rowId === 'cc-keep');
+  assert.equal(only.cells['品牌货号'], null);
+  assert.equal(only.flags['品牌货号'], PINK);
+  assert.equal(only.flagReasons['品牌货号'], 'no brand item ID printed');
+  assert.match(only.exportMeta.comments['品牌货号'], /DEPT-77/);
+  assert.match(only.exportMeta.alternates['品牌货号'].receipt, /DEPT-77/);
+  assert.equal(keep.cells['品牌货号'], 'ST-KEEP');
+  assert.match(keep.exportMeta.comments['品牌货号'], /2574/);
+  assert.match(keep.exportMeta.comments['品牌货号'], /1234567890/);
+  assert.doesNotMatch(String(keep.cells['品牌货号']), /2574|1234567890/);
+});
+
+test('gate (a): an empty 品牌 that look-up did not fill is Pink, reason Brand not read', async () => {
+  const env = makeEnv();
+  const { result } = await runSanity(env, { batchId: 'ga', mode: 'round1', receipts: [{
+    receiptKey: 'ga', merchant: 'Synthetic Store', receiptReference: 'GA-1', date: '2026-07-09', time: '10:00', payment: 'Card', currency: 'GBP',
+    items: [{ rowId: 'ga-1', brand: null, item: 'Pencil', itemId: 'SYN-GA', unitPrice: 4, amount: 4 }],
+  }] }, { lookup: noLookup });
+  const row = result.agreedRows[0];
+  assert.equal(row.cells['品牌'], null);
+  assert.equal(row.flags['品牌'], PINK);
+  assert.equal(row.flagReasons['品牌'], 'Brand not read');
+  assert.equal(row.cells['品名'], 'Pencil');
+  assert.notEqual(row.flagReasons['品名'], 'Name needs checking');
+});
+
+test('gate (b): a name that still holds a brand, a code, or no product word is Pink and unchanged', async () => {
+  const env = makeEnv();
+  const { result } = await runSanity(env, { batchId: 'gb', mode: 'round1', receipts: [{
+    receiptKey: 'gb', merchant: 'Synthetic Store', receiptReference: 'GB-1', date: '2026-07-09', time: '11:00', payment: 'Card', currency: 'GBP',
+    items: [
+      { rowId: 'gb-alias', brand: 'Dior', item: 'Christian Dior Saddle', itemId: 'SYN-GB1', unitPrice: 10, amount: 10 },
+      { rowId: 'gb-empty', brand: null, item: 'Christian Dior Book', itemId: 'SYN-GB2', unitPrice: 10, amount: 10 },
+      { rowId: 'gb-cc', brand: 'Dior', item: 'Saddle 9999999001', itemId: 'SYN-GB3', unitPrice: 10, amount: 10 },
+      { rowId: 'gb-ean', brand: 'Dior', item: 'Saddle 5012345678901', itemId: 'SYN-GB4', unitPrice: 10, amount: 10 },
+      { rowId: 'gb-digits', brand: 'Dior', item: 'Saddle 123456', itemId: 'SYN-GB5', unitPrice: 10, amount: 10 },
+      { rowId: 'gb-only', brand: 'Dior', item: 'Christian Dior', itemId: 'SYN-GB6', unitPrice: 10, amount: 10 },
+      { rowId: 'gb-ok', brand: 'Dior', item: 'Saddle bag', itemId: 'SYN-GB7', unitPrice: 10, amount: 10 },
+    ],
+  }] }, { lookup: noLookup });
+  const by = Object.fromEntries(result.agreedRows.map(r => [r.rowId, r]));
+  for (const [id, name] of [['gb-alias', 'Christian Dior Saddle'], ['gb-empty', 'Christian Dior Book'], ['gb-cc', 'Saddle 9999999001'], ['gb-ean', 'Saddle 5012345678901'], ['gb-digits', 'Saddle 123456'], ['gb-only', 'Christian Dior']]) {
+    assert.equal(by[id].cells['品名'], name);
+    assert.equal(by[id].flags['品名'], PINK);
+    assert.equal(by[id].flagReasons['品名'], 'Name needs checking');
+  }
+  assert.equal(by['gb-ok'].cells['品名'], 'Saddle bag');
+  assert.notEqual(by['gb-ok'].flagReasons['品名'], 'Name needs checking');
+});
+
+test('gate (c): a non-numeric price is empty, Pink, and never inline text', async () => {
+  const env = makeEnv();
+  const { result } = await runSanity(env, { batchId: 'gc', mode: 'round1', receipts: [{
+    receiptKey: 'gc', merchant: 'Synthetic Store', receiptReference: 'GC-1', date: '2026-07-09', time: '12:00', payment: 'Card', currency: 'GBP',
+    items: [
+      { rowId: 'gc-bad', brand: 'Synthetic', item: 'Pencil', itemId: 'SYN-GC', unitPrice: 'twelve', amount: 'n/a' },
+      { rowId: 'gc-ok', brand: 'Synthetic', item: 'Pen', itemId: 'SYN-GC2', unitPrice: 10, amount: 10 },
+      { rowId: 'gc-pound', brand: 'Synthetic', item: 'Ink', itemId: 'SYN-GC3', unitPrice: '£12.00', amount: 12 },
+    ],
+  }] }, { lookup: noLookup });
+  const bad = result.agreedRows.find(r => r.rowId === 'gc-bad');
+  const ok = result.agreedRows.find(r => r.rowId === 'gc-ok');
+  const pound = result.agreedRows.find(r => r.rowId === 'gc-pound');
+  for (const col of ['采购商品原价', '采购商品金额', '销售金额']) {
+    assert.equal(bad.cells[col], null);
+    assert.equal(bad.flags[col], PINK);
+    assert.equal(bad.flagReasons[col], 'Price not numeric');
+  }
+  assert.match(bad.exportMeta.comments['采购商品原价'], /twelve/);
+  assert.match(bad.exportMeta.alternates['采购商品原价'].receipt, /twelve/);
+  assert.match(bad.exportMeta.comments['采购商品金额'], /n\/a/);
+  assert.equal(ok.cells['采购商品原价'], 10);
+  assert.equal(ok.cells['销售金额'], 8.8);
+  assert.notEqual(ok.flagReasons['采购商品原价'], 'Price not numeric');
+  assert.equal(pound.cells['采购商品原价'], 12);
+  assert.notEqual(pound.flagReasons['采购商品原价'], 'Price not numeric');
+  const { sheet, comments } = await sheetXml(await buildV2XlsxBlob(result));
+  const badRow = sheet.match(/<row r="2"[\s\S]*?<\/row>/)[0];
+  for (const col of ['G', 'H', 'J']) {
+    const cell = badRow.match(new RegExp(`<c r="${col}2"[\\s\\S]*?(?:/>|<\\/c>)`))[0];
+    assert.equal(cell.includes('inlineStr'), false, col);
+    assert.equal(cell.includes('twelve'), false, col);
+    assert.equal(cell.includes('n/a'), false, col);
+  }
+  assert.match(comments, /twelve/);
+});
+
+test('gate (d): a human_verified_unflagged cell is not re-flagged by the gate', async () => {
+  const env = makeEnv();
+  const verified = '2026-11-25T17:51:00.000Z';
+  for (const col of ['品牌', '品名', '采购商品原价']) {
+    await env.DB.prepare('INSERT INTO human_verified_unflagged (row_id, col_key, verified_at) VALUES (?,?,?)').bind('gate-locked', col, verified).run();
+  }
+  const { result } = await runSanity(env, { batchId: 'gd', mode: 'round1', receipts: [{
+    receiptKey: 'gd', merchant: 'Synthetic Store', receiptReference: 'GD-1', date: '2026-07-09', time: '13:00', payment: 'Card', currency: 'GBP',
+    items: [
+      { rowId: 'gate-locked', brand: null, item: 'Christian Dior Saddle', itemId: 'SYN-GD', unitPrice: 'twelve', amount: 10 },
+      { rowId: 'gate-open', brand: null, item: 'Pencil', itemId: 'SYN-GD2', unitPrice: 4, amount: 4 },
+    ],
+  }] }, { lookup: noLookup });
+  const locked = result.agreedRows.find(r => r.rowId === 'gate-locked');
+  const open = result.agreedRows.find(r => r.rowId === 'gate-open');
+  assert.equal(locked.cells['品牌'], null);
+  assert.equal(locked.cells['品名'], 'Christian Dior Saddle');
+  assert.equal(locked.flags['品牌'], undefined);
+  assert.equal(locked.flags['品名'], undefined);
+  assert.equal(locked.flags['采购商品原价'], undefined);
+  assert.equal(locked.flagReasons['品牌'], undefined);
+  assert.equal(locked.flagReasons['品名'], undefined);
+  assert.equal(locked.flagReasons['采购商品原价'], undefined);
+  assert.equal(open.flags['品牌'], PINK);
+  assert.equal(open.flagReasons['品牌'], 'Brand not read');
+});
