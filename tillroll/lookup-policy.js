@@ -3,7 +3,7 @@
 // price and is matched first. 采购商品金额 (paid unit) is used only when 原价 is missing.
 
 import { brandInLine, canonicalBrand, fold, knownBrand, normaliseItemId, productWords } from './brand-aliases.js';
-import { chooseItemId, fallbackItemId, isConcessionCode, isEan, isStoreCode, stripProductCodes } from './brand-item-ids.js';
+import { brandHasItemIdFormat, chooseItemId, fallbackItemId, isConcessionCode, isEan, isStoreCode, matchesBrandItemId, stripProductCodes, validGtin } from './brand-item-ids.js';
 import { extractStoreClues } from './uk-branches.js';
 
 export const AMBER = '#FDE68A';
@@ -67,22 +67,26 @@ function separateLine(item) {
       itemId: rawId,
       sku: item?.sku ?? item?.style,
       styleRef: item?.styleRef,
+      style: item?.style,
       brandItemId: item?.brandItemId,
+      ean: item?.ean,
       item: nameField,
       name: item?.name,
       codes: item?.codes,
       allowEan: unresolved,
     },
   });
+  const fromEan = Boolean(chosen) && Boolean(validGtin(chosen)) && !matchesBrandItemId(brand, chosen);
   const guarded = chosen && !isStoreCode(chosen)
-    ? { itemId: chosen, rejected: false }
-    : fallbackItemId(brand, rawId);
+    ? { itemId: chosen, rejected: false, fromEan }
+    : { ...fallbackItemId(brand, rawId), fromEan: false };
   return {
     brand,
     name: unresolved ? '' : nameField,
     printedName: nameField,
     nameUnresolved: unresolved,
     itemId: guarded.itemId,
+    itemIdFromEan: guarded.fromEan,
     itemIdRejected: guarded.rejected,
     itemIdRejectedValue: guarded.rejected ? rejectedDigitComment(item, rawId) : '',
   };
@@ -90,6 +94,14 @@ function separateLine(item) {
 
 // The comment may quote a printed item id or style code. It never reads card,
 // authorisation, merchant, terminal or approval text.
+export function officialStyleRef(brand, value) {
+  const text = String(value ?? '').trim();
+  if (!text || isStoreCode(text) || isConcessionCode(text)) return '';
+  if (brandHasItemIdFormat(brand)) return matchesBrandItemId(brand, text) ? text : '';
+  if (validGtin(text)) return '';
+  return text;
+}
+
 function rejectedDigitComment(item, rawId) {
   const fromItem = pureDigitStoreCode(rawId);
   if (fromItem) return fromItem;
@@ -99,7 +111,7 @@ function rejectedDigitComment(item, rawId) {
 function pureDigitStoreCode(value) {
   const printed = String(value ?? '').trim();
   const tight = printed.replace(/\s+/g, '');
-  if (/^\d{4}$/.test(tight) || /^\d{10}$/.test(tight)) return printed;
+  if (/^\d{4}$/.test(tight) || /^\d{10}$/.test(tight) || /^(?:\d{8}|\d{12}|\d{13}|\d{14})$/.test(tight)) return printed;
   return '';
 }
 
@@ -169,6 +181,7 @@ export function prepareUnitRows(items, { currency = '', merchant = '', storeClue
         printedName: separated.printedName,
         nameUnresolved: separated.nameUnresolved,
         itemId: separated.itemId,
+        itemIdFromEan: separated.itemIdFromEan,
         itemIdRejected: separated.itemIdRejected,
         itemIdRejectedValue: separated.itemIdRejectedValue,
         style: printedStyle(item, separated.itemId),
