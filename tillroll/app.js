@@ -334,10 +334,11 @@ function render(){
   const done=active(), work=batch.some(notDone)||verifyingPhotos,nRows=done.reduce((n,r)=>n+Math.max(1,r.data.items.length),0);
   const readingCount=done.filter(r=>receiptReviewKinds(r).has(reviewKinds.reading)).length;
   const lookupCount=done.filter(r=>receiptReviewKinds(r).has(reviewKinds.lookup)).length;
+  const pendingLookup=done.filter(r=>!r.lookupReady).length;
   const dollars=batch.reduce((n,r)=>n+Number(r.firstData?.cost||0)+(r.previous?Number(r.data?.cost||0):0),0);
   const checkedDemo=batch.every(r=>r.demo?.set==='featured' && r.useSaved) ? '<span>Checked demo readings</span>' : '';
   const timing=work?'<span>Processing…</span>':startTime?`<span>${((Math.max(finishedTime||Date.now(),startTime)-startTime)/1000).toFixed(1)} s</span>`:'';
-  $('#summary').innerHTML=`<span><b>${batch.length}</b> receipt${batch.length===1?'':'s'}</span><span><b>${nRows}</b> export row${nRows===1?'':'s'}</span><span><b>${batch.filter(isReview).length}</b> to review</span><span class="review-count reading-error"><b>${readingCount}</b> reading error${readingCount===1?'':'s'}</span><span class="review-count lookup-uncertainty"><b>${lookupCount}</b> lookup uncertaint${lookupCount===1?'y':'ies'}</span>${checkedDemo}${timing}${dollars?`<span>Est. model cost $${dollars.toFixed(4)}</span>`:''}${orderList?`<span>Order list · ${escape(orderFilename)}</span>`:''}`;
+  $('#summary').innerHTML=`<span><b>${batch.length}</b> receipt${batch.length===1?'':'s'}</span><span><b>${nRows}</b> export row${nRows===1?'':'s'}</span><span><b>${batch.filter(isReview).length}</b> to review</span><span class="review-count reading-error"><b>${readingCount}</b> reading error${readingCount===1?'':'s'}</span><span class="review-count lookup-uncertainty"><b>${lookupCount}</b> lookup uncertaint${lookupCount===1?'y':'ies'}</span>${pendingLookup?`<span class="lookup-uncertainty">Lookup pending · refresh corrected Excel</span>`:''}${checkedDemo}${timing}${dollars?`<span>Est. model cost $${dollars.toFixed(4)}</span>`:''}${orderList?`<span>Order list · ${escape(orderFilename)}</span>`:''}`;
   $('#filters').innerHTML=Object.entries(filterTitles).map(([k,t])=>`<button data-filter="${k}" aria-pressed="${filter===k}">${t} <span class="num">${batch.filter(r=>filt(r,k)).length}</span></button>`).join('');
   const q=$('#search').value.trim().toLowerCase(), shown=batch.filter(r=>filt(r,filter)&&(!q||textOf(r).includes(q))).sort(oldestPurchaseFirst);
   const headers=['Receipt','Purchase date','Shop','Order number','Brand','Item ID','Item','Price'].map(title=>
