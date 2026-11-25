@@ -89,6 +89,28 @@ export function parseLookupResponse(payload) {
   };
 }
 
+function invalidateStoreClues(request) {
+  const given = request?.storeClues && typeof request.storeClues === 'object' ? request.storeClues : {};
+  const addressLines = Array.isArray(given.addressLines)
+    ? given.addressLines.map(line => String(line ?? '').trim()).filter(Boolean).slice(0, 6)
+    : [];
+  if (!addressLines.length && request?.addressLine1) addressLines.push(String(request.addressLine1).trim());
+  const postcode = String(given.postcode ?? request?.postcode ?? '').trim();
+  const storeNumber = String(given.storeNumber ?? request?.storeNumber ?? '').trim();
+  if (!postcode && !addressLines.length && !storeNumber) return null;
+  const storeClues = { addressLines };
+  if (postcode) storeClues.postcode = postcode;
+  if (storeNumber) storeClues.storeNumber = storeNumber;
+  return storeClues;
+}
+
+export function branchClue(storeClues) {
+  const clues = storeClues || {};
+  return String(clues.postcode || '').trim()
+    || (Array.isArray(clues.addressLines) ? String(clues.addressLines[0] || '').trim() : '')
+    || String(clues.storeNumber || '').trim();
+}
+
 export function slug(value) {
   return String(value ?? '').normalize('NFKC').trim().toLowerCase().replace(/\s+/g, '-').replace(/[^\p{L}\p{N}&+._-]/gu, '');
 }
@@ -183,7 +205,8 @@ export function createLookupClient({ baseUrl = '', fetchImpl = globalThis.fetch,
     if (request.previousItemId) cache.delete(cacheKeys.item(request.brand, request.previousItemId));
     cache.delete(cacheKeys.mf(request.brand, request.name, request.style));
     if (request.price != null && request.price !== '') cache.delete(cacheKeys.pf(request.brand, request.currency, request.price));
-    const clue = request.postcode || request.addressLine1 || request.storeNumber;
+    const storeClues = invalidateStoreClues(request);
+    const clue = branchClue(storeClues);
     if (request.supplier && clue) cache.delete(cacheKeys.branch(request.supplier, clue));
   }
 
@@ -277,6 +300,8 @@ export function createLookupClient({ baseUrl = '', fetchImpl = globalThis.fetch,
     if (request?.supplier) body.supplier = String(request.supplier);
     if (request?.currency) body.currency = String(request.currency);
     if (request?.price != null && request.price !== '') body.price = Number(request.price);
+    const storeClues = invalidateStoreClues(request);
+    if (storeClues) body.storeClues = storeClues;
     forget(request);
     const url = endpointFor(baseUrl, 'invalidate');
     if (!url) return { ok: false, skipped: true, error: { code: 'unconfigured', message: 'Look-up base URL is not set.' } };

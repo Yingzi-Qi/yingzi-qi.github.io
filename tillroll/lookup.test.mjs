@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { canonicalBrand, normaliseItemId } from './brand-aliases.js';
 import { resolveSupplier } from './uk-branches.js';
-import { cacheKeys, createLookupClient, parseLookupResponse } from './lookup-client.js';
+import { branchClue, cacheKeys, createLookupClient, parseLookupResponse } from './lookup-client.js';
 import { flagColour, parseMismatches, rankPriceFallback, selectCandidate } from './lookup-match.js';
 import { chooseUnitPrice } from './lookup-policy.js';
 import { enrichLines } from './lookup-enrich.js';
@@ -525,6 +525,31 @@ describe('enrichment', () => {
       brand: 'Chanel', itemId: 'A01112', previousItemId: 'OLD', name: 'mini', currency: 'GBP', price: 5200,
     });
     assert.ok(enriched.unitRows[0].round2Changed.includes('品名'));
+  });
+
+  it('sends store clues on invalidate so the branch cache key is not empty', async () => {
+    const { result, calls } = trackingClient((url) => {
+      if (String(url).endsWith('/invalidate')) return json({ invalidated: [] });
+      return json(miniFixture);
+    });
+    await enrichLines({
+      merchant: 'Rolex',
+      items: [line({ brand: 'Rolex', item: 'Datejust', itemId: 'M126234-0018' })],
+      currency: 'GBP',
+      round: 2,
+      storeClues: { addressLines: ['Cabot Place'], postcode: 'E14 5AB', storeNumber: 'CW1' },
+      editedItemIds: { 0: { previousItemId: 'OLD', itemId: 'M126234-0018' } },
+      client: result,
+    });
+    const body = calls.find(call => call.url.endsWith('/invalidate')).body;
+    assert.equal(body.supplier, 'Rolex');
+    assert.equal(body.storeClues.postcode, 'E14 5AB');
+    assert.equal(body.storeClues.addressLines[0], 'Cabot Place');
+    assert.equal(body.storeClues.storeNumber, 'CW1');
+    assert.equal(body.addressLine1, undefined);
+    const clue = branchClue(body.storeClues);
+    assert.equal(clue, 'E14 5AB');
+    assert.equal(cacheKeys.branch(body.supplier, clue), 'lookup:v2:branch:rolex:e14-5ab');
   });
 
   it('skips a complete verified round 2 row', async () => {

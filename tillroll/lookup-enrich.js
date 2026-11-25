@@ -297,9 +297,7 @@ export async function enrichLines({
         supplier: primary.supplier,
         currency: primary.currency,
         price: primary.price,
-        postcode: primary.storeClues?.postcode,
-        addressLine1: primary.storeClues?.addressLines?.[0],
-        storeNumber: primary.storeClues?.storeNumber,
+        storeClues: primary.storeClues,
       });
       if (invalidated?.locked) {
         locked = true;
