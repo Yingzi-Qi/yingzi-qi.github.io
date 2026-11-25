@@ -3,7 +3,8 @@
 // Excel Sync audit) and iterates until the audit converges. Only the final
 // agreed version leaves this module; the internal trail is stored in D1 only.
 import { canonicalBrand, brandSearchPhrases, CHANEL_FALLBACK_NOTE } from './brands.js';
-import { brandHasItemIdFormat, chooseItemId, isConcessionCode, isEan, isStoreCode, matchesBrandItemId, ITEM_ID_GUARD_NOTE } from '../../../tillroll/brand-item-ids.js';
+import { brandHasItemIdFormat, chooseItemId, isConcessionCode, isEan, isStoreCode, matchesBrandItemId, ITEM_ID_GUARD_NOTE, officialStyleRef, labelledEan, validGtin, setBrandItemIdFormatsForTest, BRAND_ITEM_ID_FORMATS } from '../../../tillroll/brand-item-ids.js';
+export { BRAND_ITEM_ID_FORMATS };
 import { lookup as defaultLookup, invalidate, priceFallbackIsTie, priceTolerance, isExactOfficialIdPriceMatch } from './lookup.js';
 import { nowIso, sha256Hex } from './http.js';
 import { expandReceipt, isConfirmedZero, joinPurchaseTime, supplierVisibleName } from '../../../tillroll/units.js';
@@ -127,26 +128,41 @@ export function readerBrandItemIdCandidate(item = {}, brand) {
   return ean || null;
 }
 
-// Exported, empty by default. Do not copy a table from PR #3. The Verifier can
-// wire a table later via setBrandItemIdFormat() or deps.brandItemIdFormat.
-export const BRAND_ITEM_ID_FORMAT = {};
+// The format table is the client's BRAND_ITEM_ID_FORMATS (one table, no copy).
+// Tests may add a temporary Synthetic rule through setBrandItemIdFormat.
+export const BRAND_ITEM_ID_FORMAT = BRAND_ITEM_ID_FORMATS;
 let injectedBrandItemIdFormat = null;
 export function setBrandItemIdFormat(table) {
-  injectedBrandItemIdFormat = (table && typeof table === 'object') ? table : null;
+  injectedBrandItemIdFormat = (table && typeof table === 'object' && !Array.isArray(table)) ? table : null;
+  if (!injectedBrandItemIdFormat) {
+    setBrandItemIdFormatsForTest([]);
+    return;
+  }
+  setBrandItemIdFormatsForTest(Object.entries(injectedBrandItemIdFormat).map(([brand, pattern]) => ({
+    brand,
+    test: value => {
+      const text = String(value ?? '').trim();
+      return pattern.test(text) || pattern.test(text.replace(/[\s-]/g, '').toUpperCase());
+    },
+  })));
 }
 export function getBrandItemIdFormat(override) {
-  return override || injectedBrandItemIdFormat || BRAND_ITEM_ID_FORMAT;
+  return override || injectedBrandItemIdFormat || null;
 }
 const compactId = v => String(v ?? '').replace(/[\s-]/g, '').toUpperCase();
 function formatPattern(brand, table) {
-  if (!table) return null;
+  if (!table || Array.isArray(table)) return null;
   return table[canonicalBrand(brand) || brand] || table[brand] || table[str(brand)] || null;
 }
+// A printed 品牌货号 may stay in the cell only when it fits the shared brand
+// format, or when the brand has no format and the token is not a store code or GTIN.
 export function fitsBrandItemIdFormat(brand, value, table) {
   if (!str(value) || isForbiddenBrandItemCode(value)) return false;
   const formats = getBrandItemIdFormat(table);
   const pattern = formatPattern(brand, formats);
   if (pattern) return pattern.test(str(value)) || pattern.test(compactId(value));
+  if (brandHasItemIdFormat(brand)) return matchesBrandItemId(brand, value);
+  if (isStoreCode(value) || validGtin(value) || isEan(value)) return false;
   return true;
 }
 
@@ -190,19 +206,20 @@ export function resolveBrandItemId({ item = {}, brand, officialItemId, exactOffi
   const usableOfficial = official && !isForbiddenBrandItemCode(official, item) ? official : null;
   const cand = readerBrandItemIdCandidate(item, brand);
   const styleLike = cand && (cand.source === 'styleRef' || cand.source === 'brandProductCode') ? cand : null;
-  // An injected format table can reject an unfitting token. Without one, a non-store
-  // style-like code is kept (VCA 0012345, Gucci 000001). #20's fallbackItemId still
-  // governs the client look-up path; it is not applied wholesale here.
+  // Shared table: a format miss (VCA 0012345-style, Chanel bare digits) is not
+  // kept. Gucci 000001-style is kept when the brand has no rejecting format.
   const fitting = styleLike && fitsBrandItemIdFormat(brand, styleLike.value, table) ? styleLike : null;
 
+  const officialRef = officialStyleRef(brand, usableOfficial);
   if (fitting) {
-    const same = Boolean(usableOfficial && compactId(usableOfficial) === compactId(fitting.value));
-    if (usableOfficial && !same) {
+    // Official never overwrites a format-fitting printed value; it goes in the comment.
+    const same = Boolean(officialRef && compactId(officialRef) === compactId(fitting.value));
+    if (officialRef && !same) {
       return {
         brandItemId: fitting.value,
         brandItemIdSource: fitting.source,
         flag: AMBER,
-        reason: officialSiteShowsReason(usableOfficial),
+        reason: officialSiteShowsReason(officialRef),
       };
     }
     return {
@@ -212,12 +229,29 @@ export function resolveBrandItemId({ item = {}, brand, officialItemId, exactOffi
       reason: null,
     };
   }
-  // Unfitting printed style / brand code: #20 empties the cell. The printed
-  // value and any official/OCR alternative stay in the reason only.
+  // No fitting printed value: official style, then a labelled valid GTIN, then empty + Pink.
+  if (officialRef) {
+    return {
+      brandItemId: officialRef,
+      brandItemIdSource: 'official',
+      flag: exactOfficial ? null : AMBER,
+      reason: exactOfficial ? null : 'Official brand item ID from look-up.',
+      printedValue: styleLike ? (styleLike.printed || styleLike.value) : null,
+    };
+  }
+  const ean = labelledEan(item);
+  if (ean) {
+    return {
+      brandItemId: ean,
+      brandItemIdSource: 'ean',
+      flag: AMBER,
+      reason: 'Only an EAN is available; the brand item id was not found.',
+      printedValue: styleLike ? (styleLike.printed || styleLike.value) : null,
+    };
+  }
   if (styleLike) {
     const rawPrinted = styleLike.printed || styleLike.value;
-    const alternative = usableOfficial
-      || suggestedPrintedCodeAlternative(rawPrinted, brand, table)
+    const alternative = suggestedPrintedCodeAlternative(rawPrinted, brand, table)
       || suggestedPrintedCodeAlternative(styleLike.value, brand, table)
       || null;
     return {
@@ -226,22 +260,6 @@ export function resolveBrandItemId({ item = {}, brand, officialItemId, exactOffi
       flag: PINK,
       reason: alternative ? printedValueKeptReason(alternative) : ITEM_ID_GUARD_NOTE,
       printedValue: rawPrinted,
-    };
-  }
-  if (cand && cand.source === 'ean') {
-    return {
-      brandItemId: cand.value,
-      brandItemIdSource: 'ean',
-      flag: AMBER,
-      reason: 'EAN used as 品牌货号; not a brand style ref.',
-    };
-  }
-  if (usableOfficial) {
-    return {
-      brandItemId: usableOfficial,
-      brandItemIdSource: 'official',
-      flag: exactOfficial ? null : AMBER,
-      reason: exactOfficial ? null : 'Official brand item ID from look-up.',
     };
   }
   const raw = [item.styleRef, item.style, item.sku, item.itemId, item.ean, item.barcode, item.concessionCode, item.storeSku]
@@ -421,15 +439,14 @@ function readerStage(receipt, rIndex, state, ctx) {
       if (!v) return false;
       if (hookKeeps(v)) return true;
       if (isStoreCode(v) || isForbiddenBrandItemCode(v, it)) return false;
-      if (isEan(v) || isBarcodeOrEan(v)) return true;
-      const injected = formatPattern(brandRaw, formatTable);
-      if (injected) return injected.test(str(v)) || injected.test(compactId(v));
-      return true;
+      return fitsBrandItemIdFormat(brandRaw, v, formatTable);
     };
     // Fall through to a labelled EAN or fitting style when the printed token is unfitting.
-    if (!usableId(itemCell) && usableId(readerChosenId) && !idsMatch(readerChosenId, itemCell)) itemCell = readerChosenId;
-    // #20 guard: store/internal codes and unfitting non-EAN codes must not occupy the cell.
-    if (itemCell && !usableId(itemCell)) itemCell = usableId(readerChosenId) ? readerChosenId : null;
+    if (!builder) {
+      if (!usableId(itemCell) && usableId(readerChosenId) && !idsMatch(readerChosenId, itemCell)) itemCell = readerChosenId;
+      // Store/internal codes and format misses must not occupy the cell. A builder id is kept as given.
+      if (itemCell && !usableId(itemCell)) itemCell = usableId(readerChosenId) ? readerChosenId : null;
+    }
     const unitRead = priceReading(it.rawUnitPrice !== undefined ? it.rawUnitPrice : it.unitPrice);
     const amountRead = priceReading(it.rawAmount !== undefined ? it.rawAmount : it.amount);
     const unitCell = unitRead.invalid ? null : unit;
@@ -551,6 +568,21 @@ function noteStoreCodes(row) {
     row._alternates['品牌货号'] = { ...alt, receipt: [joined, alt.receipt].filter(Boolean).join('; ') };
   }
 }
+
+function rowLabelledEan(row) {
+  const labels = row.raw?.itemLabels || {};
+  return labelledEan({
+    ean: labels.ean,
+    barcode: labels.ean,
+    itemId: labels.itemId,
+    sku: labels.sku,
+    styleRef: labels.styleRef,
+    style: row.raw?.style,
+    item: row.cells['品名'],
+    name: row.cells['品名'],
+  }) || '';
+}
+
 function officialItemId(top, row) {
   const id = str(top?.itemId);
   if (!id || isConcessionCode(id)) return null;
@@ -565,6 +597,10 @@ function syncBrandItemIdMetadata(row, top) {
   const cell = row.cells['品牌货号'] ?? null;
   const official = officialItemId(top, row) || str(top?.itemId);
   row.brandItemId = cell;
+  if (!cell) {
+    row.brandItemIdFlag = row.flags['品牌货号'] || row.brandItemIdFlag || PINK;
+    return;
+  }
   if (row.flags['品牌货号'] === PINK) {
     row.brandItemIdFlag = PINK;
     return;
@@ -593,7 +629,7 @@ function syncBrandItemIdMetadata(row, top) {
 }
 
 function settleBrandItemId(row, top, ctx) {
-  if (row.raw?.idClass === 'builder' || row.raw?.idClass === 'last4') {
+  if (row.raw?.idClass === 'builder') {
     noteStoreCodes(row);
     return;
   }
@@ -601,62 +637,79 @@ function settleBrandItemId(row, top, ctx) {
   const c = row.cells;
   if (ctx.locked(row.rowId, '品牌货号')) return;
   const printed = row.raw.printedItemId ?? c['品牌货号'];
-  const kind = row.raw?.idClass === 'concession' || row.raw?.idClass === 'unlabelled10' ? 'concession' : row.raw?.idClass === 'ean' ? 'ean' : 'style';
-  const styleId = officialItemId(top, row);
-  if (kind === 'concession') {
-      if (c['品牌货号'] && (row.raw?.storeCodes || []).some(code => idsMatch(code, c['品牌货号']))) c['品牌货号'] = null;
-    if (styleId && top) {
-      c['品牌货号'] = styleId;
-      row._alternates['品牌货号'] = { receipt: printed, official: styleId, shown: 'official' };
-      row._comments['品牌货号'] = `Concession code ${printed} is not a brand item id. Official item id ${styleId}.`;
+  const brand = c['品牌'] || row.raw?.printedBrand;
+  const official = officialStyleRef(brand, officialItemId(top, row) || str(top?.itemId));
+  const ean = rowLabelledEan(row);
+  const fittingPrinted = fitsBrandItemIdFormat(brand, c['品牌货号']);
+
+  // 1) Format-fitting printed value stays. Official never overwrites it.
+  if (fittingPrinted) {
+    if (row.flags['品牌货号'] === PINK) return;
+    const receiptCode = ean || str(row.raw?.itemLabels?.ean) || ((isStoreCode(printed) || isEan(printed) || isConcessionCode(printed)) ? printed : null);
+    if (official && top && !idsMatch(official, c['品牌货号'])) {
+      noteMismatch(row, '品牌货号', c['品牌货号'], official, 'receipt');
       if (top.matchType === 'price-fallback') appendComment(row, '品牌货号', candidateText(row._candidates?.length ? row._candidates : [top]));
-      if (row.flags['品牌货号'] === PINK) {
-        delete row.flags['品牌货号'];
-        row._reading = row._reading.filter(e => e.col !== '品牌货号');
-      }
-      lookupFlag(row, '品牌货号', AMBER, 'Official brand item id from look-up.', { sourceUrls: top.sourceUrls || [], ...(row._candidates ? { candidates: row._candidates } : {}) });
-    } else if (row.flags['品牌货号'] !== PINK) {
-      c['品牌货号'] = null;
-      appendComment(row, '品牌货号', printed);
-      appendComment(row, '品牌货号', 'no brand item ID printed');
-      addFlag(row, '品牌货号', PINK, 'no brand item ID printed');
-      row._alternates['品牌货号'] = { receipt: printed, official: null, shown: 'receipt' };
-    } else {
-      c['品牌货号'] = null;
-      appendComment(row, '品牌货号', printed);
-      if (!row._alternates['品牌货号']) row._alternates['品牌货号'] = { receipt: printed, official: null, shown: 'receipt' };
-    }
-    return;
-  }
-  if (row.flags['品牌货号'] === PINK) return;
-  if (kind === 'ean') {
-    if (styleId && !idsMatch(styleId, printed)) {
-      noteMismatch(row, '品牌货号', printed, styleId, 'official');
-      c['品牌货号'] = styleId;
-      if (top?.matchType === 'price-fallback') appendComment(row, '品牌货号', candidateText(row._candidates?.length ? row._candidates : [top]));
+      lookupFlag(row, '品牌货号', AMBER, officialSiteShowsReason(official), { sourceUrls: top.sourceUrls || [], ...(row._candidates ? { candidates: row._candidates } : {}) });
+    } else if (receiptCode && !idsMatch(receiptCode, c['品牌货号']) && !fitsBrandItemIdFormat(brand, row.raw?.itemLabels?.styleRef)) {
+      // A labelled styleRef that fits the table is the printed style, not an EAN substitute.
+      row._alternates['品牌货号'] = { receipt: receiptCode, official: c['品牌货号'], shown: 'official' };
+      appendComment(row, '品牌货号', receiptCode);
       lookupFlag(row, '品牌货号', AMBER, 'Style reference used instead of an EAN.', { sourceUrls: top?.sourceUrls || [] });
-    } else if (printed) {
-      if (!c['品牌货号']) c['品牌货号'] = printed;
-      appendComment(row, '品牌货号', 'Only an EAN is available; the brand item id was not found.');
-      if (!row._alternates['品牌货号']) row._alternates['品牌货号'] = { receipt: printed, official: null, shown: 'receipt' };
-      lookupFlag(row, '品牌货号', AMBER, 'Only an EAN is available; the brand item id was not found.', { sourceUrls: top?.sourceUrls || [] });
-    }
-    return;
-  }
-  if (kind === 'style' && top?.matchType === 'price-fallback') {
-    if (top.itemId && printed && !idsMatch(top.itemId, printed)) {
-      noteMismatch(row, '品牌货号', printed, top.itemId, 'receipt');
-      lookupFlag(row, '品牌货号', AMBER, `Official item id ${top.itemId} differs from the receipt. Receipt value kept.`, { sourceUrls: top.sourceUrls || [], ...(row._candidates ? { candidates: row._candidates } : {}) });
-    } else if (printed) {
+    } else if (top?.matchType === 'price-fallback') {
       lookupFlag(row, '品牌货号', AMBER, 'Price-fallback look-up.', { sourceUrls: top.sourceUrls || [], ...(row._candidates ? { candidates: row._candidates } : {}) });
+      appendComment(row, '品牌货号', candidateText(row._candidates?.length ? row._candidates : [top]));
     }
-    appendComment(row, '品牌货号', candidateText(row._candidates?.length ? row._candidates : [top]));
     return;
   }
-  if (top?.itemId && printed && !idsMatch(top.itemId, printed) && top.matchType !== 'price-fallback') {
-    noteMismatch(row, '品牌货号', printed, top.itemId, 'receipt');
-    lookupFlag(row, '品牌货号', AMBER, `Official item id ${top.itemId} differs from the receipt. Receipt value kept.`, { sourceUrls: top.sourceUrls || [] });
+
+  // Store codes and format misses must not occupy the cell.
+  if (c['品牌货号']) c['品牌货号'] = null;
+
+  // 2) Official style ref.
+  if (official && top) {
+    c['品牌货号'] = official;
+    row.brandItemId = official;
+    row.brandItemIdSource = 'official';
+    row._alternates['品牌货号'] = { receipt: printed, official, shown: 'official' };
+    if (ean) row._comments['品牌货号'] = 'Style reference used instead of an EAN.';
+    else if (row.raw?.idClass === 'concession' || row.raw?.idClass === 'unlabelled10') {
+      row._comments['品牌货号'] = `Concession code ${printed} is not a brand item id. Official item id ${official}.`;
+    }
+    if (top.matchType === 'price-fallback') appendComment(row, '品牌货号', candidateText(row._candidates?.length ? row._candidates : [top]));
+    if (row.flags['品牌货号'] === PINK) {
+      delete row.flags['品牌货号'];
+      row._reading = (row._reading || []).filter(e => e.col !== '品牌货号');
+    }
+    const why = ean ? 'Style reference used instead of an EAN.' : 'Official brand item id from look-up.';
+    lookupFlag(row, '品牌货号', AMBER, why, { sourceUrls: top.sourceUrls || [], ...(row._candidates ? { candidates: row._candidates } : {}) });
+    row.brandItemIdFlag = AMBER;
+    return;
   }
+
+  // 3) Labelled GTIN-8/12/13/14 with a valid check digit only.
+  if (ean) {
+    c['品牌货号'] = ean;
+    row.brandItemId = ean;
+    row.brandItemIdSource = 'ean';
+    row._comments['品牌货号'] = 'Only an EAN is available; the brand item id was not found.';
+    if (!row._alternates['品牌货号']) row._alternates['品牌货号'] = { receipt: printed, official: null, shown: 'receipt' };
+    if (row.flags['品牌货号'] === PINK) {
+      delete row.flags['品牌货号'];
+      row._reading = (row._reading || []).filter(e => e.col !== '品牌货号');
+    }
+    lookupFlag(row, '品牌货号', AMBER, 'Only an EAN is available; the brand item id was not found.', { sourceUrls: top?.sourceUrls || [] });
+    row.brandItemIdFlag = AMBER;
+    return;
+  }
+
+  // 4) Empty + Pink.
+  c['品牌货号'] = null;
+  appendComment(row, '品牌货号', printed);
+  if (!String(row._comments['品牌货号'] || '').includes('no brand item ID printed')) {
+    appendComment(row, '品牌货号', 'no brand item ID printed');
+  }
+  if (row.flags['品牌货号'] !== PINK) addFlag(row, '品牌货号', PINK, 'no brand item ID printed');
+  if (!row._alternates['品牌货号']) row._alternates['品牌货号'] = { receipt: printed, official: null, shown: 'receipt' };
 }
 
 // ---- Stage 2: Brand & Catalogue Look-up Verifier --------------------------
@@ -696,8 +749,12 @@ async function verifierStage(rows, receipt, ctx) {
     if (ctx.mode === 'round2' && row.skipLookup) { settleBrandItemId(row, null, ctx); continue; }
     if (!row.raw.printedItemId && !c['品名']) { settleBrandItemId(row, null, ctx); continue; }
     if (ctx.lookupsUsed >= MAX_LOOKUPS_PER_RUN) { lookupFlag(row, '品名', AMBER, 'Look-up deferred: per-run cap reached.'); settleBrandItemId(row, null, ctx); continue; }
-    const printedFits = Boolean(c['品牌货号'] && matchesBrandItemId(row.raw.printedBrand || c['品牌'], c['品牌货号']));
-    const lookupItemId = printedFits ? c['品牌货号'] : (row._readerChosenId || row.raw.printedItemId || c['品牌货号']);
+    const lookupBrand = row.raw.printedBrand || c['品牌'];
+    const printedFits = Boolean(c['品牌货号'] && fitsBrandItemIdFormat(lookupBrand, c['品牌货号']));
+    const rawPrintedId = row.raw?.itemLabels?.itemId || row.raw.printedItemId;
+    const lookupItemId = printedFits && brandHasItemIdFormat(lookupBrand)
+      ? c['品牌货号']
+      : (rowLabelledEan(row) || ((isStoreCode(rawPrintedId) || isEan(rawPrintedId) || isConcessionCode(rawPrintedId)) ? rawPrintedId : null) || row.raw.printedItemId || row._readerChosenId || c['品牌货号']);
     const req = { brand: row.raw.printedBrand || c['品牌'], itemId: lookupItemId, name: c['品名'], style: row.raw.style, price: c['采购商品原价'], currency: row.raw.currency };
     const res = await ctx.callLookup(req);
     if (!res) { settleBrandItemId(row, null, ctx); continue; }
@@ -1050,7 +1107,7 @@ export async function runSanity(env, input, deps = {}) {
   const memo = new Map();
   const ctx = {
     mode, lookupsUsed: 0, paused: new Set(),
-    formatTable: getBrandItemIdFormat(deps.brandItemIdFormat),
+    formatTable: (setBrandItemIdFormat(deps.brandItemIdFormat || null), getBrandItemIdFormat(deps.brandItemIdFormat)),
     brandIdFormat: typeof deps.brandIdFormat === 'function' ? deps.brandIdFormat : matchBrandIdFormat,
     locked: (rowId, col) => locks.has(`${rowId}\u0000${col}`),
     callLookup: async req => {

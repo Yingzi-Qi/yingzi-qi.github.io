@@ -134,7 +134,8 @@ test('workbook: 10 headers, time, sale amount, only two fills, hidden columns, n
   assert.equal(vca.flags['采购商品原价'], AMBER);
   assert.match(vca.exportMeta.comments['采购商品原价'], /3600/);
   assert.equal(vca.exportMeta.alternates['采购商品原价'].shown, 'receipt');
-  assert.equal(vca.cells['品牌货号'], '0012345');
+  assert.equal(vca.cells['品牌货号'], null);
+  assert.equal(vca.flags['品牌货号'], PINK);
   const chanel = result.agreedRows[0];
   assert.equal(chanel.cells['品牌'], 'Chanel');
   assert.equal(chanel.cells['品名'], 'Classic Flap Mini Bag');
@@ -528,7 +529,7 @@ test('2: a concession code never stays in 品牌货号; an official id, an EAN a
   const lookup = async (_env, body) => {
     if (body.itemId === '9999999100') return hit('BR-100', 'id', 'Official Coat', 30);
     if (body.itemId === '9999999200') return { candidates: [], cacheHit: false, cacheKey: 'none', sourcesQueried: [] };
-    if (body.itemId === '5011111111111') return { candidates: [], cacheHit: false, cacheKey: 'ean-only', sourcesQueried: [] };
+    if (body.itemId === '4000000000037') return { candidates: [], cacheHit: false, cacheKey: 'ean-only', sourcesQueried: [] };
     if (body.itemId === 'SYN-STYLE') return hit('SYN-STYLE', 'id', 'Printed Style', 40);
     if (body.itemId === 'SYN-PF') return hit('OFF-99', 'price-fallback', 'Guessed Coat', 40);
     if (body.itemId === '9999999300') return hit('BR-55', 'price-fallback', 'Fallback Coat', 22);
@@ -539,7 +540,7 @@ test('2: a concession code never stays in 品牌货号; an official id, an EAN a
     items: [
       { rowId: 'id-official', brand: 'Synthetic', item: 'Coat', itemId: '9999999100', unitPrice: 30, amount: 30 },
       { rowId: 'id-none', brand: 'Synthetic', item: 'Scarf', itemId: '9999999200', unitPrice: 12, amount: 12 },
-      { rowId: 'id-ean', brand: 'Synthetic', item: 'Soap', itemId: '5011111111111', ean: '5011111111111', unitPrice: 5, amount: 5 },
+      { rowId: 'id-ean', brand: 'Synthetic', item: 'Soap', itemId: '4000000000037', ean: '4000000000037', unitPrice: 5, amount: 5 },
       { rowId: 'id-style', brand: 'Synthetic', item: 'Printed Style', itemId: 'SYN-STYLE', unitPrice: 40, amount: 40 },
       { rowId: 'id-pf-style', brand: 'Synthetic', item: 'Bag', itemId: 'SYN-PF', unitPrice: 40, amount: 40 },
       { rowId: 'id-pf-cc', brand: 'Synthetic', item: 'Hat', itemId: '9999999300', unitPrice: 22, amount: 22 },
@@ -556,7 +557,8 @@ test('2: a concession code never stays in 品牌货号; an official id, an EAN a
   assert.equal(by['id-none'].flagReasons['品牌货号'], 'no brand item ID printed');
   assert.match(by['id-none'].exportMeta.comments['品牌货号'], /9999999200/);
   assert.equal(by['id-none'].exportMeta.alternates['品牌货号'].receipt, '9999999200');
-  assert.equal(by['id-ean'].cells['品牌货号'], '5011111111111');
+  assert.equal(by['id-ean'].cells['品牌货号'], '4000000000037');
+  assert.equal(by['id-ean'].exportMeta.comments['品牌货号'], 'Only an EAN is available; the brand item id was not found.');
   assert.equal(by['id-ean'].flags['品牌货号'], AMBER);
   assert.equal(by['id-style'].cells['品牌货号'], 'SYN-STYLE');
   assert.equal(by['id-style'].flags['品牌货号'], undefined);
@@ -586,14 +588,14 @@ test("P6: Chanel confirmed only on chanel.cn or chanel.com/gb gets the blocked-s
   const { result } = await runSanity(env, { batchId: 'p6', mode: 'round1', receipts: [{
     receiptKey: 'p6', merchant: 'Synthetic Store', receiptReference: 'P6-1', date: '2026-07-04', time: '13:00', payment: 'Card', currency: 'GBP',
     items: [
-      { brand: 'Chanel', item: 'Coat', itemId: 'CH-SAME', unitPrice: 10, amount: 10 },
-      { brand: 'Chanel', item: 'Short', itemId: 'CH-DIFF', unitPrice: 10, amount: 10 },
-      { brand: 'Chanel', item: 'Coat', itemId: 'CH-FR', unitPrice: 10, amount: 10 },
+      { rowId: 'p6-same', brand: 'Chanel', item: 'Coat', itemId: 'CH-SAME', unitPrice: 10, amount: 10 },
+      { rowId: 'p6-diff', brand: 'Chanel', item: 'Short', itemId: 'CH-DIFF', unitPrice: 10, amount: 10 },
+      { rowId: 'p6-fr', brand: 'Chanel', item: 'Coat', itemId: 'CH-FR', unitPrice: 10, amount: 10 },
     ],
   }] }, { lookup });
-  const same = result.agreedRows.find(r => r.cells['品牌货号'] === 'CH-SAME');
-  const diff = result.agreedRows.find(r => r.cells['品牌货号'] === 'CH-DIFF');
-  const fr = result.agreedRows.find(r => r.cells['品牌货号'] === 'CH-FR');
+  const same = result.agreedRows.find(r => r.rowId === 'p6-same');
+  const diff = result.agreedRows.find(r => r.rowId === 'p6-diff');
+  const fr = result.agreedRows.find(r => r.rowId === 'p6-fr');
   assert.equal(same.exportMeta.comments['品名'], 'chanel.com blocked; confirmed on chanel.cn/gb');
   assert.match(diff.exportMeta.comments['品名'], /Receipt printed: Short/);
   assert.match(diff.exportMeta.comments['品名'], /chanel.com blocked; confirmed on chanel.cn\/gb/);
@@ -779,8 +781,8 @@ test('an unlabelled numeric-only 10-digit id stays out of 品牌货号 unless th
     items: [{ rowId: 'ten-fmt', brand: 'Synthetic', item: 'Clip', itemId: '1111111111', unitPrice: 8, amount: 8 }],
   }] }, { lookup: noLookup, brandIdFormat: (brand, value) => (brand === 'Synthetic' && value === '1111111111' ? 'synthetic' : 'no match') });
   const kept = matched.result.agreedRows[0];
-  assert.equal(kept.cells['品牌货号'], '1111111111');
-  assert.notEqual(kept.flagReasons['品牌货号'], 'no brand item ID printed');
+  assert.equal(kept.cells['品牌货号'], null);
+  assert.equal(kept.flags['品牌货号'], PINK);
 });
 
 test('short brand aliases pink only at the start or end, and not inside the look-up official name', async () => {

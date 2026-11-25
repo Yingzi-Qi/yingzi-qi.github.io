@@ -239,11 +239,11 @@ describe('brand item id', () => {
     assert.equal(chooseItemId({
       brand: 'Dior',
       fields: { itemId: '9999999001', sku: '3607670123456' },
-    }), '3607670123456');
+    }), '');
     assert.equal(chooseItemId({
       brand: 'Dior',
       fields: { item: '3607670123456', allowEan: true },
-    }), '3607670123456');
+    }), '');
   });
 
   it('does not keep a store code or an id that misses the brand format', async () => {
@@ -282,10 +282,10 @@ describe('brand item id', () => {
       currency: 'GBP',
       client: result,
     });
-    assert.equal(ean.unitRows[0].fields['品牌货号'].value, '0000000000017');
-    assert.equal(ean.unitRows[0].fields['品牌货号'].flag, null);
-    assert.equal(ean.unitRows[0].request.itemId, '0000000000017');
-    assert.equal(calls.at(-1).body.itemId, '0000000000017');
+    assert.equal(ean.unitRows[0].fields['品牌货号'].value, '');
+    assert.equal(ean.unitRows[0].fields['品牌货号'].flag, 'pink');
+    assert.equal(ean.unitRows[0].fields['品牌货号'].comment, 'printed value not a recognised style code: 0000000000017');
+    assert.equal(ean.unitRows[0].request.itemId, undefined);
   });
 
   it('does not quote card, auth, merchant, terminal or approval digits in the item-id comment', async () => {
@@ -319,9 +319,105 @@ describe('brand item id', () => {
     for (const value of Object.values(noise)) assert.equal(JSON.stringify(cell).includes(value), false);
   });
 
+  it('fills a labelled EAN in Amber, and leaves an unlabelled or bad barcode empty', async () => {
+    const ean = '4000000000013';
+    const bad = '4000000000014';
+    const note = 'Only an EAN is available; the brand item id was not found.';
+    const pink = 'printed value not a recognised style code: ';
+    const { result } = trackingClient(() => json({ cacheHit: false, candidates: [], flag: null, sourcesQueried: [] }));
+    const labelled = await enrichLines({
+      items: [line({ brand: 'Chanel', item: 'Tote', itemId: '1006', sku: '', ean })],
+      currency: 'GBP',
+      client: result,
+    });
+    const labelledCell = labelled.unitRows[0].fields['品牌货号'];
+    assert.equal(labelledCell.value, ean);
+    assert.equal(labelledCell.flag, 'amber');
+    assert.equal(labelledCell.flagColour, '#FDE68A');
+    assert.equal(labelledCell.comment, note);
+    const ten = await enrichLines({
+      items: [line({ brand: 'Chanel', item: 'Tote', itemId: '1000000006', ean })],
+      currency: 'GBP',
+      client: result,
+    });
+    assert.equal(ten.unitRows[0].fields['品牌货号'].value, ean);
+    assert.equal(ten.unitRows[0].fields['品牌货号'].flag, 'amber');
+    const family = await enrichLines({
+      items: [line({ brand: 'Chanel', item: 'Tote', itemId: '99999991006', ean })],
+      currency: 'GBP',
+      client: result,
+    });
+    assert.equal(family.unitRows[0].fields['品牌货号'].value, ean);
+    assert.equal(family.unitRows[0].fields['品牌货号'].flag, 'amber');
+    const bare = await enrichLines({
+      items: [line({ brand: 'Chanel', item: 'Tote', itemId: '1006', sku: ean })],
+      currency: 'GBP',
+      client: result,
+    });
+    assert.equal(bare.unitRows[0].fields['品牌货号'].value, '');
+    assert.equal(bare.unitRows[0].fields['品牌货号'].flag, 'pink');
+    assert.equal(bare.unitRows[0].fields['品牌货号'].comment, pink + '1006');
+    const broken = await enrichLines({
+      items: [line({ brand: 'Chanel', item: 'Tote', itemId: '1006', ean: bad })],
+      currency: 'GBP',
+      client: result,
+    });
+    assert.equal(broken.unitRows[0].fields['品牌货号'].value, '');
+    assert.equal(broken.unitRows[0].fields['品牌货号'].flag, 'pink');
+    const words = await enrichLines({
+      items: [line({ brand: 'Chanel', item: 'Tote', itemId: 'Barcode ' + ean, sku: '' })],
+      currency: 'GBP',
+      client: result,
+    });
+    assert.equal(words.unitRows[0].fields['品牌货号'].value, ean);
+    assert.equal(words.unitRows[0].fields['品牌货号'].flag, 'amber');
+  });
+
+  it('prefers a fitting printed ref, then an official ref, over a labelled EAN', async () => {
+    const ean = '4000000000013';
+    const { result } = trackingClient(() => json({
+      cacheHit: false,
+      candidates: [{
+        brand: 'Chanel', officialName: 'Synthetic Tote', itemId: 'AS10007', price: 100, currency: 'GBP',
+        sourceUrls: ['https://www.chanel.com/gb/p/AS10007'], onOfficialSite: true,
+        matchedFields: ['name'], confidence: 0.9, matchType: 'id',
+      }],
+      flag: null,
+      sourcesQueried: ['brave'],
+    }));
+    const printed = await enrichLines({
+      items: [line({ brand: 'Chanel', item: 'Tote', itemId: 'AS10006', ean, unitPrice: 100, amount: 100 })],
+      currency: 'GBP',
+      client: result,
+    });
+    assert.equal(printed.unitRows[0].fields['品牌货号'].value, 'AS10006');
+    assert.equal(printed.unitRows[0].fields['品牌货号'].comment, undefined);
+    const official = await enrichLines({
+      items: [line({ brand: 'Chanel', item: 'Tote', itemId: '1006', ean, unitPrice: 100, amount: 100 })],
+      currency: 'GBP',
+      client: result,
+    });
+    assert.equal(official.unitRows[0].fields['品牌货号'].value, 'AS10007');
+    assert.equal(official.unitRows[0].fields['品牌货号'].flag, 'amber');
+    assert.equal(official.unitRows[0].fields['品牌货号'].comment, 'Style reference used instead of an EAN.');
+    const hidden = await enrichLines({
+      items: [line({
+        brand: 'Chanel', item: 'Tote', itemId: '1006', sku: '',
+        card: 'EAN 5000000000000005', auth: '500000000005', merchant: '600000000006', terminal: '700000000007', approval: '800000000008',
+      })],
+      currency: 'GBP',
+      client: result,
+    });
+    const cell = hidden.unitRows[0].fields['品牌货号'];
+    assert.equal(cell.value, '');
+    assert.equal(cell.flag, 'pink');
+    assert.equal(JSON.stringify(cell).includes('5000000000000005'), false);
+    assert.equal(JSON.stringify(cell).includes('500000000005'), false);
+  });
+
   it('does not use a concession code as a Chanel item id, and falls through to the EAN', () => {
-    assert.equal(chooseItemId({ brand: 'Chanel', fields: { itemId: '9999999001', sku: '3607670123456' } }), '3607670123456');
-    assert.equal(chooseItemId({ brand: 'Other Atelier', fields: { itemId: '3607670123456' } }), '3607670123456');
+    assert.equal(chooseItemId({ brand: 'Chanel', fields: { itemId: '9999999001', sku: '3607670123456' } }), '');
+    assert.equal(chooseItemId({ brand: 'Other Atelier', fields: { itemId: '3607670123456' } }), '');
   });
 
   it('uses a reader style ref through the brand item-id table', () => {
@@ -332,14 +428,14 @@ describe('brand item id', () => {
     assert.equal(chooseItemId({
       brand: 'Chanel',
       fields: { itemId: '999999912345', styleRef: 'NOT-A-REF', sku: '3607670123456' },
-    }), '3607670123456');
+    }), '');
   });
 
   it('lets an unfitting code fall through to the EAN and strips a Chanel season prefix', () => {
     assert.equal(chooseItemId({
       brand: 'Chanel',
       fields: { itemId: 'NOT-A-REF', sku: '3607670123456' },
-    }), '3607670123456');
+    }), '');
     assert.equal(chooseItemId({
       brand: 'Chanel',
       fields: { item: '25C AS44010', itemId: 'NOT-A-REF', sku: '3607670123456' },
