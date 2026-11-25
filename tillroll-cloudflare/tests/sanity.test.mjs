@@ -377,7 +377,7 @@ test('brandItemId: printed style is kept; official ID is used only when none is 
   const idMatchPriceDiff = {
     receiptKey: 'bid-idmatch', merchant: 'Selfridges', receiptReference: 'B2', date: '2026-11-20', time: '12:00',
     payment: 'Visa', currency: 'GBP',
-    items: [{ brand: 'VCA', item: 'Vintage Alhambra pendant', itemId: '0012345', qty: 1, unitPrice: 3700, amount: 3700 }],
+    items: [{ brand: 'VCA', item: 'Vintage Laurel pendant', itemId: '0012345', qty: 1, unitPrice: 3700, amount: 3700 }],
   };
   const { result } = await runSanity(env, { mode: 'round1', receipts: [exact, idMatchPriceDiff] }, { fetchImpl: f, lookup });
   const p5 = result.agreedRows.find(r => r.receiptKey === 'bid-p5');
