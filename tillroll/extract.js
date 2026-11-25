@@ -3,7 +3,7 @@ import {inspectReference} from './reference.js?v=6';
 import {isGtin,isPrintedItemNumber,parsePrintedItemId,printedBarcodeDetail,barcodesBelowNames} from './product-code.js?v=productcodes3';
 import {readPurchaseDate} from './purchase-date.js?v=8';
 import {comparePhotoFields,mergeReadings} from './reading-comparison.js?v=discounts1';
-import {readPurchaseTime,normalizePurchaseTime,readTender,normalizeTender,readStoreClues,storeReceiptId,cleanProductCode,applyZeroPriceExclusion} from './receipt-rules.js?v=1';
+import {readPurchaseTime,normalizePurchaseTime,readTender,normalizeTender,readStoreClues,mergeStoreClues,storeReceiptId,cleanProductCode,applyZeroPriceExclusion} from './receipt-rules.js?v=1';
 // OCR assets resolve on this site. Receipt images remain in the tab unless the
 // caller explicitly starts the optional Gemini reader using a supplied API key.
 const asset = name => new URL(`./ocr/${name}`, import.meta.url).href;
@@ -114,7 +114,7 @@ function amounts(text) {
   });
 }
 const roundMoney = value => Math.round(value * 100) / 100;
-const itemShape = () => ({ brand:null, item:null, itemId:null, sku:null, colour:null, size:null, qty:null, unitPrice:null, amount:null, lineDiscount:null, lineDiscountLabel:null, lineDiscounts:null });
+const itemShape = () => ({ brand:null, item:null, itemId:null, sku:null, colour:null, size:null, qty:null, unitPrice:null, amount:null, lineDiscount:null, lineDiscountLabel:null, lineDiscounts:null, concessionCode:null, internalCode:null, ean:null, styleRef:null });
 const receiptShape = () => ({ merchant:null, date:null, time:null, orderNumber:null, orderId:null, receiptReference:null,
   total:null, subtotal:null, discount:null, receiptDiscount:null, receiptDiscounts:[], tax:null, currency:null, payment:null, card:null,
   storeClues:{addressLines:[],postcode:null,storeNumber:null,phone:null},
@@ -173,7 +173,7 @@ const otherTotal=/^(?:total(?:\s+(?:net|des))?\s+(?:h\.?\s?t\.?\b|tva|tua|vat|ta
 const subLabel=/^(?:sub\s*total|sous[-~\s]*total|zwischensumme|total\s+(?:net\s+)?h\.?\s?t\.?\b)/i;
 const taxLabel=/^(?:(?:includes?|included|sales|total)\s+)?(?:tax|vat|tva)\b/i;
 const discountLabel=/^(?:discount|savings|remise|rabatt)\b/i;
-const metadata=/^(?:sub\s*total|sous[-~\s]*total|(?:(?:grand|order|receipt|gross|net)\s+)?total\b|(?:amount|balance)\s+(?:due|paid|to\s+pay)|net\s+[àa]\s+payer|tva\b|gesamt(?:betrag|summe)?\b|summe\b|montant\b|(?:sales\s+)?tax\b|vat\b|includes?\s+vat|discount\b|shipping\b|delivery\b|savings\b|remise\b|rabatt\b|cash\b|change\b|credit\b|tender\b|paid\b|payment\b|card\b|contactless\b|master\s*card\b|visa\b|american express\b|apple pay\b|thank you\b|auth\b|returns?\b)/i;
+const metadata=/^(?:sub\s*total|sous[-~\s]*total|(?:(?:grand|order|receipt|gross|net)\s+)?total\b|(?:amount|balance)\s+(?:due|paid|to\s+pay)|item\s+total\b|net\s+[àa]\s+payer|tva\b|gesamt(?:betrag|summe)?\b|summe\b|montant\b|(?:sales\s+)?tax\b|vat\b|includes?\s+vat|discount\b|shipping\b|delivery\b|savings\b|remise\b|rabatt\b|cash\b|change\b|credit\b|tender(?:ed)?\b|paid\b|payment\b|card\b|contactless\b|master\s*card\b|visa\b|american express\b|apple pay\b|thank you\b|auth\b|arqc\b|adyen\b|citcon\b|union\s*pay\b|returns?\b|you have been served\b|product\s+info\b)/i;
 const noProduct = /(?:\border\s*(?:no|number|id)\b|^receipt\b|\binvoice\b|^date\b|^time\b|^till\b|^cashier\b|^placed\b|^store\b|style\s*[:#]|\b(?:qty|price)\b.*\b(?:price|amount|total)\b|\bdescription\b.*\bqty\b|^\d{1,2}[\s/-]\w+[\s/-](?:\d{2}|\d{4})\b|\d{1,2}:\d{2}|^demonstration\b)/i;
 function possibleLabel(line) {
   return line && /\p{L}/u.test(line.text) && !metadata.test(tidyLine(line.text)) && !noProduct.test(line.text) && !/^style\b|^sku\b|^(?:item|product|article)\s+(?:id|code)\b|^(?:upc|ean|barcode)\b/i.test(line.text) && !amounts(line.text).length;
@@ -344,10 +344,36 @@ function embeddedModelNumber(item,parsed,sku) {
   return parsed?.evidence==='position' && sku && sku!==parsed.itemId &&
     String(item??'').trim().endsWith(parsed.itemId);
 }
+function isClosingTotal(text) {
+  const prices=amounts(text);
+  if(prices.length!==1) return false;
+  const head=tidyLine(text.slice(0,prices[0].start));
+  if(/^balance\s+(?:due|to\s+pay|paid)\b/i.test(head)) return true;
+  return /^(?:(?:grand|order|receipt|net|gross)\s+)?total(?:\s+(?:GBP|EUR|USD|CAD|AUD|CHF|MYR|SGD))?$/i.test(head);
+}
+function footerSaving(text) {
+  const prices=amounts(text);
+  if(prices.length!==1 || !(prices[0].value<0)) return false;
+  return /\b(?:offer|discount|promo(?:tion)?|reduction|remise|rabais|rabatt|markdown|saving|off|%)\b|%/i.test(text.slice(0,prices[0].start));
+}
+// Harrods: 4-digit concession, 10-digit 9999999xxx code, optional style ref, then the name.
+// Those codes stay in their own fields. They are not chosen as 品牌货号 / itemId.
+function parseHarrodsItem(label) {
+  const match=/^(\d{4})\s+(9999999\d{3})\s+(.+)$/.exec(String(label||'').trim());
+  if(!match) return null;
+  let rest=match[3].trim(), styleRef=null;
+  const style=/\b([A-Z]{1,4}\d{2,6}[A-Z0-9]*)\b/u.exec(rest);
+  if(style){
+    styleRef=style[1];
+    rest=(rest.slice(0,style.index)+' '+rest.slice(style.index+style[1].length)).replace(/\s+/g,' ').trim();
+  }
+  if(!/\p{L}/u.test(rest)) return null;
+  return {concessionCode:match[1], internalCode:match[2], styleRef, item:rest};
+}
 function itemsFromLines(lines, trace) {
   const items=[]; const used=new Set(), inlineSuffixes=new Map();
   const prefixes=printedProductPrefixes(lines), belowNames=barcodesBelowNames(lines);
-  let layout=null, lastHeader=-1, lastProduct=-10;
+  let layout=null, lastHeader=-1, lastProduct=-10, pastTotal=false, skipCashier=false;
   function record(row,priceLine,nameLine=priceLine,unitLine=priceLine,header=-1) {
     items.push(row);
     if(trace)trace.push({priceLine,nameLine,unitLine,header,idLine:null});
@@ -356,6 +382,19 @@ function itemsFromLines(lines, trace) {
   for (let i=0;i<lines.length;i++) {
     const line=lines[i], text=line.text.trim();
     if(used.has(i))continue;
+    if(skipCashier){skipCashier=false;continue;}
+    if(/you have been served today by/i.test(text)){skipCashier=true;continue;}
+    const productInfo=/^product\s+info\s*:\s*(\d{13})\b/i.exec(text);
+    if(productInfo){
+      if(items.length && i-lastProduct<=3){
+        const row=items.at(-1);
+        row.ean=productInfo[1];
+        if(row.itemId===row.ean || row.itemId===row.concessionCode || row.itemId===row.internalCode) row.itemId=null;
+      }
+      continue;
+    }
+    if(pastTotal){if(!footerSaving(text))continue;}
+    else if(isClosingTotal(text)){pastTotal=true;continue;}
     const header=productColumns(line);
     if(header){layout=header;lastHeader=i;lastProduct=-10;continue;}
     // Some tills print loyalty offers and tax breakdowns below the final payment.
@@ -393,7 +432,12 @@ function itemsFromLines(lines, trace) {
       lastProduct=i;used.add(i+1);continue;
     }
     const prices=amounts(text); if (!prices.length) continue;
-    const final=prices.at(-1); if (text.slice(final.end).trim() && !/^(?:[A-Z*]|EUR|GBP|USD|CAD|CHF|AUD|NZD|[€£$])(?:\s*[|*])?$/i.test(text.slice(final.end).trim())) continue;
+    const final=prices.at(-1);
+    const tail=text.slice(final.end).trim();
+    const currencyTail=/^(?:[A-Z*]|EUR|GBP|USD|CAD|CHF|AUD|NZD|[€£$])(?:\s*[|*])?$/i.test(tail);
+    // A short OCR tail ("wile") must not drop a printed discount line.
+    const discountJunk=/\b(?:offer|discount|promo(?:tion)?|reduction|remise|rabais|rabatt|markdown|saving|off|%)\b|%/i.test(text.slice(0,final.start)) && /^[\p{L}]{1,12}$/u.test(tail);
+    if(tail && !currencyTail && !discountJunk) continue;
     let label=text.slice(0,prices[0].start).trim();
     if(printedCurrency.test(label))continue;
     const row=itemShape(); row.amount=final.value;
@@ -405,6 +449,12 @@ function itemsFromLines(lines, trace) {
       if(explicit || (prices.length>1 && (!isPrintedItemNumber(qty[1]) || balances))){
         row.qty=Number(qty[1]);label=label.slice(0,qty.index).trim();
       }
+    }
+    const harrodsItem=parseHarrodsItem(label);
+    if(harrodsItem){
+      Object.assign(row,harrodsItem,{brand:null,itemId:null});
+      if(pastTotal)row.afterTotal=true;
+      record(row,i);lastProduct=i;continue;
     }
     const inline=parsePrintedItemId(label);
     const prefix=prefixes.get(line);
@@ -432,7 +482,7 @@ function itemsFromLines(lines, trace) {
         row.brand=prev.text.trim(); row.item=label; used.add(i-1);
       } else Object.assign(row,parts);
     }
-    if(row.item || row.brand || row.sku){record(row,i,nameLine);lastProduct=i;}
+    if(row.item || row.brand || row.sku){if(pastTotal)row.afterTotal=true;record(row,i,nameLine);lastProduct=i;}
   }
   foldLineDiscounts(items,trace);
   for(const [row,{text,parsed}] of inlineSuffixes){
@@ -488,6 +538,8 @@ function classifyLooseDiscounts(items) {
     const laterProduct=items.slice(index+1).some(next=>!isDiscountRow(next) && next.amount>0);
     const underPricedItem=previous && previous.unitPrice!=null && previous.amount>0;
     const entry={label:String(row.item??'').replace(/\s+/g,' ').trim()||null, amount:roundMoney(-row.amount)};
+    // A saving printed after TOTAL is receipt-level even when the last item was priced.
+    if(row.afterTotal){receipt.push(entry);return;}
     if(underPricedItem || laterProduct){
       unclear.push(kept.length);
       kept.push(row);
@@ -655,7 +707,11 @@ export function extractLocal(ocr) {
     result[key]=key==='discount' ? Math.abs(value) : value;
   }
   if(totals.size>1) result.fieldIssues.push({field:'total',reason:'conflicting_printed_totals',evidence:'Several labelled totals appear on the photo: '+[...totals].join(' / ')+'.'});
-  const loose=classifyLooseDiscounts(recoverPhotoItemIds({items:itemsFromLines(lines)},ocr,false).items);
+  const recovered=recoverPhotoItemIds({items:itemsFromLines(lines)},ocr,false).items;
+  for(const item of recovered){
+    if(item.itemId && [item.concessionCode,item.internalCode,item.ean].includes(item.itemId)) item.itemId=null;
+  }
+  const loose=classifyLooseDiscounts(recovered);
   result.items=loose.items;
   for(const index of loose.unclear)
     result.fieldIssues.push({field:'items.'+index+'.amount', reason:'discount_line_unclear', evidence:result.items[index].item||''});
@@ -675,15 +731,32 @@ export function extractLocal(ocr) {
   // The store rule decides the id. A found value replaces a generic heuristic.
   // Missing or unclear does not keep that heuristic as a confirmed id.
   const storeId=storeReceiptId(result.merchant,ocr);
-  if(storeId?.status==='found' && storeId.value) result.receiptReference=storeId.value;
-  else if(storeId && (storeId.status==='missing' || storeId.status==='unclear'))
-    result.receiptReference=storeId.status==='unclear' && storeId.value ? storeId.value : null;
+  result.receiptReference=applyStoreReceiptId(result,ocr).receiptReference;
   const reference=inspectReference(result,ocr);
   if (reference.status==='found' && !result[reference.kind] && !(storeId && reference.kind==='receiptReference'))
     result[reference.kind]=reference.value;
   result.imageQuality=ocr.confidence<.65?'poor':'unknown';
   result.model='On-device OCR'; result.cost=0;
   return applyZeroPriceExclusion(normalizeReading(result),ocr);
+}
+// The store rule owns 采购小票id for Harrods and Selfridges, including a Gemini reading.
+export function applyStoreReceiptId(data, ocr) {
+  const storeId=storeReceiptId(data?.merchant, ocr);
+  if(!storeId) return data;
+  const next={...data};
+  if(storeId.status==='found' && storeId.value) next.receiptReference=storeId.value;
+  else if(storeId.status==='unclear' && storeId.value) next.receiptReference=storeId.value;
+  else next.receiptReference=null;
+  return next;
+}
+export function prepareModelReading(data, ocr) {
+  let out=data ? {...data} : {};
+  if(ocr?.lines?.length){
+    out.storeClues=mergeStoreClues(out.storeClues, readStoreClues(ocr.lines, out.merchant));
+    out=applyStoreReceiptId(out, ocr);
+    out=applyZeroPriceExclusion(out, ocr);
+  }
+  return out;
 }
 
 // Shared clean-up for every reader (on-device OCR and Gemini): 24-hour HH:MM:SS time,

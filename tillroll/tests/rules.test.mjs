@@ -4,9 +4,9 @@ import assert from 'node:assert/strict';
 import {makeOcr} from './ocr-fixture.mjs';
 import {
   normalizePurchaseTime, readPurchaseTime, normalizeTender, readTender, cleanProductCode,
-  nonItemName, readStoreClues, mergeStoreClues, storeReceiptId, classifyZeroPrice, applyZeroPriceExclusion,
+  nonItemName, readStoreClues, mergeStoreClues, storeReceiptId, confirmedStoreReceiptId, classifyZeroPrice, applyZeroPriceExclusion,
 } from '../receipt-rules.js';
-import {extractLocal, cleanReceipt, geminiSchema, geminiPrompt} from '../extract.js';
+import {extractLocal, cleanReceipt, geminiSchema, geminiPrompt, prepareModelReading} from '../extract.js';
 import {checkReceipt, flagCategory} from '../checks.js';
 
 const today = new Date('2026-11-25T12:00:00Z');
@@ -284,4 +284,84 @@ test('flag categories: reading vs lookup vs info', () => {
   assert.equal(flagCategory({severity: 'info'}), 'info');
   assert.equal(flagCategory({severity: 'check'}), 'reading');
   assert.equal(flagCategory({severity: 'check', category: 'lookup'}), 'lookup');
+});
+
+// ---- Synthetic Harrods layouts (no real receipt text) ----------------------
+test('store id: a found Harrods id is not cleared by a generic ambiguous suggestion', () => {
+  const ocr = makeOcr(['HARRODS', '12/11/2026 14:03 NT01234-567890', 'Scarf 20.00', 'TOTAL GBP 20.00', 'REF AB12CD34']);
+  const data = extractLocal(ocr);
+  assert.equal(data.receiptReference, 'NT01234-567890');
+  assert.equal(confirmedStoreReceiptId('HARRODS', ocr, data.receiptReference), true);
+  assert.equal(confirmedStoreReceiptId('HARRODS', ocr, 'AB12CD34'), false);
+});
+test('Harrods id: NTO and N10 prefixes normalise to NT0 and stay unclear', () => {
+  const oto = storeReceiptId('Harrods', makeOcr(['HARRODS', '12/11/2026 14:03 NTO1234-567890', 'TOTAL 20.00']));
+  assert.equal(oto.value, 'NT01234-567890');
+  assert.equal(oto.status, 'unclear');
+  const n10 = storeReceiptId('Harrods', makeOcr(['HARRODS', '12/11/2026 14:03 N101234-567890', 'TOTAL 20.00']));
+  assert.equal(n10.value, 'NT01234-567890');
+  assert.equal(n10.status, 'unclear');
+  const {review} = read(['HARRODS', '12/11/2026 14:03 NTO1234-567890', 'Scarf 20.00', 'TOTAL GBP 20.00']);
+  const flags = flagsFor(review, 'receiptReference');
+  assert.ok(flags.length && flags.every(f => flagCategory(f) === 'reading'));
+});
+test('items stop at TOTAL: payment lines are not items and genuine zeros are excluded', () => {
+  const {data, review} = read(['HARRODS', '12/11/2026 14:03 NT01234-567890',
+    '1234 9999999001 Silk scarf 20.00', 'Carrier Bag 0.00', 'By Appointment 0.00', 'TOTAL GBP 20.00',
+    'AMOUNT', 'Citcon QR Tendered 20.00', 'UnionPay Tendered 20.00', 'Item Total: 20.00', 'Adyen: 20.00', 'ARQC 99.00']);
+  assert.deepEqual(data.items.map(row => row.item), ['Silk scarf']);
+  assert.equal(data.total, 20);
+  assert.ok(!data.items.some(row => /citcon|unionpay|adyen|arqc|amount|item total/i.test(row.item || '')));
+  const excluded = data.excludedZeroItems.map(row => row.item.item).sort();
+  assert.deepEqual(excluded, ['By Appointment', 'Carrier Bag']);
+  assert.equal(review.flags.filter(f => f.reason === 'doubtful_zero_price' || /zero price/i.test(f.message)).length, 0);
+});
+test('Harrods line: concession, internal code, style and EAN stay out of itemId', () => {
+  const {data} = read(['HARRODS', '12/11/2026 14:03 NT01234-567890',
+    '1234 9999999001 CHANEL A12345 Wool coat 85.00', 'Product Info: 5001111222333',
+    'You have been served today by', 'Alex Example', 'TOTAL GBP 85.00']);
+  assert.equal(data.items.length, 1);
+  const item = data.items[0];
+  assert.equal(item.concessionCode, '1234');
+  assert.equal(item.internalCode, '9999999001');
+  assert.equal(item.styleRef, 'A12345');
+  assert.equal(item.ean, '5001111222333');
+  assert.equal(item.item, 'CHANEL Wool coat');
+  assert.equal(item.itemId, null);
+  assert.notEqual(item.brand, 'Alex Example');
+  assert.ok(!/alex example/i.test([item.brand, item.item, item.concessionCode].filter(Boolean).join(' ')));
+});
+test('storeClues: a Harrods till number is not a phone and policy text is not an address', () => {
+  const lines = makeOcr(['HARRODS', 'Scarf 20.00', 'TOTAL GBP 20.00', '1000-000111',
+    'Please return goods. pl Ln policy applies.']).lines;
+  const clues = readStoreClues(lines, 'Harrods');
+  assert.equal(clues.phone, null);
+  assert.deepEqual(clues.addressLines, []);
+});
+test('receipt discount: a saving after TOTAL and before balance due is not a line flag', () => {
+  const {data, review} = read(['SHOP', 'Date 12/11/2026 11:03', 'Soup 10.00', 'TOTAL 8.80', 'Fruit Offer -1.20', 'BALANCE DUE 8.80']);
+  assert.equal(data.items.length, 1);
+  assert.equal(data.items[0].amount, 10);
+  assert.equal(data.receiptDiscount, 1.2);
+  assert.deepEqual(data.receiptDiscounts, [{label: 'Fruit Offer', amount: 1.2}]);
+  assert.equal(review.flags.filter(f => /discount line unclear/i.test(f.message)).length, 0);
+});
+test('line discount: trailing OCR junk is kept, folded when it reconciles, flagged when it does not', () => {
+  const folded = read(['MAC', 'Date 12/11/2026 11:03', 'Foundation 1 45.00 31.50', 'BLACK FRIDAY WEEK OFFER -13.50 wile', 'TOTAL 31.50']);
+  assert.equal(folded.data.items.length, 1);
+  assert.equal(folded.data.items[0].lineDiscount, 13.5);
+  assert.equal(folded.data.items[0].amount, 31.5);
+  const raw = read(['MAC', 'Date 12/11/2026 11:03', 'Foundation 1 45.00 40.00', 'BLACK FRIDAY WEEK OFFER -13.50 wile', 'TOTAL 40.00']);
+  assert.equal(raw.data.items.length, 2);
+  assert.equal(raw.data.items[1].amount, -13.5);
+  assert.match(raw.data.items[1].item, /BLACK FRIDAY WEEK OFFER/);
+  const flags = raw.review.flags.filter(f => /discount line unclear/i.test(f.message));
+  assert.ok(flags.length && flags.every(f => flagCategory(f) === 'reading'));
+  assert.equal(raw.data.receiptDiscount, null);
+});
+test('Gemini reading: the store rule replaces a generic Harrods id', () => {
+  const ocr = makeOcr(['HARRODS', '12/11/2026 14:03 NT01234-567890', 'Scarf 20.00', 'TOTAL GBP 20.00']);
+  const out = prepareModelReading({merchant: 'Harrods', receiptReference: 'AB12CD34', items: [{item: 'Scarf', amount: 20}], storeClues: {phone: '020 7000 0000'}}, ocr);
+  assert.equal(out.receiptReference, 'NT01234-567890');
+  assert.equal(out.storeClues.phone, '020 7000 0000');
 });

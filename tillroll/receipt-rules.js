@@ -246,14 +246,19 @@ export function readStoreClues(lines, merchant = null) {
     const phone = phonePattern.exec(text);
     const phoneDigits = phone ? digitsOf(phone[1]) : '';
     const labelledPhone = phone && /\b(?:tel|phone|telephone|tél|téléphone|telefon)\b/i.test(text);
+    // A Harrods till number (NT… or the same digits as ####-######) is not a telephone.
     const phoneShaped = phone && phoneDigits.length >= 9 && phoneDigits.length <= 13 &&
-      (labelledPhone || /^\s*(?:\+|\(?0)\d/.test(phone[1])) && !/\d[.,]\d{2}\b/.test(text);
+      (labelledPhone || /^\s*(?:\+|\(?0)\d/.test(phone[1])) && !/\d[.,]\d{2}\b/.test(text) &&
+      !/^\d{4}-\d{6}$/.test(phone[1].replace(/\s+/g, '')) && !/\bNT[0O1]\d/i.test(text);
     if (!clues.phone && phoneShaped) clues.phone = phone[1].trim();
     const uk = ukPostcode.exec(text.toUpperCase()), us = usZip.exec(text), eu = euPostcode.exec(text.trim());
     const postcode = uk?.[1] || us?.[1] || eu?.[1] || null;
     if (!clues.postcode && postcode && !headerStop.test(text.replace(ukPostcode, ''))) clues.postcode = postcode;
-    const address = (postcode && !headerStop.test(text)) ||
-      (streetWords.test(text) && /\d|\b[A-Z][a-z]+\b/.test(text) && !headerStop.test(text) && text.length <= 60);
+    const policyLine = /\b(?:return|refund|policy|exchange|warranty|served|appointment|please|goods|customer)\b/i.test(text);
+    const shortStreetOnly = /\b(?:pl|ln|st|rd|ct|dr|sq)\b/i.test(text) && !/\b(?:road|street|avenue|lane|drive|square|place|terrace|way|court|crescent|close|gardens|park|walk|wharf|centre|center|mall|plaza|parade|broadway|boulevard|highway|strasse|straße|platz|chemin|calle)\b/i.test(text);
+    const address = !policyLine && ((postcode && !headerStop.test(text)) ||
+      (streetWords.test(text) && !shortStreetOnly && /\d|\b[A-Z][a-z]+\b/.test(text) && !headerStop.test(text) && text.length <= 60) ||
+      (shortStreetOnly && /\d/.test(text) && /\b[A-Z][a-z]{2,}\s+(?:pl|ln|st|rd|ct|dr|sq)\b/.test(text) && text.length <= 60));
     if (address && loose(text) !== merchantKey && !(phoneShaped && digitsOf(text) === phoneDigits) && !clues.addressLines.includes(text))
       clues.addressLines.push(text);
   }
@@ -341,9 +346,13 @@ export function storeReceiptId(merchant, ocr) {
     const right = idFrom({...line, words: ws.slice(Math.max(dateAt, timeAt) + 1)})
       .filter(w => !hasBox(w) || !hasBox(anchor) || w.x >= anchor.x + anchor.w - .001);
     if (right.length === 1) {
+      const raw = right[0].token.toUpperCase();
+      const corrected = /^NTO(?=\d)/.test(raw) || /^N10(?=\d)/.test(raw);
+      const value = corrected ? 'NT0' + raw.slice(3) : raw;
       const certainty = Number(right[0].confidence ?? line.confidence) || 0;
-      return {rule, status: certainty >= .8 ? 'found' : 'unclear', value: right[0].token, evidence: line.text, certainty,
-        reason: certainty >= .8 ? 'Harrods: the receipt number to the right of the date and time.' : 'Harrods: the number beside the date and time is not clearly legible.'};
+      const clear = !corrected && certainty >= .8;
+      return {rule, status: clear ? 'found' : 'unclear', value, evidence: line.text, certainty,
+        reason: corrected ? 'Harrods: the NT0 prefix was uncertain in the photo and was normalised.' : clear ? 'Harrods: the receipt number to the right of the date and time.' : 'Harrods: the number beside the date and time is not clearly legible.'};
     }
     if (right.length > 1) return {rule, status: 'unclear', value: right.at(-1).token, evidence: line.text, certainty: 0,
       reason: 'Harrods: several codes are printed to the right of the date and time.'};
@@ -351,11 +360,18 @@ export function storeReceiptId(merchant, ocr) {
   return missing('Harrods: no receipt number was found to the right of the date and time.');
 }
 
+// A found store-rule id is owned by that rule. A generic ambiguous suggestion must not clear it.
+export function confirmedStoreReceiptId(merchant, ocr, value) {
+  const storeId = storeReceiptId(merchant, ocr);
+  if (storeId?.status !== 'found' || !storeId.value) return false;
+  return String(value ?? '').trim().toLowerCase() === String(storeId.value).trim().toLowerCase();
+}
+
 // ---------------------------------------------------------------------------
 // True-zero vs OCR-miss. A zero-price line is excluded only when a clear printed
 // 0.00 sits on the product's own row and the receipt still reconciles with it.
 const zeroToken = /(?<![\d.,])0[.,]00(?![\d])|\b(?:free|gratuit|offert|gratis|complimentary|n\/c|no\s+charge)\b/i;
-const zeroReasons = /\b(?:bag|carrier|gift\s*wrap|wrapping|sample|tester|free|complimentary|gratuit|offert|carriage|shipping|delivery|promo|gift|packaging|box|service|experience|consultation)\b/i;
+const zeroReasons = /\b(?:bag|carrier|gift\s*wrap|wrapping|sample|tester|free|complimentary|gratuit|offert|carriage|shipping|delivery|promo|gift|packaging|box|service|experience|consultation|appointment)\b/i;
 const isZero = v => v != null && Number(v) === 0;
 const near = (a, b) => Math.abs(a - b) <= .02;
 function receiptBalances(data) {
@@ -364,7 +380,7 @@ function receiptBalances(data) {
   const amounts = (data.items || []).map(i => i.amount);
   if (amounts.some(a => a == null || !Number.isFinite(Number(a)))) return false;
   const sum = amounts.reduce((t, a) => t + Number(a), 0);
-  const discount = Number(data.discount) || 0, tax = Number(data.tax);
+  const discount = Number(data.receiptDiscount ?? data.discount) || 0, tax = Number(data.tax);
   return [sum, sum - discount, ...(Number.isFinite(tax) ? [sum + tax, sum - discount + tax] : [])].some(v => near(v, total));
 }
 function productLineFor(item, lines) {

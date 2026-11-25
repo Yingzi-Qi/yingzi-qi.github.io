@@ -1,9 +1,9 @@
 import {oldestPurchaseFirst,purchaseDateText} from './receipt-date-display.js?v=8';
 import {inspectReference,combineReferenceReadings} from './reference.js?v=6';
-import {readPhoto,secondReadPhoto,extractLocal,extractAI,reconcileReadings,photoFieldConflicts,recoverPhotoItemIds} from './extract.js?v=discounts1';
+import {readPhoto,secondReadPhoto,extractLocal,extractAI,reconcileReadings,photoFieldConflicts,recoverPhotoItemIds,prepareModelReading} from './extract.js?v=discounts1';
 import {checkReceipt,samePurchase,reviewForLine,verifyImportedItemIds} from './checks.js?v=discounts1';
 import {normalizeReading} from './extract.js?v=discounts1';
-import {applyZeroPriceExclusion,normalizePurchaseTime,readStoreClues,mergeStoreClues} from './receipt-rules.js?v=1';
+import {normalizePurchaseTime,confirmedStoreReceiptId} from './receipt-rules.js?v=1';
 import {exportExcel,exportCSV,readOrderFile,readAchungWorkbook,readTillrollEdits} from './exports.js?v=policy1';
 import {planWorkbookRefresh,restoreWorkbookReceipts,nextWorkbookBaseline,withLegacyWorkbookBaseline,nextLegacyWorkbookBaseline} from './workbook-refresh.js?v=2';
 import {bindExcelRefresh} from './excel-refresh-ui.js?v=1';
@@ -88,15 +88,6 @@ function verifyFinalOutput(r) {
 }
 
 // Model and saved readings get the same printed-store clues and true-zero audit as on-device OCR.
-function prepareModelReading(data,ocr) {
-  let out=data;
-  if(ocr?.lines?.length){
-    const printed=readStoreClues(ocr.lines,out.merchant);
-    out={...out,storeClues:mergeStoreClues(out.storeClues,printed)};
-    out=applyZeroPriceExclusion(out,ocr);
-  }
-  return out;
-}
 function zeroPriceNotes(r) {
   const excluded=r.data?.excludedZeroItems || [];
   if(!excluded.length)return;
@@ -132,7 +123,9 @@ function evaluateReceipt(r,fillMissing){
   r.record={...r.data};
   const choice=r.confirmedReference;
   const competing=choice?.values || (r.reference.suggestion ? r.reference.candidates.map(c=>c.value) : []);
+  const storeOwned=confirmedStoreReceiptId(r.data.merchant, ocr, r.data.receiptReference);
   for(const key of Object.keys(referenceLabels)){
+    if(storeOwned && key==='receiptReference') continue;
     if(!r.editedReferences?.has(key) && competing.some(value=>sameReference(value,r.data[key]))) r.record[key]=null;
   }
   if(choice){
@@ -144,7 +137,7 @@ function evaluateReceipt(r,fillMissing){
   const ref=r.reference;
   // Duplicate detection can use printed or manually accepted IDs, independently of an imported list.
   r.duplicateRecord={...r.record};
-  if(ref.status==='found' && !r.record[ref.kind] && !r.editedReferences?.has(ref.kind))
+  if(ref.status==='found' && !r.record[ref.kind] && !r.editedReferences?.has(ref.kind) && !(storeOwned && ref.kind==='receiptReference'))
     r.record[ref.kind]=ref.value;
   r.review=checkReceipt(r.record,ocr,r.previous||null,{...confidenceOptions(r),reference:ref,orders:orderList,demoFormats:r.demo?.set==='demo'});
   if(r.origin==='workbook' && !ocr.text){
