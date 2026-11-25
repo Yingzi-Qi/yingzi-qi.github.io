@@ -55,6 +55,9 @@ export function batchDateFlags(receipts, {uploadTime = new Date(), locks} = {}) 
   }
   let mode = null, modeCount = 0;
   for (const [key, count] of counts) if (count > modeCount) { mode = key; modeCount = count; }
+  // A different shopping month is not a reading error. The month test runs only
+  // when one month is a strict majority, and only to explain a day/month swap.
+  const strictMajority = dated.length >= 3 && modeCount * 2 > dated.length;
   const middle = median(dated.map(row => row.parsed.time));
   const upload = uploadTime instanceof Date ? uploadTime : new Date(uploadTime);
   const uploadTimeMs = upload.getTime();
@@ -65,10 +68,9 @@ export function batchDateFlags(receipts, {uploadTime = new Date(), locks} = {}) 
     if (locked(row.receipt, cleared)) continue;
     const reasons = [];
     const month = row.parsed.year + '-' + pad(row.parsed.month);
-    if (dated.length >= 3 && month !== mode) {
+    if (strictMajority && month !== mode) {
       const swapped = swappedDayMonth(row.parsed);
       if (swapped && swapped.slice(0, 7) === mode) reasons.push('possible DD/MM swap; would be ' + swapped);
-      else reasons.push('month differs from the majority month');
     }
     if (Math.abs(row.parsed.time - middle) / DAY > 45) reasons.push('far from the rest of the batch');
     if (Number.isFinite(uploadTimeMs) && row.parsed.time > uploadTimeMs) reasons.push('future date');

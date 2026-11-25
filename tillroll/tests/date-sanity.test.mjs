@@ -32,6 +32,11 @@ test('batch dates: a 2019 date is long ago', () => {
   assert.match(flag.message, /far from the rest of the batch/);
 });
 
+test('batch dates: another month inside the window is not a reading error', () => {
+  const flags = batchDateFlags([...nov, {id: 'dec', date: '2026-12-01'}], {uploadTime: '2026-12-15T12:00:00Z'});
+  assert.deepEqual(flags, []);
+});
+
 test('batch dates: two receipts do not run the month test', () => {
   const flags = batchDateFlags([
     {id: 'one', date: '2026-11-20'},
