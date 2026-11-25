@@ -32,6 +32,26 @@ test('batch dates: a 2019 date is long ago', () => {
   assert.match(flag.message, /far from the rest of the batch/);
 });
 
+test('batch dates: no strict majority and a same-day London receipt are quiet', () => {
+  const split = batchDateFlags([
+    {id: 'n1', date: '2026-11-02'},
+    {id: 'n2', date: '2026-11-03'},
+    {id: 'd1', date: '2026-12-02'},
+    {id: 'd2', date: '2026-12-03'},
+  ], {uploadTime: '2026-12-15T12:00:00Z'});
+  assert.deepEqual(split, []);
+  const units = checkBatchDateOutliers([
+    {rowId: 'u1', receiptKey: 'one', date: '2026-04-11'},
+    {rowId: 'u2', receiptKey: 'one', date: '2026-04-11'},
+    {rowId: 'u3', receiptKey: 'one', date: '2026-04-11'},
+  ], {now: '2026-11-25T12:00:00Z'});
+  assert.deepEqual(units, []);
+  const sameDay = batchDateFlags([
+    {id: 'today', date: '2026-06-15'},
+  ], {uploadTime: '2026-06-15T00:30:00+01:00'});
+  assert.equal(sameDay.some(flag => /future/.test(flag.message)), false);
+});
+
 test('batch dates: two receipts do not run the month test', () => {
   const flags = batchDateFlags([
     {id: 'one', date: '2026-11-20'},
