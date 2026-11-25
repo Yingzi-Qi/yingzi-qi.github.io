@@ -24,8 +24,9 @@
 import * as zipPackage from './export-vendor/jszip.min.js';
 import { expandReceipt, joinPurchaseTime, round2, saleAmount, supplierVisibleName } from './units.js';
 import { ALLOWED_TENDERS, TENDER_REASON, normaliseTender } from './tender.js';
+import { withoutCardDigits } from './exports.js';
 
-const JSZip = zipPackage.default ?? zipPackage ?? globalThis.JSZip;
+const JSZip = zipPackage.default ?? globalThis.JSZip;
 const MAIN = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
 const REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 const PACKAGE = 'http://schemas.openxmlformats.org/package/2006/relationships';
@@ -93,14 +94,13 @@ function agreedList(input) {
   return [];
 }
 
-// P4 tender first, then the card-digit backstop, on every row (receipts and
+// P4 tender first, then PR #1's card-digit backstop, on every row (receipts and
 // agreedRows / Round 2). Flags for cash/empty are applied in receiptToRows
 // (and already by the server); this step only rewrites the cell value.
-// TODO(#1): switch to maskCardField from item-identifiers.js once PR #1 is on main.
 function maskPaymentRow(row) {
   const v = row?.cells?.['采购商品方法'];
   const tender = normaliseTender(v);
-  const masked = typeof tender === 'string' ? tender.replace(/\d/g, '*') : tender;
+  const masked = tender == null || tender === '' ? tender : withoutCardDigits(tender);
   if (masked === (v ?? null) || (masked == null && (v == null || v === ''))) return row;
   return { ...row, cells: { ...row.cells, '采购商品方法': masked } };
 }

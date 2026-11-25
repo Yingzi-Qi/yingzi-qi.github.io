@@ -2,6 +2,7 @@ import {orderNeedsReview} from './orders.js?v=lineverify1';
 import {reviewForLine} from './checks.js?v=productcodes3';
 import {validateOrderPatterns} from './retail-rules.js?v=6';
 import {parsePrintedItemId} from './product-code.js?v=productcodes3';
+import {maskCardField} from './item-identifiers.js';
 import * as zipPackage from './export-vendor/jszip.min.js';
 import { normaliseTender } from './tender.js';
 
@@ -53,24 +54,19 @@ const chinaColumns = [
 ];
 const refreshReceiptHeader='Tillroll receipt key', refreshLineHeader='Tillroll line key';
 const baselineHeader='Tillroll original values';
-// Card guard (local merge resolution). No exported cell, hidden English
-// detailed column, baseline JSON or CSV field may carry card digits.
-// TODO(#1): switch to maskCardField from item-identifiers.js once PR #1 is on main,
-// and drop this local helper.
-const CARD_FIELDS=new Set(['card','payment']);
-export function maskCardDigits(value) {
-  if (value===null || value===undefined || value==='') return value;
-  return String(value).replace(/\d/g,'*');
+// Card backstop from PR #1. P4 normaliseTender runs first; these helpers then
+// strip a remaining card number so no card digits are written.
+export function withoutCardDigits(value) {
+  return String(value ?? '').replace(/\d[\d\s-]{11,}\d/g, ' ').replace(/\s+/g, ' ').trim();
+}
+export function safeCardValue(value) {
+  return String(maskCardField(value) ?? '').replace(/\d/g, '');
 }
 function maskedReceiptData(data) {
   if (!data || typeof data!=='object') return data;
   const out={...data};
-  for (const key of CARD_FIELDS) {
-    if (!(key in out)) continue;
-    // P4 tender first, then the digit backstop. TODO(#1) stays on maskCardDigits.
-    const raw=key==='payment' ? (normaliseTender(out[key]) ?? out[key]) : out[key];
-    out[key]=maskCardDigits(raw);
-  }
+  if ('payment' in out) out.payment=withoutCardDigits(normaliseTender(out.payment) ?? '');
+  if ('card' in out) out.card=safeCardValue(out.card);
   return out;
 }
 const editableColumns=receiptColumns.filter(([, ,scope='receipt'])=>scope==='receipt' || scope==='line');
@@ -122,10 +118,11 @@ function exportData(receipts,includeRefresh=false) {
       const cells=columns.map(([,key,source='receipt',type]) => {
         let value = sources[source]?.[key] ?? '';
         if (source==='receipt' && key==='payment') value=normaliseTender(value) ?? '';
-        if (source==='receipt' && CARD_FIELDS.has(key)) value=maskCardDigits(value) ?? '';
         const numeric = type && value !== '' && Number.isFinite(Number(value));
         value = numeric ? Number(value) : String(value);
-      if (baseline && (source==='receipt' || source==='line')) {
+        if (key==='card') value = safeCardValue(value);
+        else if (key==='payment' && !numeric) value = withoutCardDigits(value);
+        if (baseline && (source==='receipt' || source==='line')) {
           const saved=numeric ? value : value.slice(0,32767).replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]/g,'');
           baseline[source][key]=saved==='' ? null : saved;
         }
@@ -262,9 +259,10 @@ function chinaExportData(receipts) {
         let value='';
         if(scope==='receipt') value=key==='purchaseTime' ? purchaseTimeValue(r.data) : (key==='orderNumber' ? receiptId : r.data[key]??'');
         if(scope==='receipt' && key==='payment') value=normaliseTender(value) ?? '';
-        if(scope==='receipt' && CARD_FIELDS.has(key)) value=maskCardDigits(value) ?? '';
         else if(scope==='line') value=line[key]??'';
-        else if(scope==='derived' && key==='saleAmount') value=saleAmountValue(line);
+        if(key==='payment') value=withoutCardDigits(value);
+        if(key==='card') value=safeCardValue(value);
+        if(scope==='derived' && key==='saleAmount') value=saleAmountValue(line);
         const numeric=type && value!=='' && Number.isFinite(Number(value));
         return {value:numeric?Number(value):String(value),numeric,style:type==='money'?3:0};
       });

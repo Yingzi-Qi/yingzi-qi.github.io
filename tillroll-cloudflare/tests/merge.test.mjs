@@ -47,10 +47,13 @@ async function assertWorkbookClean(label, blob) {
   return parts;
 }
 
-test('maskCardDigits replaces every digit', () => {
-  assert.equal(ex.maskCardDigits(SYN_PAYMENT), 'VISA ********');
-  assert.ok(!/\d/.test(ex.maskCardDigits(SYN_CARD)));
-  assert.equal(ex.maskCardDigits(null), null);
+test('P4 tender runs before the card-digit backstop', async () => {
+  const { normaliseTender } = await import('../../tillroll/tender.js');
+  const tender = normaliseTender(SYN_PAYMENT);
+  assert.equal(tender, 'Card');
+  assert.equal(ex.withoutCardDigits(tender), 'Card');
+  assert.ok(!/\d/.test(ex.safeCardValue(SYN_CARD)));
+  assert.equal(ex.safeCardValue(null), '');
 });
 
 test('no card digits in the v2 export (Export Excel), any sheet, comment or baseline', async () => {
@@ -80,7 +83,7 @@ test('no card digits in the legacy English paths still reachable (CSV, legacy ch
   // The hidden English detailed columns and the baseline JSON are present and masked.
   const sheet = parts['xl/worksheets/sheet1.xml'];
   assert.ok(sheet.includes('Tillroll original values') && sheet.includes('Card'));
-  assert.ok(sheet.includes('****************'), 'card column is written masked');
+  assert.ok(sheet.includes('[card]') && !sheet.includes(SYN_CARD), 'card column is written masked');
 });
 
 test('中文 Excel produces the v2 contract: 10 visible headers, hidden K:R, Pink/Amber only, no #FFEDC0', async () => {

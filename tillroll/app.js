@@ -1,7 +1,9 @@
 import {oldestPurchaseFirst,purchaseDateText} from './receipt-date-display.js?v=8';
 import {inspectReference,combineReferenceReadings} from './reference.js?v=6';
-import {readPhoto,secondReadPhoto,extractLocal,extractAI,reconcileReadings,photoFieldConflicts,recoverPhotoItemIds} from './extract.js?v=curatedphotos1';
-import {checkReceipt,samePurchase,reviewForLine,verifyImportedItemIds} from './checks.js?v=productcodes3';
+import {readPhoto,secondReadPhoto,extractLocal,extractAI,reconcileReadings,photoFieldConflicts,recoverPhotoItemIds,prepareModelReading,normalizeReading} from './extract.js?v=discounts1';
+import {checkReceipt,samePurchase,reviewForLine,verifyImportedItemIds} from './checks.js?v=discounts1';
+import {normalizePurchaseTime,confirmedStoreReceiptId} from './receipt-rules.js?v=1';
+import {batchDateFlags} from './date-sanity.js?v=1';
 import {exportExcel,exportChinaExcel,exportCSV,readOrderFile,readAchungWorkbook,readTillrollEdits} from './exports.js?v=merge1';
 import {planWorkbookRefresh,restoreWorkbookReceipts,nextWorkbookBaseline,withLegacyWorkbookBaseline,nextLegacyWorkbookBaseline} from './workbook-refresh.js?v=history2';
 import {bindExcelRefresh} from './excel-refresh-ui.js?v=1';
@@ -26,7 +28,7 @@ let referenceHash=null,referenceRevision=0;
 const excelBaselines=new Map();
 const legacyBaselines=new Map();
 const emptyOCR=()=>({text:'',confidence:0,lines:[]});
-const blankItem=()=>({brand:'',item:'',sku:'',itemId:'',colour:'',size:'',qty:null,unitPrice:null,amount:null});
+const blankItem=()=>({brand:'',item:'',sku:'',itemId:'',colour:'',size:'',qty:null,unitPrice:null,amount:null,lineDiscount:null,lineDiscountLabel:null,lineDiscounts:null});
 const referenceLabels={orderId:'Order ID',orderNumber:'Order number',receiptReference:'Receipt reference'};
 const sameReference=(a,b)=>String(a??'').trim().toLowerCase()===String(b??'').trim().toLowerCase();
 const get=(obj,key)=>key.split('.').reduce((v,k)=>v?.[k],obj);
@@ -95,7 +97,16 @@ function verifyFinalOutput(r) {
   });
 }
 
+// Model and saved readings get the same printed-store clues and true-zero audit as on-device OCR.
+function zeroPriceNotes(r) {
+  const excluded=r.data?.excludedZeroItems || [];
+  if(!excluded.length)return;
+  const note='Excluded '+excluded.length+' confirmed zero-price line'+(excluded.length===1?'':'s')+' from the table and export: '+
+    excluded.map(z=>[z.item?.brand,z.item?.item||z.item?.itemId||z.item?.sku].filter(Boolean).join(' ')||'unnamed line').join(', ')+'.';
+  r.notes=[...(r.notes||[]).filter(n=>!n.startsWith('Excluded ')),note];
+}
 function finalizeOutput(r) {
+  zeroPriceNotes(r);
   r.priorLineChecks=captureLineWarnings(r);
   verifyFinalOutput(r);
   historyRecordReading(r);
@@ -105,6 +116,7 @@ function evaluate(r, fillMissing=false) {
   if (!r.data) return;
   evaluateReceipt(r,fillMissing);
   if (r.priorLineChecks) verifyFinalOutput(r);
+  applyBatchDateSanity();
 }
 
 function evaluateReceipt(r,fillMissing){
@@ -123,7 +135,9 @@ function evaluateReceipt(r,fillMissing){
   r.record={...r.data};
   const choice=r.confirmedReference;
   const competing=choice?.values || (r.reference.suggestion ? r.reference.candidates.map(c=>c.value) : []);
+  const storeOwned=[ocr, other].filter(Boolean).some(pass=>confirmedStoreReceiptId(r.data.merchant, pass, r.data.receiptReference));
   for(const key of Object.keys(referenceLabels)){
+    if(storeOwned && key==='receiptReference') continue;
     if(!r.editedReferences?.has(key) && competing.some(value=>sameReference(value,r.data[key]))) r.record[key]=null;
   }
   if(choice){
@@ -135,7 +149,7 @@ function evaluateReceipt(r,fillMissing){
   const ref=r.reference;
   // Duplicate detection can use printed or manually accepted IDs, independently of an imported list.
   r.duplicateRecord={...r.record};
-  if(ref.status==='found' && !r.record[ref.kind] && !r.editedReferences?.has(ref.kind))
+  if(ref.status==='found' && !r.record[ref.kind] && !r.editedReferences?.has(ref.kind) && !(storeOwned && ref.kind==='receiptReference'))
     r.record[ref.kind]=ref.value;
   r.review=checkReceipt(r.record,ocr,r.previous||null,{...confidenceOptions(r),reference:ref,orders:orderList,demoFormats:r.demo?.set==='demo'});
   if(r.origin==='workbook' && !ocr.text){
@@ -146,7 +160,7 @@ function evaluateReceipt(r,fillMissing){
   if(r.origin==='ai' && ocr.text) {
     for(const issue of photoFieldConflicts(r.record,ocr)) extra.push({...issue,stage:'Model compared with photo OCR'});
   }
-  if(r.verifyIssue)extra.push({field:'verification',message:r.verifyIssue,severity:'check',escalate:false});
+  if(r.verifyIssue)extra.push({field:'verification',message:r.verifyIssue,severity:'check',escalate:false,category:'reading',kind:'reading'});
   for(const issue of extra){
     if(choice && issue.field===choice.kind)continue;
     if(!r.review.flags.some(f=>f.field===issue.field && f.message===issue.message))r.review.flags.push(issue);
@@ -177,7 +191,22 @@ function startInput(entries, useSaved=savedSamples){
   }
   filter='all';render();pump();
 }
-function pump(){while(nowReading<2 && queue.length){const r=queue.shift();if(r.generation!==generation)continue;nowReading++;run(r).finally(()=>{nowReading--;if(!queue.length&&!batch.some(notDone))finishedTime=Date.now();render();pump();});}}
+function applyBatchDateSanity(){
+  if(batch.some(notDone))return;
+  const flags=batchDateFlags(batch.filter(r=>r.data).map(r=>({
+    id:r.id, date:r.data.date,
+    humanVerifiedUnflagged:[...(r.ack||[])].some(key=>String(key).startsWith('purchaseTime')) ? ['purchaseTime'] : [],
+  })), {uploadTime:new Date()});
+  const byId=new Map(flags.map(flag=>[flag.id, flag]));
+  for(const r of batch){
+    if(!r.review?.flags)continue;
+    r.review.flags=r.review.flags.filter(flag=>flag.source!=='batch-date');
+    const flag=byId.get(r.id);
+    if(!flag || [...(r.ack||[])].some(key=>String(key).startsWith('purchaseTime')))continue;
+    r.review.flags.push({field:'purchaseTime', message:flag.message, severity:'check', escalate:true, category:'reading', kind:'reading', source:'batch-date'});
+  }
+}
+function pump(){while(nowReading<2 && queue.length){const r=queue.shift();if(r.generation!==generation)continue;nowReading++;run(r).finally(()=>{nowReading--;if(!queue.length&&!batch.some(notDone)){finishedTime=Date.now();applyBatchDateSanity();}render();pump();});}}
 async function fingerprint(file){const b=new Uint8Array(await crypto.subtle.digest('SHA-256',await file.arrayBuffer()));return Array.from(b,n=>n.toString(16).padStart(2,'0')).join('');}
 async function run(r){
   const begun=performance.now();const current=()=>r.generation===generation&&batch.includes(r);const {mode:chosenMode,key:chosenKey}=r.readerSettings;delete r.readerSettings;
@@ -186,7 +215,7 @@ async function run(r){
     const owner=hashOwners.get(r.hash);
     if(owner && owner!==r.id){r.exactOf=owner;r.duplicateOf=owner;r.state='duplicate';return;}
     hashOwners.set(r.hash,r.id);
-    if(r.useSaved){r.data=normalData(structuredClone(r.demo.data));r.ocr=r.demo.ocr;r.otherOcr=r.demo.referenceOcr;r.origin='sample';r.method='Saved reading';}
+    if(r.useSaved){r.data=normalData(normalizeReading(structuredClone(r.demo.data)));r.ocr=r.demo.ocr;r.otherOcr=r.demo.referenceOcr;r.origin='sample';r.method='Saved reading';}
     else{
       const modelEnabled=chosenMode==='server'&&!!chosenKey;
       const [ocrRead,aiRead]=await Promise.allSettled([readPhoto(r.file),modelEnabled?extractAI(r.file,chosenKey,1,[]):Promise.resolve(null)]);if(!current())return;
@@ -196,7 +225,7 @@ async function run(r){
       else if(r.ocr.text){r.data=normalData(extractLocal(r.ocr));r.origin='local';r.method='Local OCR';if(modelEnabled)r.notes.push('Gemini was unavailable. This result uses on-device OCR.');}
       else throw new Error('No readable extraction. Try a brighter, sharper photo or check the reader settings.');
     }
-    if (r.origin==='ai' || r.origin==='sample') r.data=recoverPhotoItemIds(r.data,r.ocr);
+    if (r.origin==='ai' || r.origin==='sample') r.data=prepareModelReading(recoverPhotoItemIds(r.data,r.ocr),r.ocr);
     r.firstData=structuredClone(r.data);evaluate(r);
     const failures=r.review.flags.filter(f=>f.escalate);const hasPhotoIssues=r.review.photo.some(p=>p.status==='Needs review');
     const orderIssue=r.orders?.some(orderNeedsReview);
@@ -212,7 +241,7 @@ async function run(r){
       try{
         let next;
         if(r.usedAI){
-          next=recoverPhotoItemIds(await extractAI(r.file,chosenKey,2,r.reasons),r.ocr);
+          next=prepareModelReading(recoverPhotoItemIds(await extractAI(r.file,chosenKey,2,r.reasons),r.ocr),r.ocr);
         }else{
           const other=await secondReadPhoto(r.file);
           if(!current())return;
@@ -392,6 +421,7 @@ function updateReceiptFields(r,data,removeIndex=null){
     }));
   }
   if(data.date!==r.record.date)delete data.dateIssue;
+  if(data.time!==r.record.time){const time=normalizePurchaseTime(data.time);if(time)data.time=time;}
   r.readingConflicts=(r.readingConflicts||[]).filter(f=>JSON.stringify(get(data,f.field))===JSON.stringify(get(r.record,f.field)));
   if(data.merchant!==r.data.merchant || (r.confirmedReference && data[r.confirmedReference.kind]!==r.record[r.confirmedReference.kind]))r.confirmedReference=null;
   for(const key of Object.keys(referenceLabels)){
@@ -411,7 +441,7 @@ function updateReceiptFields(r,data,removeIndex=null){
 }
 async function openDetail(id,path=''){
   const r=batch.find(x=>x.id===Number(id));if(!r)return;
-  const {showDetail}=await import('./detail.js?v=curatedphotos1');
+  const {showDetail}=await import('./detail.js?v=discounts1');
   const refresh=()=>{duplicates();render();};
   const rerender=(focus='')=>{refresh();openDetail(r.id,focus).catch(e=>note(e.message));};
   showDetail({...r,data:r.record||r.data},{
