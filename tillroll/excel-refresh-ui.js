@@ -71,5 +71,7 @@ export function bindExcelRefresh({hasBatch,prepare,finish,onLinkChange}) {
   };
   element('open-tillroll').onclick=element('change-refresh').onclick=open;
   dialog.addEventListener('close',()=>{revision++;pending=null;});
+  // Tillroll v2: Linked Workbooks (Google Drive) feed the same refresh path.
+  if(window.tillrollV2Hooks)window.tillrollV2Hooks.refreshFromFile=file=>{open();return read(file);};
   return ()=>{linked=null;onLinkChange(null);};
 }
