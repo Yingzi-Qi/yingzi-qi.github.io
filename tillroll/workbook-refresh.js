@@ -151,13 +151,14 @@ export function planWorkbookRefresh(batch,{rows}) {
     if (missing) throw new Error('Excel is missing an item row for '+receipt.filename+'. Restore the row or export the current batch.');
     const receiptChanges=fieldChanges(groupRows,'receipt',receiptFields,currentReceipt(receipt));
     const itemChanges=[];
+    const clearedFields=[...new Set(groupRows.flatMap(row=>row.clearedFields||[]))];
     for (const [index,row] of lines) {
       if (index===-1) continue;
       const fields=fieldChanges([row],'line',itemFields,receipt.data.items[index]);
       if (Object.keys(fields).length) itemChanges.push({index,fields});
     }
-    if (Object.keys(receiptChanges).length || itemChanges.length)
-      plans.push({receipt,receiptChanges,itemChanges});
+    if (Object.keys(receiptChanges).length || itemChanges.length || clearedFields.length)
+      plans.push({receipt,receiptChanges,itemChanges,clearedFields});
   }
   return plans;
 }
@@ -267,6 +268,7 @@ export function restoreWorkbookReceipts({rows}) {
     const first=group[0];
     const data=effectiveReceipt(group);
     const items=[];
+    const manualClears=[...new Set(group.flatMap(row=>row.clearedFields||[]))];
     let emptyLineRefreshKey=null;
     for (const row of group) {
       const hasItem=Object.keys(itemFields).some(key=>nullable(row.line[key])!==null);
@@ -280,7 +282,7 @@ export function restoreWorkbookReceipts({rows}) {
         items.push(item);
       }
     }
-    restored.push({filename:first.filename,refreshKey:first.receiptKey,emptyLineRefreshKey,data:{...data,items}});
+    restored.push({filename:first.filename,refreshKey:first.receiptKey,emptyLineRefreshKey,manualClears,data:{...data,items}});
   }
   return restored;
 }

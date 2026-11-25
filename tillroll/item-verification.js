@@ -155,6 +155,15 @@ function differentOrderId(item,id,rows,source) {
 export function verifyOutputItems(receipt,orders=[],photoLines=[]) {
   const order=scopeOrders(receipt,orders || []);
   return (receipt.items || []).map(item=>{
+    // A complete receipt line does not need an independent product lookup.
+    // Keep the receipt values as the source of truth until a missing field is
+    // supplied in Excel or through the detail editor.
+    const actualPrice=item.amount ?? item.unitPrice;
+    if (text(item.brand) && text(item.item) && Number.isFinite(Number(actualPrice))) {
+      return {status:'verified',source:'Receipt reading',
+        reason:'Brand, item name and price are present on the receipt. Independent lookup skipped.',
+        fields:[],kind:'lookup',skipped:true};
+    }
     const id=text(item.itemId);
     if (!id) return summarize([],['The output has no item ID to look up.']);
     const orderRows=order.rows.filter(row=>text(row.item_id)===id);
