@@ -100,6 +100,9 @@ function exportData(receipts,includeRefresh=false) {
           const saved=numeric ? value : value.slice(0,32767).replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]/g,'');
           baseline[source][key]=saved==='' ? null : saved;
         }
+        // 采购商品方法 is the four-value method. The refresh baseline keeps the raw tender.
+        if (key==='payment' && source==='receipt') value = sources.receipt?.paymentMethod ?? '';
+        if (key==='card') value = String(value).replace(/\d/g, '•');
         const field = source === 'line' ? prefix+key : key;
         const fieldFlags=flags.filter(f=>f.field===field);
         if (imported && fieldFlags.length && (source==='receipt' || source==='line')) {

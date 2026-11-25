@@ -73,11 +73,11 @@ const tenders = [
   ['Samsung Pay', /\bsamsung\s*pay\b/i, 1],
   ['PayPal', /\bpay\s*pal\b/i, 1],
   ['Klarna', /\bklarna\b/i, 1],
-  ['UnionPay', /\b(?:union\s*pay|china\s+union\s*pay)\b|银联/i, 2],
+  ['UnionPay', /\b(?:union\s*pay|china\s+union\s*pay|\bcup\b)\b|银联/i, 2],
   ['Amex', /\b(?:amex|american\s+express)\b/i, 2],
   ['Diners Club', /\bdiners(?:\s+club)?\b/i, 2],
   ['JCB', /\bjcb\b/i, 2],
-  ['Discover', /\bdiscover\s+card\b/i, 2],
+  ['Discover', /\bdiscover(?:\s+card)?\b/i, 2],
   ['Maestro', /\bmaestro\b/i, 2],
   ['Mastercard', /\b(?:master\s*card|debit\s+master\s*card|mc\s+debit)\b/i, 2],
   ['Visa', /\bvisa(?:\s+(?:debit|credit|electron))?\b/i, 2],
@@ -101,6 +101,71 @@ export function normalizeTender(value) {
   if (/^cb$/i.test(text)) return {tender: 'Carte Bancaire', channel: false, known: true};
   if (/^(?:carte|card)$/i.test(text)) return {tender: 'Card', channel: false, known: true};
   return {tender: text, channel: false, known: false};
+}
+
+// 采购商品方法 is exactly one of these four spellings. UnionPay is matched before
+// any generic card scheme. Cash, gift cards, wallets and anything unreadable stay null.
+const paymentMethodNames = new Map([
+  ['unionpay', 'UnionPay'], ['alipay', 'Alipay'], ['wechat', 'WeChat'],
+  ['visa', 'Card'], ['mastercard', 'Card'], ['maestro', 'Card'], ['amex', 'Card'],
+  ['dinersclub', 'Card'], ['jcb', 'Card'], ['discover', 'Card'], ['cartebancaire', 'Card'], ['card', 'Card'],
+]);
+export function toPaymentMethod(value) {
+  const text = clean(value);
+  if (!text) return {method: null, reason: 'No payment tender was read.'};
+  if (/\b(?:union\s*pay|china\s+union\s*pay|\bcup\b)\b|银联/i.test(text)) return {method: 'UnionPay', reason: null};
+  if (/\balipay\b|支付宝/i.test(text)) return {method: 'Alipay', reason: null};
+  if (/\b(?:we\s*chat(?:\s*pay)?|weixin(?:\s*pay)?)\b|微信/i.test(text)) return {method: 'WeChat', reason: null};
+  if (/\b(?:gift\s*card|gift\s*voucher|cash|apple\s*pay|google\s*pay|samsung\s*pay|pay\s*pal|klarna)\b/i.test(text))
+    return {method: null, reason: 'The tender “' + text + '” is not UnionPay, Card, Alipay or WeChat.'};
+  if (paymentMethodNames.get(loose(text)) === 'Card' || /\b(?:visa|master\s*card|maestro|amex|american\s+express|discover|jcb|diners|carte\s+(?:bleue|bancaire)|\bcb\b|credit\s+card|debit\s+card|contactless|chip(?:\s*(?:&|and)\s*pin)?|eftpos)\b/i.test(text))
+    return {method: 'Card', reason: null};
+  return {method: null, reason: 'The tender “' + text + '” is not UnionPay, Card, Alipay or WeChat.'};
+}
+
+// Drop a printed card number or last-4 from tender text. The tender name itself stays.
+export function dropCardDigits(value) {
+  return clean(value)
+    .replace(/\b\d{12,19}\b/g, ' ')
+    .replace(/\b(?:ending(?:\s+in)?|last\s*4)\s*[:#]?\s*\d{2,4}\b/gi, ' ')
+    .replace(/(?:[*•xX]{2,})\s*\d{2,4}/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+const storeInternalCode = code => {
+  const compact = clean(code).replace(/\s+/g, '');
+  return /^\d{10}$/.test(compact) || /^9999999\d{3}$/.test(compact);
+};
+const eanCode = code => /^\d{13}$/.test(clean(code).replace(/\s+/g, ''));
+
+// 品牌货号 candidate. Style ref, then a brand product code, then an EAN.
+// A concession or any store-internal 10-digit code is never a candidate.
+export function brandItemIdCandidate(item) {
+  if (!item || typeof item !== 'object') return null;
+  const style = clean(item.styleRef);
+  if (style && !storeInternalCode(style) && !eanCode(style) && style !== clean(item.concessionCode))
+    return {value: style, source: 'styleRef'};
+  const own = [item.itemId, item.sku].map(clean).find(code => code && !storeInternalCode(code) && !eanCode(code)
+    && code !== clean(item.concessionCode) && code !== clean(item.internalCode));
+  if (own) return {value: own, source: 'brandProductCode'};
+  const ean = clean(item.ean) || [item.itemId, item.sku].map(clean).find(eanCode) || '';
+  if (ean && eanCode(ean)) return {value: ean.replace(/\s+/g, ''), source: 'ean'};
+  return null;
+}
+
+// A style, ref or model code printed on its own line. Store-internal numbers are left out.
+export function readPrintedStyleRef(text) {
+  const source = clean(text);
+  if (/\d[.,]\d{2}/.test(source)) return null;
+  const match = /^(?:style(?:\s*(?:\/\s*sku|ref(?:erence)?|code|no\.?|number))?|ref(?:erence)?|model(?:\s*(?:no\.?|number|code))?)\s*[:#-]?\s*(.+)$/i.exec(source);
+  if (!match) return null;
+  const body = match[1].trim();
+  const code = body.split(/\s+(?:[-–—](?:\s*:)?|[·|])\s+/)[0].replace(/[,.;]+$/, '').trim();
+  const rest = body.slice(code.length);
+  if (rest && !/^\s*(?:[-–—]|[·|])\s+\S+$/.test(rest)) return null;
+  if (!code || !/\d/.test(code) || storeInternalCode(code) || eanCode(code) || /^NT[0O1]?\d/i.test(code)) return null;
+  return code;
 }
 
 // Read the tender from receipt text. A wallet (Apple Pay, Alipay…) outranks the card

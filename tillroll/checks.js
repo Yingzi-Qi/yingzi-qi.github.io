@@ -518,6 +518,7 @@ const readerIssueMessages = {
   ambiguous_time:'Purchase time is ambiguous',
   discount_line_unclear:'discount line unclear',
   receipt_id_pass_conflict:'receipt id pass conflict',
+  payment_method:'Payment method must be UnionPay, Card, Alipay or WeChat',
 };
 
 // A line amount must be printed on the item's own row or its short detail block.

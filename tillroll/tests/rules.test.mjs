@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {makeOcr} from './ocr-fixture.mjs';
 import {
-  normalizePurchaseTime, readPurchaseTime, normalizeTender, readTender, cleanProductCode,
+  normalizePurchaseTime, readPurchaseTime, normalizeTender, readTender, toPaymentMethod, dropCardDigits, brandItemIdCandidate, readPrintedStyleRef, cleanProductCode,
   nonItemName, readStoreClues, mergeStoreClues, storeReceiptId, confirmedStoreReceiptId, classifyZeroPrice, applyZeroPriceExclusion,
 } from '../receipt-rules.js';
 import {extractLocal, cleanReceipt, geminiSchema, geminiPrompt, prepareModelReading, reconcileReadings} from '../extract.js';
@@ -159,6 +159,29 @@ test('tender: channel terms are rejected and flagged', () => {
   assert.equal(out.payment, null);
   assert.ok(out.fieldIssues.some(f => f.field === 'payment' && f.reason === 'channel_not_tender'));
   assert.match(geminiPrompt, /tender/i);
+});
+test('payment method: four exact values, UnionPay before card, other tenders are pink', () => {
+  for (const [value, method] of Object.entries({
+    'Visa': 'Card', 'VISA DEBIT': 'Card', 'Mastercard': 'Card', 'Maestro': 'Card', 'Amex': 'Card',
+    'American Express': 'Card', 'Discover': 'Card', 'JCB': 'Card', 'Diners': 'Card',
+    'contactless': 'Card', 'chip & pin': 'Card', 'CUP': 'UnionPay', 'China UnionPay card': 'UnionPay',
+    'Alipay': 'Alipay', 'WeChat Pay': 'WeChat', 'Weixin': 'WeChat',
+  })) assert.equal(toPaymentMethod(value).method, method, value);
+  for (const value of ['Cash', 'Gift card', 'Apple Pay', '']) assert.equal(toPaymentMethod(value).method, null, value);
+  assert.equal(dropCardDigits('VISA ****1234'), 'VISA');
+  assert.equal(dropCardDigits('Mastercard ending 4242'), 'Mastercard');
+  const visa = cleanReceipt({payment: 'VISA ****4242', items: []});
+  assert.equal(visa.payment, 'Visa');
+  assert.equal(visa.paymentMethod, 'Card');
+  assert.equal(/4242|1234/.test(JSON.stringify({payment: visa.payment, paymentMethod: visa.paymentMethod})), false);
+  const cash = read(['Corner Shop', '12/11/2026 10:00', 'Soap 4.00', 'TOTAL 4.00', 'CASH']);
+  assert.equal(cash.data.payment, 'Cash');
+  assert.equal(cash.data.paymentMethod, null);
+  const cashFlags = flagsFor(cash.review, 'payment');
+  assert.ok(cashFlags.some(f => /UnionPay, Card, Alipay or WeChat/i.test(f.message) && flagCategory(f) === 'reading'));
+  const union = read(['Corner Shop', '12/11/2026 10:00', 'Soap 4.00', 'TOTAL 4.00', 'CUP']);
+  assert.equal(union.data.payment, 'UnionPay');
+  assert.equal(union.data.paymentMethod, 'UnionPay');
 });
 test('tender: OCR text prefers the wallet over the scheme and ignores cash back', () => {
   assert.equal(readTender('Apple Pay\nVISA ****1234'), 'Apple Pay');
@@ -446,6 +469,26 @@ test('store id: one-digit pass conflict keeps the clearer id and flags it', () =
   assert.equal(flagCategory(flags[0]), 'reading');
   const flipped = reconcileReadings(second, first);
   assert.equal(flipped.data.receiptReference, 'NT0682-111111');
+});
+test('brand item id: style ref, then brand code, then EAN; never a store code', () => {
+  assert.equal(readPrintedStyleRef('Style: AB-4401'), 'AB-4401');
+  assert.equal(readPrintedStyleRef('Model no. ZX-90'), 'ZX-90');
+  assert.equal(readPrintedStyleRef('Ref: M220'), 'M220');
+  assert.equal(readPrintedStyleRef('Reference: NT01234-567890'), null);
+  const styled = read(['ATELIER', '12/11/2026 10:00', 'Wool coat 80.00', 'Style: AB-4401', 'TOTAL 80.00', 'Visa']);
+  assert.equal(styled.data.items[0].styleRef, 'AB-4401');
+  assert.equal(styled.data.items[0].sku, 'AB-4401');
+  assert.deepEqual(styled.data.items[0].brandItemIdCandidate, {value: 'AB-4401', source: 'styleRef'});
+  assert.equal(styled.data.items[0].brandItemId, 'AB-4401');
+  const coded = brandItemIdCandidate({itemId: 'G-100', sku: null, ean: '5009999888777', internalCode: '9999999001', concessionCode: '2201'});
+  assert.deepEqual(coded, {value: 'G-100', source: 'brandProductCode'});
+  const eanOnly = brandItemIdCandidate({itemId: null, ean: '5009999888777', internalCode: '0009876540', concessionCode: '2201'});
+  assert.deepEqual(eanOnly, {value: '5009999888777', source: 'ean'});
+  assert.equal(brandItemIdCandidate({itemId: '9999999001', internalCode: '9999999001', concessionCode: '2201', ean: null, styleRef: null}), null);
+  assert.equal(brandItemIdCandidate({itemId: '0001234560', concessionCode: '4321'}), null);
+  const model = read(['ATELIER', '12/11/2026 11:00', 'Linen shirt 40.00', 'Model: ZX-90', 'TOTAL 40.00']);
+  assert.equal(model.data.items[0].styleRef, 'ZX-90');
+  assert.equal(model.data.items[0].brandItemId, 'ZX-90');
 });
 test('Gemini reading: the store rule replaces a generic Harrods id', () => {
   const ocr = makeOcr(['HARRODS', '12/11/2026 14:03 NT01234-567890', 'Scarf 20.00', 'TOTAL GBP 20.00']);
