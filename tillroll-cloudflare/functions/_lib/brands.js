@@ -47,7 +47,7 @@ const ALIASES = {
   'vca': 'Van Cleef & Arpels', 'van cleef': 'Van Cleef & Arpels', 'van cleef and arpels': 'Van Cleef & Arpels',
   'lv': 'Louis Vuitton', 'ysl': 'Saint Laurent', 'yves saint laurent': 'Saint Laurent', 'bv': 'Bottega Veneta',
   'hermes': 'Hermès', 'tiffany': 'Tiffany & Co.', 'tiffany and co': 'Tiffany & Co.', 'tiffany & co': 'Tiffany & Co.',
-  'bvlgari': 'Bulgari', 'christian dior': 'Dior', 'céline': 'Celine', 'chloe': 'Chloé', 'jo malone': 'Jo Malone London',
+  'bvlgari': 'Bulgari', 'christian dior': 'Dior', 'cd': 'Dior', 'céline': 'Celine', 'chloe': 'Chloé', 'jo malone': 'Jo Malone London',
   'creme de la mer': 'La Mer', 'mac cosmetics': 'MAC', 'm.a.c': 'MAC', 'd&g': 'Dolce & Gabbana', 'mcqueen': 'Alexander McQueen',
   'louboutin': 'Christian Louboutin',
 };

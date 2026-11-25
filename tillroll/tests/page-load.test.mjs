@@ -47,8 +47,10 @@ describe('page load', () => {
     assert.equal(document.querySelector('h1').textContent, 'Receipts');
     assert.ok(document.querySelector('#settings'));
     assert.ok(document.querySelector('#lookup-base'));
-    assert.ok(document.querySelector('#v2-history-dialog'));
     assert.ok(document.querySelector('#history-dialog'));
+    assert.equal(document.querySelector('#v2-history-dialog'), null);
+    assert.equal(document.querySelector('#v2-history'), null);
+    assert.equal(document.querySelector('#landing-history'), null);
   });
 
   it('index.html has no duplicate element ids and loads app.js plus v2.js', () => {
@@ -58,7 +60,13 @@ describe('page load', () => {
     assert.deepEqual(duplicates, []);
     assert.match(html, /<script type="module" src="\.\/app\.js[^"]*"><\/script><script type="module" src="\.\/v2\.js[^"]*"><\/script>/);
     assert.match(html, /id="v2-workbooks-dialog"/);
-    assert.match(html, /id="v2-history-dialog"/);
+    assert.match(html, /id="history-dialog"/);
+    assert.match(html, /id="history-server-list"/);
+    assert.match(html, /id="history-list"/);
     assert.match(html, /id="v2-unlock-dialog"/);
+    assert.match(html, /id="lookup-locked-dialog"/);
+    assert.doesNotMatch(html, /id="v2-history-dialog"|id="v2-history"|id="landing-history"/);
+    assert.match(html, /id="v2-select-bar"/);
+    assert.match(html, /id="v2-check-all"/);
   });
 });

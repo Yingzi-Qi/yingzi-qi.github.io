@@ -4,16 +4,10 @@ import {validateOrderPatterns} from './retail-rules.js?v=6';
 import {parsePrintedItemId} from './product-code.js?v=productcodes3';
 import {maskCardField} from './item-identifiers.js';
 import * as zipPackage from './export-vendor/jszip.min.js';
+import { normaliseTender } from './tender.js';
 
 const JSZip = zipPackage.default ?? globalThis.JSZip;
-const MAIN = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
 const REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
-const PACKAGE = 'http://schemas.openxmlformats.org/package/2006/relationships';
-const XML = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
-const WORKBOOK_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-
-const excelColumnWidth = 28;
-const excelRowHeight = 32;
 
 const receiptColumns = [
   ['Source','merchant'], ['Date','date'], ['Time','time'],
@@ -60,6 +54,21 @@ const chinaColumns = [
 ];
 const refreshReceiptHeader='Tillroll receipt key', refreshLineHeader='Tillroll line key';
 const baselineHeader='Tillroll original values';
+// Card backstop from PR #1. P4 normaliseTender runs first; these helpers then
+// strip a remaining card number so no card digits are written.
+export function withoutCardDigits(value) {
+  return String(value ?? '').replace(/\d[\d\s-]{11,}\d/g, ' ').replace(/\s+/g, ' ').trim();
+}
+export function safeCardValue(value) {
+  return String(maskCardField(value) ?? '').replace(/\d/g, '');
+}
+function maskedReceiptData(data) {
+  if (!data || typeof data!=='object') return data;
+  const out={...data};
+  if ('payment' in out) out.payment=withoutCardDigits(normaliseTender(out.payment) ?? '');
+  if ('card' in out) out.card=safeCardValue(out.card);
+  return out;
+}
 const editableColumns=receiptColumns.filter(([, ,scope='receipt'])=>scope==='receipt' || scope==='line');
 function baselineParts(baseline) {
   const parts=[];
@@ -71,15 +80,6 @@ function baselineParts(baseline) {
   }
   parts.push(json);
   return parts;
-}
-const esc = value => String(value ?? '').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]/g,'')
-  .replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
-const colName = n => n > 26 ? colName(Math.floor((n-1)/26)) + colName((n-1)%26+1) : String.fromCharCode(64+n);
-function withoutCardDigits(value) {
-  return String(value ?? '').replace(/\d[\d\s-]{11,}\d/g, ' ').replace(/\s+/g, ' ').trim();
-}
-function safeCardValue(value) {
-  return String(maskCardField(value) ?? '').replace(/\d/g, '');
 }
 function exportData(receipts,includeRefresh=false) {
   const includeOrders = receipts.some(r => r.orders?.length);
@@ -117,6 +117,7 @@ function exportData(receipts,includeRefresh=false) {
       const baseline=includeRefresh ? {receipt:{},line:{},review:{},emptyReceipt:!r.data.items?.length,exportKey} : null;
       const cells=columns.map(([,key,source='receipt',type]) => {
         let value = sources[source]?.[key] ?? '';
+        if (source==='receipt' && key==='payment') value=normaliseTender(value) ?? '';
         const numeric = type && value !== '' && Number.isFinite(Number(value));
         value = numeric ? Number(value) : String(value);
         if (key==='card') value = safeCardValue(value);
@@ -183,6 +184,34 @@ export function buildCsvBlob(receipts) {
     {type:'text/csv;charset=utf-8'});
 }
 
+// The .xlsx contract is the 10 Chinese columns (v2-excel.js). This file no longer
+// writes English headers or the legacy #FFEDC0 fill. CSV and the Achung/legacy
+// readers below still recognise the historical English headers so older workbooks open.
+export async function buildXlsxBlob(receipts) {
+  const { buildV2XlsxBlob } = await import('./v2-excel.js');
+  // Mask card digits before the v2 writer sees them (采购商品方法 comes from payment).
+  const safe=Array.isArray(receipts) ? receipts.map(r=>r?.data ? {...r,data:maskedReceiptData(r.data),record:r.record ? maskedReceiptData(r.record) : r.record} : r) : receipts;
+  return buildV2XlsxBlob(safe);
+}
+
+// LEGACY_CHINA_WRITER: main's compact Chinese writer (chinaExportData/buildChinaXlsxBlob,
+// hidden English detailed columns, #FFEDC0). Kept but OFF: '中文 Excel' now delegates to
+// the v2 writer above (the one binding export). Removal is prepared separately on
+// local/merge-main-into-4-remove-china-writer.
+const LEGACY_CHINA_WRITER=false;
+// ---- LEGACY_CHINA_WRITER helpers (main fdf6475) -------------------------------
+// #4 removed these when .xlsx moved to v2-excel.js; the auto-merge kept main's
+// buildChinaXlsxBlob but not its helpers. Restored verbatim so the flagged-off writer
+// still works; they go away together with it on the -remove-china-writer branch.
+const MAIN = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
+const PACKAGE = 'http://schemas.openxmlformats.org/package/2006/relationships';
+const XML = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+const WORKBOOK_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+const excelColumnWidth = 28;
+const excelRowHeight = 32;
+const esc = value => String(value ?? '').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]/g,'')
+  .replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
+const colName = n => n > 26 ? colName(Math.floor((n-1)/26)) + colName((n-1)%26+1) : String.fromCharCode(64+n);
 function cellXml(row,col,{value,numeric,style}) {
   const attrs = ' r="'+colName(col)+row+'" s="'+style+'"';
   if (numeric) return '<c'+attrs+'><v>'+value+'</v></c>';
@@ -202,25 +231,7 @@ const styles = XML + `<styleSheet xmlns="${MAIN}">
     ${[3,4,5].map(fill=>'<xf numFmtId="0" fontId="0" fillId="'+fill+'" borderId="0" xfId="0" applyFill="1" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf><xf numFmtId="4" fontId="0" fillId="'+fill+'" borderId="0" xfId="0" applyNumberFormat="1" applyFill="1" applyAlignment="1"><alignment vertical="top"/></xf>').join('')}
   </cellXfs>
   <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`;
-export async function buildXlsxBlob(receipts) {
-  const {columns,rows,visibleCount} = exportData(receipts,true);
-  const range = 'A1:'+colName(columns.length)+(rows.length+1);
-  const rowXml = (number, cells) =>
-    `<row r="${number}" ht="${excelRowHeight}" customHeight="1">${cells.map((cell,i)=>cellXml(number,i+1,cell)).join('')}</row>`;
-  const header = rowXml(1, columns.map(([title])=>({value:title,style:1})));
-  const contents = rows.map((row,i)=>rowXml(i+2,row)).join('');
-  const widths = columns.map((_,i)=>
-    `<col min="${i+1}" max="${i+1}" width="${excelColumnWidth}" customWidth="1"${i>=visibleCount?' hidden="1"':''}/>`).join('');
-  const worksheet = XML + `<worksheet xmlns="${MAIN}"><dimension ref="${range}"/><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" state="frozen" topLeftCell="A2" activePane="bottomLeft"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="${excelRowHeight}" defaultColWidth="${excelColumnWidth}"/><cols>${widths}</cols><sheetData>${header}${contents}</sheetData><autoFilter ref="${range}"/></worksheet>`;
-  const zip = new JSZip();
-  zip.file('[Content_Types].xml',XML+`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`);
-  zip.file('_rels/.rels',XML+`<Relationships xmlns="${PACKAGE}"><Relationship Id="rId1" Type="${REL}/officeDocument" Target="xl/workbook.xml"/></Relationships>`);
-  zip.file('xl/workbook.xml',XML+`<workbook xmlns="${MAIN}" xmlns:r="${REL}"><sheets><sheet name="Line items" sheetId="1" r:id="rId1"/></sheets></workbook>`);
-  zip.file('xl/_rels/workbook.xml.rels',XML+`<Relationships xmlns="${PACKAGE}"><Relationship Id="rId1" Type="${REL}/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="${REL}/styles" Target="styles.xml"/></Relationships>`);
-  zip.file('xl/worksheets/sheet1.xml',worksheet);
-  zip.file('xl/styles.xml',styles);
-  return new Blob([await zip.generateAsync({type:'uint8array',compression:'DEFLATE'})],{type:WORKBOOK_MIME});
-}
+// ---- end LEGACY_CHINA_WRITER helpers -------------------------------------------
 
 function purchaseTimeValue(data) {
   return [data.date,data.time].filter(Boolean).join(' ');
@@ -247,6 +258,7 @@ function chinaExportData(receipts) {
       const visible=chinaColumns.map(([title,key,scope,type])=>{
         let value='';
         if(scope==='receipt') value=key==='purchaseTime' ? purchaseTimeValue(r.data) : (key==='orderNumber' ? receiptId : r.data[key]??'');
+        if(scope==='receipt' && key==='payment') value=normaliseTender(value) ?? '';
         else if(scope==='line') value=line[key]??'';
         if(key==='payment') value=withoutCardDigits(value);
         if(key==='card') value=safeCardValue(value);
@@ -286,28 +298,12 @@ function download(blob,extension) {
 }
 export function exportCSV(receipts) { return download(buildCsvBlob(receipts),'csv'); }
 export async function exportExcel(receipts) { return download(await buildXlsxBlob(receipts),'xlsx'); }
-export async function exportChinaExcel(receipts) { return download(await buildChinaXlsxBlob(receipts),'xlsx'); }
-const AGREED_COLUMNS = ['采购小票id', '采购时间', '供应商', '品牌', '品名', '品牌货号', '采购商品原价', '采购商品金额', '采购商品方法', '销售金额'];
-export async function exportAgreedChina(rows) {
-  const body = (rows || []).map(row => AGREED_COLUMNS.map(title => {
-    const value = row?.cells?.[title] ?? '';
-    const numeric = typeof value === 'number' && Number.isFinite(value);
-    return { value: numeric ? value : String(value ?? ''), numeric, style: numeric ? 3 : 0 };
-  }));
-  const range = 'A1:' + colName(AGREED_COLUMNS.length) + (body.length + 1);
-  const rowXml = (number, cells) => `<row r="${number}" ht="${excelRowHeight}" customHeight="1">${cells.map((cell, i) => cellXml(number, i + 1, cell)).join('')}</row>`;
-  const header = rowXml(1, AGREED_COLUMNS.map(title => ({ value: title, style: 1 })));
-  const contents = body.map((row, i) => rowXml(i + 2, row)).join('');
-  const widths = AGREED_COLUMNS.map((_, i) => `<col min="${i + 1}" max="${i + 1}" width="${excelColumnWidth}" customWidth="1"/>`).join('');
-  const worksheet = XML + `<worksheet xmlns="${MAIN}"><dimension ref="${range}"/><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" state="frozen" topLeftCell="A2" activePane="bottomLeft"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="${excelRowHeight}" defaultColWidth="${excelColumnWidth}"/><cols>${widths}</cols><sheetData>${header}${contents}</sheetData><autoFilter ref="${range}"/></worksheet>`;
-  const zip = new JSZip();
-  zip.file('[Content_Types].xml', XML + `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`);
-  zip.file('_rels/.rels', XML + `<Relationships xmlns="${PACKAGE}"><Relationship Id="rId1" Type="${REL}/officeDocument" Target="xl/workbook.xml"/></Relationships>`);
-  zip.file('xl/workbook.xml', XML + `<workbook xmlns="${MAIN}" xmlns:r="${REL}"><sheets><sheet name="Line items" sheetId="1" r:id="rId1"/></sheets></workbook>`);
-  zip.file('xl/_rels/workbook.xml.rels', XML + `<Relationships xmlns="${PACKAGE}"><Relationship Id="rId1" Type="${REL}/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="${REL}/styles" Target="styles.xml"/></Relationships>`);
-  zip.file('xl/worksheets/sheet1.xml', worksheet);
-  zip.file('xl/styles.xml', styles);
-  return download(new Blob([await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' })], { type: WORKBOOK_MIME }), 'xlsx');
+export async function exportChinaExcel(receipts) { return download(await (LEGACY_CHINA_WRITER ? buildChinaXlsxBlob : buildXlsxBlob)(receipts),'xlsx'); }
+// Retired slim writer. Callers receive the v2 workbook (maskPaymentRow included).
+export async function exportAgreedChina(result) {
+  const { buildV2XlsxBlob } = await import('./v2-excel.js');
+  const input = Array.isArray(result) ? { agreedRows: result } : (result || { agreedRows: [] });
+  return download(await buildV2XlsxBlob(input), 'xlsx');
 }
 
 const aliases = {
@@ -568,6 +564,11 @@ function refreshBaseline(parts,rowNumber) {
 
 export async function readTillrollEdits(file) {
   if (file?.name && !/\.xlsx$/i.test(file.name)) throw new Error('Choose an edited Tillroll Excel (.xlsx) export.');
+  const { readV2Workbook } = await import('./v2-excel.js');
+  try {
+    const v2 = await readV2Workbook(file);
+    if (v2.kind === 'v2') return v2;
+  } catch (e) { if (e.v2) throw e; }
   const book=await openWorkbook(file);
   const sheet=book.sheets.find(s=>s.getAttribute('name')?.toLowerCase()==='line items');
   if (!sheet) throw new Error('Choose a Tillroll Excel export with a Line items worksheet.');

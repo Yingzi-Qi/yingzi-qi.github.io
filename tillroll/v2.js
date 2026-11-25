@@ -1,7 +1,6 @@
 // Tillroll v2 layer: Run sanity checks, Linked Workbooks (Google Drive),
 // Reading History, quota status and Brave attribution. Talks only to the
 // same-origin /api/* Cloudflare Pages Functions; holds no secrets.
-import { exportAgreedChina } from './exports.js?v=1';
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const COLUMNS = ['采购小票id', '采购时间', '供应商', '品牌', '品名', '品牌货号', '采购商品原价', '采购商品金额', '采购商品方法', '销售金额'];
@@ -9,11 +8,11 @@ const FIELD_TO_COL = [[/^items\.\d+\.itemId/, '品牌货号'], [/^items\.\d+\.(i
   [/^items\.\d+\.brand/, '品牌'], [/^(date|time)/, '采购时间'], [/^(orderNumber|orderId|receiptReference)/, '采购小票id'], [/^payment/, '采购商品方法'], [/^merchant/, '供应商']];
 let lastResult = null, lastBatchId = null;
 
-async function api(path, init = {}) {
+async function api(path, init = {}, allowUnlock = true) {
   const res = await fetch(path, { credentials: 'same-origin', ...init, headers: { ...(init.body && !(init.body instanceof Blob) ? { 'Content-Type': 'application/json' } : {}), ...(init.headers || {}) } });
-  if (res.status === 401) {
+  if (allowUnlock && res.status === 401) {
     const body = await res.clone().json().catch(() => ({}));
-    if (body.code === 'locked' && (await unlock())) return api(path, init);
+    if (body.code === 'locked' && (await unlock())) return api(path, init, false);
   }
   return res;
 }
@@ -22,21 +21,25 @@ const note = msg => { const n = $('#notice'); if (!n) return; n.textContent = ms
 function unlock() {
   return new Promise(resolve => {
     const d = $('#v2-unlock-dialog'); const f = $('#v2-unlock-form'); const err = $('#v2-unlock-error');
-    err.textContent = ''; f.passcode.value = '';
+    const pass = f.querySelector('[name=passcode]');
+    let settled = false;
+    const finish = ok => { if (settled) return; settled = true; resolve(ok); };
+    err.textContent = ''; pass.value = '';
     f.onsubmit = async e => {
       e.preventDefault();
-      const r = await fetch('/api/auth/unlock', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ passcode: f.passcode.value }) });
-      if (r.ok) { d.close(); resolve(true); } else err.textContent = (await r.json().catch(() => ({}))).error || 'Could not unlock.';
+      const r = await fetch('/api/auth/unlock', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ passcode: pass.value }) });
+      if (r.ok) { finish(true); d.close(); }
+      else err.textContent = (await r.json().catch(() => ({}))).error || 'Could not unlock.';
     };
-    d.addEventListener('close', () => resolve(false), { once: true });
-    d.showModal();
+    d.addEventListener('close', () => finish(false), { once: true });
+    if (!d.open) d.showModal();
   });
 }
 
 // ---- Receipts -> sanity-run payload ----------------------------------------
 const UK_POSTCODE = /\b([A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2})\b/i;
 const PHONE = /(?:\+44\s?|\b0)\d{2,4}[\s-]?\d{3,4}[\s-]?\d{3,4}\b/;
-// Client-side storeClues fallback only; the Receipt Reader owns storeClues (binding Reader contract).
+// Provisional fallback only; the Receipt Reader owns storeClues (binding Reader contract).
 function deriveStoreClues(ocr) {
   const lines = (ocr?.lines || []).map(l => l.text).filter(Boolean);
   if (!lines.length) return null;
@@ -170,17 +173,31 @@ function renderResult(out) {
   const amberList = out.lookupUncertainties.slice(0, 30).map(e => `<li><b>${esc(e.col)}</b> · ${esc(e.reason)}${mismatchText(e) ? ' · ' + esc(mismatchText(e)) : ''}${(e.sourceUrls || []).slice(0, 2).map(u => ` <a href="${esc(u)}" target="_blank" rel="noopener noreferrer">source</a>`).join('')}</li>`).join('');
   panel.innerHTML = `
     <div class="v2-result-head"><h2>Final agreed version</h2>
-      <div class="actions"><button id="v2-csv" class="quiet">Download CSV</button><button id="v2-json" class="quiet">Download JSON (for Excel export)</button></div></div>
+      <div class="actions"><button id="v2-csv" class="quiet">Download CSV</button><button id="v2-xlsx" class="primary">Export Excel</button></div></div>
     ${out.lookupsPaused ? `<p class="v2-paused" style="background:#FDE68A">Look-ups are paused: ${esc((out.pausedReasons || []).join(' '))} Affected cells are flagged Amber.</p>` : ''}
     <p class="v2-summary">${out.agreedRows.length} rows · <span class="v2-chip" style="background:#FECDD3">${out.readingErrors.length} reading errors</span> · <span class="v2-chip" style="background:#FDE68A">${out.lookupUncertainties.length} look-up flags</span> · ${out.excludedZeroCount} zero-price line(s) excluded</p>
     ${pinkList ? `<details open><summary>Reading errors to check first (Pink)</summary><ul>${pinkList}</ul></details>` : ''}
     ${amberList ? `<details><summary>Look-up uncertainty (Amber)</summary><ul>${amberList}</ul></details>` : ''}
     <div class="table-wrap"><table class="v2-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
   $('#v2-csv').onclick = () => download('tillroll-agreed.csv', toCsv(out), 'text/csv;charset=utf-8');
-  $('#v2-json').onclick = () => download('tillroll-agreed.json', JSON.stringify(out, null, 2), 'application/json');
+  $('#v2-xlsx').onclick = () => exportAgreed(out);
 }
 const toCsv = out => '\ufeff' + [COLUMNS, ...out.agreedRows.map(r => COLUMNS.map(c => r.cells[c] ?? ''))].map(row => row.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\r\n');
 function download(name, text, type) { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000); }
+let driveReplace = null;
+async function exportAgreed(out) {
+  const { buildV2XlsxBlob, uploadExport } = await import('./v2-excel.js');
+  const blob = await buildV2XlsxBlob(out);
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'Tillroll receipts.xlsx'; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  try {
+    const saved = await uploadExport(blob, { name: 'Tillroll receipts.xlsx', batchId: lastBatchId });
+    if (saved?.file?.id) driveReplace = { driveFileId: saved.file.id, name: saved.file.name || 'Tillroll receipts.xlsx' };
+    note('Excel saved to Google Drive (Tillroll/Exports).');
+  } catch (e) {
+    note(e.message && /not set up|Drive|OAuth|sign/i.test(e.message) ? e.message : 'Excel downloaded. Connect Google Drive to store it in Tillroll/Exports.');
+  }
+}
 
 // ---- Quota pill, Drive, Workbooks, History -------------------------------
 async function refreshQuota() {
@@ -212,76 +229,40 @@ async function openWorkbooks() {
     <span>${w.web_view_link ? `<a href="${esc(w.web_view_link)}" target="_blank" rel="noopener noreferrer">Open</a> ` : ''}<button data-wb="${esc(w.workbook_id)}">Update / Refresh</button></span></li>`).join('') + '</ul>';
   for (const btn of list.querySelectorAll('[data-wb]')) btn.onclick = async () => {
     btn.disabled = true; btn.textContent = 'Refreshing…';
+    const wb = data.workbooks.find(w => w.workbook_id === btn.dataset.wb);
     const res = await api(`/api/workbooks/${encodeURIComponent(btn.dataset.wb)}/refresh`, { method: 'POST' });
     if (!res.ok) { btn.textContent = (await res.json().catch(() => ({}))).error || 'Refresh failed'; return; }
-    const file = new File([await res.blob()], 'linked-workbook.xlsx', { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-    d.close();
-    window.tillrollV2Hooks?.refreshFromFile?.(file);
+    try {
+      const { readV2Workbook, applyV2Refresh } = await import('./v2-excel.js');
+      const planned = await readV2Workbook(await res.arrayBuffer());
+      if (planned.kind !== 'v2') throw new Error('This linked workbook is not a Tillroll v2 export.');
+      driveReplace = { driveFileId: wb?.drive_file_id, name: wb?.name };
+      const outcome = await applyV2Refresh(planned, { batchId: wb?.batch_id || lastBatchId, replace: driveReplace, download: true });
+      lastResult = outcome.result; renderResult(outcome.result); d.close(); note(outcome.message);
+    } catch (e) { btn.disabled = false; btn.textContent = e.message || 'Refresh failed'; }
   };
 }
-// Reading History uses the existing #history-dialog. Opening it fetches
-// GET /api/history and renders the server rows there. A 401 / locked
-// response opens the passcode dialog and retries after unlock; cancelling
-// unlock shows nothing extra. Only a 5xx or a network failure falls back
-// to the browser-local reading-history.js list in the same dialog.
-export async function openReadingHistory({ fetchImpl, openLocal, unlockImpl } = {}) {
-  const fetchFn = fetchImpl || (typeof fetch === 'function' ? fetch.bind(globalThis) : null);
-  const doUnlock = unlockImpl || unlock;
-  const historyDialog = () => document.getElementById('history-dialog');
-  const serverList = () => document.getElementById('history-server-list') || document.getElementById('history-list');
-  const localList = () => document.getElementById('history-list');
-  const setStatus = text => { const el = document.getElementById('history-status'); if (el) el.textContent = text || ''; };
-  const showLocal = () => {
-    const server = document.getElementById('history-server-list');
-    const local = localList();
-    if (server && local && server !== local) { server.hidden = true; local.hidden = false; }
-    const clear = document.getElementById('history-clear');
-    if (clear) clear.hidden = false;
-    setStatus('Showing the history kept in this browser (offline).');
-    const fallback = openLocal || (typeof window !== 'undefined' && window.tillrollLocalHistory?.open);
-    if (typeof fallback === 'function') fallback();
-    else {
-      const d = historyDialog();
-      if (d && !d.open) d.showModal();
-    }
-    return 'local';
-  };
-  const showServer = (data) => {
-    const entries = Array.isArray(data.entries) ? data.entries : [];
-    const list = serverList();
-    if (list) {
-      list.innerHTML = entries.length
-        ? entries.map(e => `<article class="history-entry"><strong>${esc(e.kind || 'Event')}</strong> · ${esc(e.summary || '')}<small>${esc(new Date(e.created_at).toLocaleString('en-GB', { timeZone: 'Europe/London' }))}${e.batch_id ? ' · ' + esc(e.batch_id) : ''}</small></article>`).join('')
-        : '<p class="history-empty">No history yet.</p>';
-      list.hidden = false;
-    }
-    const server = document.getElementById('history-server-list');
-    const local = localList();
-    if (server && local && server !== local) local.hidden = true;
-    const clear = document.getElementById('history-clear');
-    if (clear) clear.hidden = true;
-    setStatus('Showing the reading history saved on the Tillroll server.');
-    const d = historyDialog();
-    if (d && !d.open) d.showModal();
-    return 'v2';
-  };
+// One Reading History dialog. api() opens the unlock dialog on a locked 401
+// and retries this request once. A dismissed unlock does not show local history.
+// 5xx and network errors are the only offline fallback.
+async function serverHistory(limit = 100) {
   try {
-    if (typeof fetchFn !== 'function') return showLocal();
-    const r = await fetchFn('/api/history?limit=100', { credentials: 'same-origin' });
-    if (!r || r.status >= 500) return showLocal();
-    const data = await r.json().catch(() => ({}));
-    if (r.status === 401 || data.code === 'locked') {
-      const unlocked = await doUnlock();
-      if (unlocked) return openReadingHistory({ fetchImpl, openLocal, unlockImpl });
-      return 'cancelled';
+    const r = await api(`/api/history?limit=${encodeURIComponent(limit)}`);
+    if (r.status === 401) {
+      const body = await r.json().catch(() => ({}));
+      if (body.code === 'locked') return { ok: false, status: 401, locked: true };
+      return { ok: false, status: 401, error: body.error || 'History request was not authorized.' };
     }
-    if (!r.ok) return 'error';
-    return showServer(data);
-  } catch {
-    return showLocal();
-  }
+    if (r.status >= 500) return { ok: false, status: r.status, offline: true };
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      return { ok: false, status: r.status, error: body.error || `History request failed (${r.status}).` };
+    }
+    const data = await r.json().catch(() => null);
+    if (!data || !Array.isArray(data.entries)) return { ok: false, status: r.status, error: 'History response was not a list.' };
+    return { ok: true, entries: data.entries };
+  } catch { return { ok: false, status: 0, offline: true }; }
 }
-const openHistory = openReadingHistory;
 
 function onCheckChange(e) {
   const t = e.target;
@@ -300,26 +281,27 @@ function onCheckChange(e) {
 
 function init() {
   $('#v2-run')?.addEventListener('click', runSanity);
+  window.tillrollV2Hooks = Object.assign(window.tillrollV2Hooks || {}, {
+    batchId: () => lastBatchId,
+    lastResult: () => lastResult,
+    showResult: out => { lastResult = out; const panel = $('#v2-panel'); if (panel) panel.hidden = false; renderResult(out); },
+    driveReplace: () => driveReplace,
+    serverHistory,
+    afterRender: syncRunButton,
+    receiptCheckHtml,
+    syncRunButton,
+  });
   $('#v2-workbooks')?.addEventListener('click', openWorkbooks);
-  $('#v2-history')?.addEventListener('click', openHistory);
-  // #history / #landing-history (app.js) and #v2-history all go through
-  // openReadingHistory, which fills the existing #history-dialog.
   document.addEventListener('change', onCheckChange);
   const china = $('#excel-china');
   if (china) {
     const localExport = china.onclick;
-    china.onclick = event => lastResult?.agreedRows ? exportAgreedChina(lastResult.agreedRows) : localExport?.call(china, event);
+    // Same writer as the panel's Export Excel: buildV2XlsxBlob, which masks the tender.
+    china.onclick = event => lastResult?.agreedRows ? exportAgreed(lastResult) : localExport?.call(china, event);
   }
   for (const b of document.querySelectorAll('[data-v2-close]')) b.onclick = () => document.getElementById(b.dataset.v2Close).close();
   const p = new URLSearchParams(location.search).get('drive');
   if (p === 'connected') note('Google Drive connected.'); else if (p === 'denied') note('Google Drive was not connected.');
-  window.tillrollV2Hooks = {
-    ...(window.tillrollV2Hooks || {}),
-    afterRender: syncRunButton,
-    receiptCheckHtml,
-    syncRunButton,
-    openReadingHistory,
-  };
   syncRunButton();
   refreshQuota(); refreshDrive();
 }
