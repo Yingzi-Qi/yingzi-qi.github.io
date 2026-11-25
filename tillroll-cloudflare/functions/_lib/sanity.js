@@ -7,7 +7,7 @@ import { lookup as defaultLookup, invalidate, priceTolerance } from './lookup.js
 import { nowIso, sha256Hex } from './http.js';
 import { expandReceipt, isConfirmedZero, joinPurchaseTime, supplierVisibleName } from '../../../tillroll/units.js';
 import { matchBrandIdFormat } from '../../../tillroll/brand-id-format.js';
-import { gateFindings, isUnlabelledTenDigits, selectBrandItem } from '../../../tillroll/export-gate.js';
+import { concessionReading, gateFindings, isUnlabelledTenDigits, selectBrandItem } from '../../../tillroll/export-gate.js';
 
 export const COLUMNS = ['采购小票id', '采购时间', '供应商', '品牌', '品名', '品牌货号', '采购商品原价', '采购商品金额', '采购商品方法', '销售金额'];
 export const PINK = '#FECDD3', AMBER = '#FDE68A';
@@ -135,8 +135,11 @@ function readerStage(receipt, rIndex, state, ctx) {
     const confirmedZero = (it.zeroConfirmed === true && (zeroUnit || zeroAmt)) || (zeroUnit && zeroAmt && it.zeroConfirmed !== false);
     if (confirmedZero) { state.excludedZero.push(zeroRecord(receipt.receiptKey, it, lineIndex, receipt)); return; }
     const brandRaw = str(it.brand);
-    const picked = selectBrandItem({ brand: brandRaw, concessionCode: it.concessionCode, internalCode: it.internalCode, ean: it.ean, itemId: it.itemId, sku: it.sku, styleRef: it.styleRef }, ctx?.brandIdFormat || matchBrandIdFormat);
-    const itemCell = stripBrandFromItemId(picked.cell, brandRaw);
+    const builder = builderBrandItem(it);
+    const picked = builder
+      ? { cell: builder.id == null || String(builder.id).trim() === '' ? null : String(builder.id).trim(), storeCodes: [], lookupId: builder.id == null ? null : String(builder.id).trim(), idClass: 'builder', builder }
+      : selectBrandItem({ brand: brandRaw, concessionCode: it.concessionCode, internalCode: it.internalCode, ean: it.ean, itemId: it.itemId, sku: it.sku, styleRef: it.styleRef }, ctx?.brandIdFormat || matchBrandIdFormat);
+    const itemCell = builder ? picked.cell : stripBrandFromItemId(picked.cell, brandRaw);
     const unitRead = priceReading(it.rawUnitPrice !== undefined ? it.rawUnitPrice : it.unitPrice);
     const amountRead = priceReading(it.rawAmount !== undefined ? it.rawAmount : it.amount);
     const unitCell = unitRead.invalid ? null : unit;
@@ -147,7 +150,7 @@ function readerStage(receipt, rIndex, state, ctx) {
     const row = { rowId: it.rowId || `${receipt.receiptKey}:${lineIndex}:u0`, receiptKey: receipt.receiptKey, lineIndex, unitIndex: it.unitIndex ?? 0, flags: {}, notes: [], _reading: [], _lookup: [], _alternates: {}, _comments: {}, _candidates: null, _officialBranch: null, lookup: null, discountKind: it.discountKind || 'none',
       cells: { '采购小票id': receiptId, '采购时间': ts, '供应商': merchant, '品牌': brandRaw, '品名': str(it.item), '品牌货号': itemCell,
         '采购商品原价': unitCell ?? (amountCell !== null && !unitRead.invalid ? round2((amountCell + discount) / (qty || 1)) : null), '采购商品金额': amountCell, '采购商品方法': tender, '销售金额': null },
-      raw: { style: str(it.styleRef) || (str(it.sku) !== str(it.itemId) ? str(it.sku) : null), colour: str(it.colour), size: str(it.size), qty, currency: str(receipt.currency) || 'GBP', storeCodes: picked.storeCodes, idClass: picked.idClass, itemLabels: { concessionCode: it.concessionCode ?? null, internalCode: it.internalCode ?? null, ean: it.ean ?? null, itemId: it.itemId ?? null, sku: it.sku ?? null, styleRef: it.styleRef ?? null }, invalidPrices, printedItemId: (picked.idClass === 'ean' || picked.idClass === 'concession' || picked.idClass === 'unlabelled10') ? picked.lookupId : (itemCell || picked.lookupId) },
+      raw: { style: str(it.styleRef) || (str(it.sku) !== str(it.itemId) ? str(it.sku) : null), colour: str(it.colour), size: str(it.size), qty, currency: str(receipt.currency) || 'GBP', storeCodes: picked.storeCodes, idClass: picked.idClass, builder, itemLabels: { concessionCode: it.concessionCode ?? null, internalCode: it.internalCode ?? null, ean: it.ean ?? null, itemId: it.itemId ?? null, sku: it.sku ?? null, styleRef: it.styleRef ?? null }, invalidPrices, printedItemId: (picked.idClass === 'ean' || picked.idClass === 'concession' || picked.idClass === 'unlabelled10') ? picked.lookupId : (itemCell || picked.lookupId), extraUrls: builderUrls(it, builder) },
       storeClues: receipt.storeClues || null };
     if (!receiptId) addFlag(row, '采购小票id', PINK, /selfridges/i.test(merchant || '') ? 'Selfridges receipt number (below the barcode) not read.' : /harrods/i.test(merchant || '') ? 'Harrods receipt number (right of date/time) not read.' : 'Receipt ID not read.');
     if (!ts) addFlag(row, '采购时间', PINK, 'Date/time missing or not a valid date.');
@@ -157,7 +160,13 @@ function readerStage(receipt, rIndex, state, ctx) {
       row._comments['采购商品方法'] = TENDER_REASON;
     }
     if (!row.cells['品名'] || JUNK_NAME.test(row.cells['品名'])) addFlag(row, '品名', PINK, `Item name "${row.cells['品名'] ?? ''}" failed the column sanity check.`);
-    const idp = itemIdProblem(row.cells['品牌货号']);
+    if (builder) {
+      const colour = builderFlagColour(builder.flag);
+      if (colour) addFlag(row, '品牌货号', colour, builder.reason || 'Builder item id.');
+    } else if (picked.idClass === 'last4') {
+      addFlag(row, '品牌货号', PINK, 'Item ID looks like card last-4.');
+    }
+    const idp = builder || picked.idClass === 'last4' ? null : itemIdProblem(row.cells['品牌货号']);
     if (idp) addFlag(row, '品牌货号', PINK, `Item ID ${idp}.`);
     if ((it.fieldIssues || []).some(f => /itemid/i.test(f))) addFlag(row, '品牌货号', PINK, 'Reader marked the item ID as uncertain.');
     if (!unitRead.invalid && unit === null && amount === null) addFlag(row, '采购商品原价', PINK, 'No price read.');
@@ -199,11 +208,16 @@ function officialItemId(top, row) {
   const id = str(top?.itemId);
   if (!id) return null;
   const held = row.raw?.storeCodes || [];
+  if (concessionReading(id, row.raw?.itemLabels || {})) return null;
   if (row.raw?.idClass === 'unlabelled10' && isUnlabelledTenDigits(id) && idsMatch(id, row.raw.printedItemId)) return null;
   if (held.some(code => idsMatch(code, id) && (idsMatch(code, row.raw?.itemLabels?.concessionCode) || idsMatch(code, row.raw?.itemLabels?.internalCode)))) return null;
   return id;
 }
 function settleBrandItemId(row, top, ctx) {
+  if (row.raw?.idClass === 'builder' || row.raw?.idClass === 'last4') {
+    noteStoreCodes(row);
+    return;
+  }
   noteStoreCodes(row);
   const c = row.cells;
   if (ctx.locked(row.rowId, '品牌货号')) return;
@@ -368,10 +382,7 @@ async function verifierStage(rows, receipt, ctx) {
       }
     }
     settleBrandItemId(row, top, ctx);
-    if (canonicalBrand(c['品牌']) === 'Chanel') {
-      const note = chanelFallbackComment(top.sourceUrls || []);
-      if (note) for (const col of ['品名', '品牌', '品牌货号']) if (c[col]) appendComment(row, col, note);
-    }
+    noteChanel(row, top.sourceUrls || []);
     row._candidatePrice = top.price; row._candidateCurrency = top.currency;
   }
 }
@@ -456,9 +467,41 @@ function dedupeZero(list) {
 
 // Flag-only. Locked human_verified_unflagged cells are left alone. 品名 and 品牌
 // are not rewritten; a non-numeric price is cleared to empty.
+function noteChanel(row, urls) {
+  const note = chanelFallbackComment([...(row.raw?.extraUrls || []), ...(urls || []), ...(row.lookup?.sourceUrls || [])]);
+  if (!note || canonicalBrand(row.cells['品牌']) !== 'Chanel') return;
+  for (const col of ['品名', '品牌', '品牌货号']) if (row.cells[col]) appendComment(row, col, note);
+}
+function builderBrandItem(it) {
+  const meta = it?.exportMeta && typeof it.exportMeta === 'object' ? it.exportMeta : null;
+  const onItem = it && Object.prototype.hasOwnProperty.call(it, 'brandItemId');
+  const onMeta = meta && Object.prototype.hasOwnProperty.call(meta, 'brandItemId');
+  if (!onItem && !onMeta) return null;
+  return {
+    id: onItem ? it.brandItemId : meta.brandItemId,
+    source: it.brandItemIdSource ?? meta?.brandItemIdSource ?? null,
+    flag: it.brandItemIdFlag ?? meta?.brandItemIdFlag ?? null,
+    reason: it.brandItemIdReason ?? meta?.brandItemIdReason ?? null,
+  };
+}
+function builderFlagColour(flag) {
+  const text = String(flag ?? '').trim().toLowerCase();
+  if (flag === PINK || text === '#fecdd3' || text === 'pink') return PINK;
+  if (flag === AMBER || text === '#fde68a' || text === 'amber') return AMBER;
+  return null;
+}
+function builderUrls(it, builder) {
+  const urls = [];
+  const meta = it?.exportMeta;
+  if (Array.isArray(meta?.sourceUrls)) urls.push(...meta.sourceUrls);
+  if (Array.isArray(it?.sourceUrls)) urls.push(...it.sourceUrls);
+  if (typeof builder?.source === 'string' && /^https?:\/\//i.test(builder.source)) urls.push(builder.source);
+  return urls;
+}
 function applyExportGate(row, ctx) {
   for (const finding of gateFindings(row)) {
     if (ctx.locked(row.rowId, finding.col)) continue;
+    if (finding.col === '品牌货号' && row.raw?.idClass === 'builder') continue;
     const prior = (row._lookup || []).filter(e => e.col === finding.col);
     const lookupReason = [...new Set(prior.map(e => e.reason).filter(Boolean))].join('; ');
     const candidates = prior.flatMap(e => e.candidates || []);
@@ -541,6 +584,12 @@ export async function runSanity(env, input, deps = {}) {
       it.internalCode = src.internalCode ?? null;
       it.ean = src.ean ?? null;
       it.styleRef = src.styleRef ?? null;
+      if (Object.prototype.hasOwnProperty.call(src, 'brandItemId')) it.brandItemId = src.brandItemId;
+      if (src.brandItemIdSource !== undefined) it.brandItemIdSource = src.brandItemIdSource;
+      if (src.brandItemIdFlag !== undefined) it.brandItemIdFlag = src.brandItemIdFlag;
+      if (src.brandItemIdReason !== undefined) it.brandItemIdReason = src.brandItemIdReason;
+      if (src.exportMeta) it.exportMeta = src.exportMeta;
+      if (src.sourceUrls) it.sourceUrls = src.sourceUrls;
       it.itemId = src.itemId ?? it.itemId;
       it.sku = src.sku ?? it.sku;
       it.rawUnitPrice = src.unitPrice;
@@ -625,6 +674,7 @@ export async function runSanity(env, input, deps = {}) {
     }
     if (row._exactIdPrice && row.flags['品名'] === AMBER && !ctx.locked(row.rowId, '品名')) delete row.flags['品名'];
     if (mode === 'round2') restoreBaselineFlags(row, ctx);
+    noteChanel(row, []);
     applyExportGate(row, ctx);
     const flagReasons = {};
     const pendingOwnerConfirmation = {};
@@ -645,6 +695,10 @@ export async function runSanity(env, input, deps = {}) {
       officialBranch: row._officialBranch || null,
       flagReasons,
       gateNotes: row._gateNotes || null,
+      brandItemId: row.raw?.builder ? (row.raw.builder.id ?? null) : (row.cells['品牌货号'] ?? null),
+      brandItemIdSource: row.raw?.builder?.source ?? null,
+      brandItemIdFlag: row.raw?.builder?.flag ?? row.flags['品牌货号'] ?? null,
+      brandItemIdReason: row.raw?.builder?.reason ?? flagReasons['品牌货号'] ?? null,
       pendingOwnerConfirmation: Object.keys(pendingOwnerConfirmation).length ? pendingOwnerConfirmation : null,
       storeClues: row.storeClues || null,
     };

@@ -28,21 +28,49 @@ const sameCode = (a, b) => compact(a) && compact(a).toUpperCase() === compact(b)
 export function isUnlabelledTenDigits(value) {
   return /^\d{10}$/.test(compact(value));
 }
+export function isConcessionFamily(value) {
+  return /^9999999\d*$/.test(compact(value));
+}
+export function isBareFourDigits(value) {
+  return /^\d{4}$/.test(compact(value));
+}
+// Harrods layout: a 4-digit department/concession code, then a 10-digit code.
+export function harrodsConcessionPair(value) {
+  const match = /^(\d{4})\s+(\d{10})\b/.exec(String(value ?? '').trim());
+  return match ? { concessionCode: match[1], internalCode: match[2] } : null;
+}
+function pairOn(item) {
+  return harrodsConcessionPair(item.itemId) || harrodsConcessionPair(item.sku)
+    || harrodsConcessionPair(`${clean(item.concessionCode) || ''} ${clean(item.internalCode) || ''}`.trim());
+}
+// 'concession' for a labelled concession/internal code, the 9999999… family, or
+// the Harrods 4+10 layout. 'last4' for any other bare 4-digit value.
+export function concessionReading(value, item = {}) {
+  const text = clean(value);
+  if (!text) return null;
+  const pair = pairOn(item) || harrodsConcessionPair(text);
+  const labelled = sameCode(text, item.concessionCode) || sameCode(text, item.internalCode);
+  const inPair = pair && (sameCode(text, pair.concessionCode) || sameCode(text, pair.internalCode) || Boolean(harrodsConcessionPair(text)));
+  if (labelled || inPair || isConcessionFamily(text)) return 'concession';
+  if (isBareFourDigits(text)) return 'last4';
+  return null;
+}
 
 function formatMiss(item, value, brandIdFormat) {
   const verdict = brandIdFormat(item.brand, value);
   return verdict == null || verdict === false || verdict === 'no match';
 }
 
-// Trust the Reader's labels. Do not decide that a number is a concession code,
-// an EAN, or a style ref from its shape. The one exception is an unlabelled
-// numeric-only 10-digit value, which stays out unless the brand ID-format
-// hook matches it. A value supplied as styleRef always stays eligible.
+// Reader labels, the 9999999… family, a bare 4-digit value, and the Harrods
+// 4+10 layout stay out of the cell. An unlabelled numeric-only 10-digit value
+// stays out unless the brand ID-format hook matches it. Any other styleRef,
+// including 000001, stays eligible.
 export function heldOutOfBrandItem(value, item, brandIdFormat = () => 'no match') {
   const text = clean(value);
   if (!text) return true;
+  if (concessionReading(text, item)) return true;
   if (sameCode(text, item.styleRef)) return false;
-  if (sameCode(text, item.concessionCode) || sameCode(text, item.internalCode) || sameCode(text, item.ean)) return true;
+  if (sameCode(text, item.ean)) return true;
   if (isUnlabelledTenDigits(text)) return formatMiss(item, text, brandIdFormat);
   return false;
 }
@@ -58,15 +86,19 @@ export function selectBrandItem(item = {}, brandIdFormat = () => 'no match') {
   push(item.concessionCode);
   push(item.internalCode);
   push(item.ean);
-  for (const value of [item.itemId, item.sku]) {
+  const pair = pairOn(item);
+  if (pair) { push(pair.concessionCode); push(pair.internalCode); }
+  for (const value of [item.itemId, item.sku, item.styleRef]) {
     if (clean(value) && heldOutOfBrandItem(value, item, format)) push(value);
   }
   const cell = [item.styleRef, item.itemId, item.sku].map(clean).find(value => value && !heldOutOfBrandItem(value, item, format)) || null;
   const lookupId = clean(item.itemId) || clean(item.ean) || clean(item.sku) || clean(item.styleRef);
+  const reading = concessionReading(lookupId, item);
   let idClass = 'printed';
-  if (lookupId && (sameCode(lookupId, item.concessionCode) || sameCode(lookupId, item.internalCode))) idClass = 'concession';
+  if (cell && sameCode(cell, item.styleRef) && !concessionReading(cell, item)) idClass = 'style';
+  else if (reading === 'last4') idClass = 'last4';
+  else if (reading === 'concession') idClass = 'concession';
   else if (lookupId && sameCode(lookupId, item.ean)) idClass = 'ean';
-  else if (lookupId && sameCode(lookupId, item.styleRef)) idClass = 'style';
   else if (lookupId && isUnlabelledTenDigits(lookupId) && heldOutOfBrandItem(lookupId, item, format)) idClass = 'unlabelled10';
   else if (cell && sameCode(cell, item.styleRef)) idClass = 'style';
   return { cell, storeCodes, lookupId, idClass };
