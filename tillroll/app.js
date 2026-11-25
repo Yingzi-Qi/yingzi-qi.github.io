@@ -1,17 +1,20 @@
 import {oldestPurchaseFirst,purchaseDateText} from './receipt-date-display.js?v=8';
 import {inspectReference,combineReferenceReadings} from './reference.js?v=6';
-import {readPhoto,secondReadPhoto,extractLocal,extractAI,reconcileReadings,photoFieldConflicts,recoverPhotoItemIds} from './extract.js?v=curatedphotos1';
-import {checkReceipt,samePurchase,reviewForLine,verifyImportedItemIds} from './checks.js?v=productcodes3';
-import {exportExcel,exportCSV,readOrderFile,readAchungWorkbook,readTillrollEdits} from './exports.js?v=policy1';
-import {planWorkbookRefresh,restoreWorkbookReceipts,nextWorkbookBaseline,withLegacyWorkbookBaseline,nextLegacyWorkbookBaseline} from './workbook-refresh.js?v=2';
+import {readPhoto,secondReadPhoto,extractLocal,extractAI,reconcileReadings,photoFieldConflicts,recoverPhotoItemIds,prepareModelReading,normalizeReading} from './extract.js?v=discounts1';
+import {checkReceipt,samePurchase,reviewForLine,verifyImportedItemIds} from './checks.js?v=discounts1';
+import {normalizePurchaseTime,confirmedStoreReceiptId} from './receipt-rules.js?v=1';
+import {batchDateFlags} from './date-sanity.js?v=1';
+import {exportExcel,exportChinaExcel,exportCSV,readOrderFile,readAchungWorkbook,readTillrollEdits} from './exports.js?v=history2';
+import {planWorkbookRefresh,restoreWorkbookReceipts,nextWorkbookBaseline,withLegacyWorkbookBaseline,nextLegacyWorkbookBaseline} from './workbook-refresh.js?v=history2';
 import {bindExcelRefresh} from './excel-refresh-ui.js?v=1';
 import {loadSamples} from './samples.js?v=curatedphotos1';
 import {compareOrder,orderNeedsReview} from './orders.js?v=lineverify1';
-import {verifyOutputItems} from './item-verification.js?v=policy1';
+import {verifyOutputItems} from './item-verification.js?v=history2';
 import {createLookupClient, enrichReceipt} from './lookup-enrich.js?v=lookup2';
 import {photoVerificationRows} from './verification-photo.js?v=curatedphotos1';
-import {captureLineWarnings,classifyVerification,hasVerificationMismatch} from './verification-history.js?v=lineverify1';
+import {captureLineWarnings,classifyVerification,hasVerificationMismatch} from './verification-history.js?v=history2';
 import {normalizeReceiptData,kindForFlag,kindForVerification,reviewKinds} from './receipt-policy.js?v=policy1';
+import {recordReading,recordExport,recordRefresh,historyEntries,clearHistory} from './reading-history.js?v=history1';
 const $ = s=>document.querySelector(s);
 const escape = v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const paths={settings:'<path d="M4 7h5m4 0h7M4 17h9m4 0h3"/><circle cx="11" cy="7" r="2"/><circle cx="15" cy="17" r="2"/>',upload:'<path d="M12 15V3m-5 5 5-5 5 5M4 14v5a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5"/>',plus:'<path d="M12 5v14M5 12h14"/>',download:'<path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/>',search:'<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>',link:'<path d="m10 14 4-4m-4-3 2-2a5 5 0 0 1 7 7l-2 2m-3 3-2 2a5 5 0 0 1-7-7l2-2"/>',play:'<path d="m8 5 10 7-10 7z"/>'};
@@ -27,7 +30,7 @@ let referenceHash=null,referenceRevision=0;
 const excelBaselines=new Map();
 const legacyBaselines=new Map();
 const emptyOCR=()=>({text:'',confidence:0,lines:[]});
-const blankItem=()=>({brand:'',item:'',sku:'',itemId:'',colour:'',size:'',qty:null,unitPrice:null,amount:null});
+const blankItem=()=>({brand:'',item:'',sku:'',itemId:'',colour:'',size:'',qty:null,unitPrice:null,amount:null,lineDiscount:null,lineDiscountLabel:null,lineDiscounts:null});
 const referenceLabels={orderId:'Order ID',orderNumber:'Order number',receiptReference:'Receipt reference'};
 const sameReference=(a,b)=>String(a??'').trim().toLowerCase()===String(b??'').trim().toLowerCase();
 const get=(obj,key)=>key.split('.').reduce((v,k)=>v?.[k],obj);
@@ -38,6 +41,21 @@ const active = ()=>batch.filter(r=>r.state==='done' && !r.duplicateOf).sort(olde
 const notDone = r=>['queued','reading','checking','second'].includes(r.state);
 const isReview = r=>r.state==='error' || (!r.duplicateOf && r.data && (r.review.flags.some(x=>x.severity!=='info') || r.review.photo.some(x=>x.status==='Needs review') || r.orders?.some(orderNeedsReview) || r.verification?.some(hasVerificationMismatch)));
 function note(message){const n=$('#notice');clearTimeout(noticeTimer);n.hidden=!message;n.textContent=message;if(message)noticeTimer=setTimeout(()=>{n.hidden=true;},6500);}
+function historyRecordReading(r){try{recordReading(r);}catch{} }
+function formatHistoryTime(value){try{return new Intl.DateTimeFormat('en-GB',{dateStyle:'medium',timeStyle:'short'}).format(new Date(value));}catch{return value||'';}}
+function renderHistory(){
+  const list=$('#history-list');if(!list)return;
+  const entries=historyEntries();
+  if(!entries.length){list.innerHTML='<p class="history-empty">No reading or workbook history yet.</p>';return;}
+  list.innerHTML=entries.map(entry=>{
+    const events=(entry.events||[]).slice(0,12);
+    const lines=entry.reading?.lines||[];
+    const eventHtml=events.map(event=>`<li><span class="history-tag ${event.type==='manual-clear'||event.type==='lookup-change'?'change':event.type==='refresh'?'refresh':''}">${escape(event.type==='manual-clear'?'Manual correction':event.type==='refresh'?'Excel refresh':event.type==='lookup-change'?'Lookup change':event.type==='export'?'Export':'Reading')}</span> <time>${escape(formatHistoryTime(event.at))}</time> · ${escape(event.detail||'')}</li>`).join('');
+    const preview=lines.length?`<details class="history-preview"><summary>View ${lines.length} exported row${lines.length===1?'':'s'}</summary><div class="history-table"><div class="history-row history-head"><span>品牌</span><span>品名</span><span>品牌货号</span><span>采购商品金额</span></div>${lines.map(line=>`<div class="history-row"><span>${escape(line.brand||'—')}</span><span>${escape(line.item||'—')}</span><span>${escape(line.itemId||'—')}</span><span>${escape(line.amount??line.unitPrice??'—')}</span></div>`).join('')}</div></details>`:'';
+    return `<article class="history-entry"><strong>${escape(entry.filename||entry.merchant||'Receipt')}</strong><small>${escape(entry.merchant||'')}</small><div class="history-meta"><ul>${eventHtml}</ul></div>${preview}</article>`;
+  }).join('')||'<p class="history-empty">No reading or workbook history yet.</p>';
+}
+function openHistory(){renderHistory();const dialog=$('#history-dialog');if(dialog && !dialog.open)dialog.showModal();}
 function importedPhotoChecks(r, fillMissing=false) {
   const passes=(r.itemIdReadings || []).map(ocr=>verifyImportedItemIds(r.data,ocr));
   if (!passes.length) return [];
@@ -124,6 +142,12 @@ function verifyFinalOutput(r) {
   if(branch && r.data.merchant) r.data.merchantDisplay=r.data.merchant+' · '+String(branch).split(',').slice(0,2).join(',').trim();
   r.verification=results.map((result,i)=>{
     const line=classifyVerification(result,r.priorLineChecks[i]);
+    const manualFields=[`items.${i}.verification`,`items.${i}.verification.status`,`items.${i}.verification.reason`,
+      ...result.fields.map(field=>`items.${i}.${field.key}`)];
+    if (manualFields.some(field=>r.manualClears?.has(field)) && hasVerificationMismatch(line)) {
+      line.status='Manually cleared';
+      line.reason='Previously reviewed in Excel and manually unflagged. '+line.reason;
+    }
     const sources=[...new Set(result.fields.map(field=>field.source))];
     if (!r.data.items[i].itemId && r.data.items[i].sku && line.status==='Not verified') {
       line.reason='This line has a style/SKU. Verification by item ID needs a separately recorded item ID.';
@@ -133,15 +157,26 @@ function verifyFinalOutput(r) {
   });
 }
 
+// Model and saved readings get the same printed-store clues and true-zero audit as on-device OCR.
+function zeroPriceNotes(r) {
+  const excluded=r.data?.excludedZeroItems || [];
+  if(!excluded.length)return;
+  const note='Excluded '+excluded.length+' confirmed zero-price line'+(excluded.length===1?'':'s')+' from the table and export: '+
+    excluded.map(z=>[z.item?.brand,z.item?.item||z.item?.itemId||z.item?.sku].filter(Boolean).join(' ')||'unnamed line').join(', ')+'.';
+  r.notes=[...(r.notes||[]).filter(n=>!n.startsWith('Excluded ')),note];
+}
 function finalizeOutput(r) {
+  zeroPriceNotes(r);
   r.priorLineChecks=captureLineWarnings(r);
   verifyFinalOutput(r);
+  historyRecordReading(r);
 }
 
 function evaluate(r, fillMissing=false) {
   if (!r.data) return;
   evaluateReceipt(r,fillMissing);
   if (r.priorLineChecks) verifyFinalOutput(r);
+  applyBatchDateSanity();
 }
 
 function evaluateReceipt(r,fillMissing){
@@ -160,7 +195,9 @@ function evaluateReceipt(r,fillMissing){
   r.record={...r.data};
   const choice=r.confirmedReference;
   const competing=choice?.values || (r.reference.suggestion ? r.reference.candidates.map(c=>c.value) : []);
+  const storeOwned=[ocr, other].filter(Boolean).some(pass=>confirmedStoreReceiptId(r.data.merchant, pass, r.data.receiptReference));
   for(const key of Object.keys(referenceLabels)){
+    if(storeOwned && key==='receiptReference') continue;
     if(!r.editedReferences?.has(key) && competing.some(value=>sameReference(value,r.data[key]))) r.record[key]=null;
   }
   if(choice){
@@ -172,7 +209,7 @@ function evaluateReceipt(r,fillMissing){
   const ref=r.reference;
   // Duplicate detection can use printed or manually accepted IDs, independently of an imported list.
   r.duplicateRecord={...r.record};
-  if(ref.status==='found' && !r.record[ref.kind] && !r.editedReferences?.has(ref.kind))
+  if(ref.status==='found' && !r.record[ref.kind] && !r.editedReferences?.has(ref.kind) && !(storeOwned && ref.kind==='receiptReference'))
     r.record[ref.kind]=ref.value;
   r.review=checkReceipt(r.record,ocr,r.previous||null,{...confidenceOptions(r),reference:ref,orders:orderList,demoFormats:r.demo?.set==='demo'});
   if(r.origin==='workbook' && !ocr.text){
@@ -183,12 +220,12 @@ function evaluateReceipt(r,fillMissing){
   if(r.origin==='ai' && ocr.text) {
     for(const issue of photoFieldConflicts(r.record,ocr)) extra.push({...issue,stage:'Model compared with photo OCR'});
   }
-  if(r.verifyIssue)extra.push({field:'verification',message:r.verifyIssue,severity:'check',escalate:false});
+  if(r.verifyIssue)extra.push({field:'verification',message:r.verifyIssue,severity:'check',escalate:false,category:'reading',kind:'reading'});
   for(const issue of extra){
     if(choice && issue.field===choice.kind)continue;
     if(!r.review.flags.some(f=>f.field===issue.field && f.message===issue.message))r.review.flags.push(issue);
   }
-  r.review.flags=r.review.flags.filter(f=>!r.ack.has(f.field+'|'+f.message));
+  r.review.flags=r.review.flags.filter(f=>!r.ack.has(f.field+'|'+f.message) && !r.manualClears?.has(f.field));
   if(r.data.items.length && !r.review.photo.length)r.review.photo=r.data.items.map(()=>({status:'Not verified',reason:'No photo evidence available.'}));
   r.orders=r.lookupReady ? comparePurchase(r.record) : null;
 }
@@ -214,7 +251,22 @@ function startInput(entries, useSaved=savedSamples){
   }
   filter='all';render();pump();
 }
-function pump(){while(nowReading<2 && queue.length){const r=queue.shift();if(r.generation!==generation)continue;nowReading++;run(r).finally(()=>{nowReading--;if(!queue.length&&!batch.some(notDone))finishedTime=Date.now();render();pump();});}}
+function applyBatchDateSanity(){
+  if(batch.some(notDone))return;
+  const flags=batchDateFlags(batch.filter(r=>r.data).map(r=>({
+    id:r.id, date:r.data.date,
+    humanVerifiedUnflagged:[...(r.ack||[])].some(key=>String(key).startsWith('purchaseTime')) ? ['purchaseTime'] : [],
+  })), {uploadTime:new Date()});
+  const byId=new Map(flags.map(flag=>[flag.id, flag]));
+  for(const r of batch){
+    if(!r.review?.flags)continue;
+    r.review.flags=r.review.flags.filter(flag=>flag.source!=='batch-date');
+    const flag=byId.get(r.id);
+    if(!flag || [...(r.ack||[])].some(key=>String(key).startsWith('purchaseTime')))continue;
+    r.review.flags.push({field:'purchaseTime', message:flag.message, severity:'check', escalate:true, category:'reading', kind:'reading', source:'batch-date'});
+  }
+}
+function pump(){while(nowReading<2 && queue.length){const r=queue.shift();if(r.generation!==generation)continue;nowReading++;run(r).finally(()=>{nowReading--;if(!queue.length&&!batch.some(notDone)){finishedTime=Date.now();applyBatchDateSanity();}render();pump();});}}
 async function fingerprint(file){const b=new Uint8Array(await crypto.subtle.digest('SHA-256',await file.arrayBuffer()));return Array.from(b,n=>n.toString(16).padStart(2,'0')).join('');}
 async function run(r){
   const begun=performance.now();const current=()=>r.generation===generation&&batch.includes(r);const {mode:chosenMode,key:chosenKey}=r.readerSettings;delete r.readerSettings;
@@ -223,7 +275,7 @@ async function run(r){
     const owner=hashOwners.get(r.hash);
     if(owner && owner!==r.id){r.exactOf=owner;r.duplicateOf=owner;r.state='duplicate';return;}
     hashOwners.set(r.hash,r.id);
-    if(r.useSaved){r.data=normalData(structuredClone(r.demo.data));r.ocr=r.demo.ocr;r.otherOcr=r.demo.referenceOcr;r.origin='sample';r.method='Saved reading';}
+    if(r.useSaved){r.data=normalData(normalizeReading(structuredClone(r.demo.data)));r.ocr=r.demo.ocr;r.otherOcr=r.demo.referenceOcr;r.origin='sample';r.method='Saved reading';}
     else{
       const modelEnabled=chosenMode==='ai'&&!!chosenKey;
       const [ocrRead,aiRead]=await Promise.allSettled([readPhoto(r.file),modelEnabled?extractAI(r.file,chosenKey,1,[]):Promise.resolve(null)]);if(!current())return;
@@ -233,7 +285,7 @@ async function run(r){
       else if(r.ocr.text){r.data=normalData(extractLocal(r.ocr));r.origin='local';r.method='Local OCR';if(modelEnabled)r.notes.push('Gemini was unavailable. This result uses on-device OCR.');}
       else throw new Error('No readable extraction. Try a brighter, sharper photo or check the reader settings.');
     }
-    if (r.origin==='ai' || r.origin==='sample') r.data=recoverPhotoItemIds(r.data,r.ocr);
+    if (r.origin==='ai' || r.origin==='sample') r.data=prepareModelReading(recoverPhotoItemIds(r.data,r.ocr),r.ocr);
     r.firstData=structuredClone(r.data);evaluate(r);
     const failures=r.review.flags.filter(f=>f.escalate);const hasPhotoIssues=r.review.photo.some(p=>p.status==='Needs review');
     const orderIssue=r.orders?.some(orderNeedsReview);
@@ -249,7 +301,7 @@ async function run(r){
       try{
         let next;
         if(r.usedAI){
-          next=recoverPhotoItemIds(await extractAI(r.file,chosenKey,2,r.reasons),r.ocr);
+          next=prepareModelReading(recoverPhotoItemIds(await extractAI(r.file,chosenKey,2,r.reasons),r.ocr),r.ocr);
         }else{
           const other=await secondReadPhoto(r.file);
           if(!current())return;
@@ -339,7 +391,8 @@ function itemRow(r,item,i,shared=''){
   const field='items.'+i+'.';
   const price=item.amount==null ? '' : [r.data.currency,amountFormat.format(item.amount)].filter(Boolean).join(' ');
   const check=r.verification?.[i];
-const status=check ? `<button class="line-verification ${hasVerificationMismatch(check)?'line-warning':''} ${kindForVerification(check)==='reading'?'reading-error':'lookup-uncertainty'}" data-id="${r.id}" data-path="verification.${i}" title="${escape(check.reason)}" aria-label="${escape('Line '+(i+1)+' verification: '+check.status)}">${escape(check.status)}</button>` : '';
+const reviewClass=check && hasVerificationMismatch(check) ? (kindForVerification(check)==='reading'?'reading-error':'lookup-uncertainty') : '';
+  const status=check ? `<button class="line-verification ${hasVerificationMismatch(check)?'line-warning':''} ${reviewClass}" data-id="${r.id}" data-path="verification.${i}" title="${escape(check.reason)}" aria-label="${escape('Line '+(i+1)+' verification: '+check.status)}">${escape(check.status)}</button>` : '';
   const lookupRows=(r.lookup?.unitRows || []).filter(row=>row.sourceIndex===i);
   const lookupLabel=lookupRows.some(row=>row.flag==='amber') ? `<span class="lookup-pill" title="${escape(lookupRows.map(row=>row.reviewNote).filter(Boolean).join(' '))}">Look-up</span>` : '';
   return `<tr>${shared}<td>${cell(r,field+'brand',item.brand,'Edit brand')}</td><td class="item-id">${productCodeCell(r,item,field)}</td><td>${cell(r,field+'item',item.item,'Edit item')}${status}${lookupLabel}</td><td class="money">${cell(r,field+'amount',price,'Line amount including quantity')}</td></tr>`;
@@ -399,7 +452,7 @@ function render(){
   const headers=['Receipt','Purchase date','Shop','Order number','Brand','Item ID','Item','Price'].map(title=>
     title==='Purchase date' ? '<th scope="col" aria-sort="ascending" title="Oldest purchase first">Purchase date <span aria-hidden="true">↑</span></th>' : `<th scope="col">${title}</th>`);
   $('#table').innerHTML=shown.length?`<table class="receipt-lines" aria-label="Receipt line items"><thead><tr>${headers.join('')}</tr></thead>${shown.map(rowHTML).join('')}</table>`:'<p class="empty">No receipts match this view.</p>';
-  $('#refresh-excel').disabled=$('#excel').disabled=$('#csv').disabled=!done.length||work;
+  $('#refresh-excel').disabled=$('#excel').disabled=$('#excel-china').disabled=$('#csv').disabled=!done.length||work;
   $('#startover').disabled=work;$('#clear-orders').hidden=!orderList;
 }
 function resolveImportFlags(r, resolved){
@@ -436,17 +489,27 @@ function updateReceiptFields(r,data,removeIndex=null){
     }));
   }
   if(data.date!==r.record.date)delete data.dateIssue;
+  if(data.time!==r.record.time){const time=normalizePurchaseTime(data.time);if(time)data.time=time;}
   r.readingConflicts=(r.readingConflicts||[]).filter(f=>JSON.stringify(get(data,f.field))===JSON.stringify(get(r.record,f.field)));
   if(data.merchant!==r.data.merchant || (r.confirmedReference && data[r.confirmedReference.kind]!==r.record[r.confirmedReference.kind]))r.confirmedReference=null;
   for(const key of Object.keys(referenceLabels)){
     if(data[key]===r.record[key])data[key]=r.data[key];
     else (r.editedReferences??=new Set()).add(key);
   }
-  r.data=normalData(data);removeReceiptLine(r,removeIndex);r.ack.clear();r.lookupReady=true;evaluate(r);
+  const previousData=r.data;
+  r.data=normalData(data);removeReceiptLine(r,removeIndex);r.ack.clear();r.manualClears??=new Set();
+  for(const key of ['merchant','date','time','orderNumber','orderId','receiptReference','payment','card'])
+    if(data[key]!==previousData?.[key])r.manualClears.delete(key);
+  (data.items||[]).forEach((item,index)=>{
+    const before=previousData?.items?.[index]||{};
+    for(const key of ['brand','itemId','item','sku','colour','size','qty','unitPrice','amount'])
+      if(item[key]!==before[key])r.manualClears.delete(`items.${index}.${key}`);
+  });
+  r.lookupReady=true;evaluate(r);
 }
 async function openDetail(id,path=''){
   const r=batch.find(x=>x.id===Number(id));if(!r)return;
-  const {showDetail}=await import('./detail.js?v=lookup1');
+const {showDetail}=await import('./detail.js?v=history2-lookup');
   const refresh=()=>{duplicates();render();};
   const rerender=(focus='')=>{refresh();openDetail(r.id,focus).catch(e=>note(e.message));};
   showDetail({...r,data:r.record||r.data},{
@@ -500,16 +563,23 @@ for(const button of document.querySelectorAll('[data-sample-set]'))
 $('#more-samples').onclick=e=>addSampleSet(e.currentTarget.dataset.next);
 $('#filters').onclick=e=>{const b=e.target.closest('[data-filter]');if(b){filter=b.dataset.filter;render();}};
 $('#search').oninput=render;
+$('#history').onclick=openHistory;$('#landing-history').onclick=openHistory;$('#history-clear').onclick=()=>{clearHistory();renderHistory();};$('#history-refresh').onclick=()=>{const dialog=$('#history-dialog');if(dialog?.open)dialog.close();$('#refresh-excel')?.click();};
 $('#table').onclick=e=>{const b=e.target.closest('[data-id]');if(b)openDetail(b.dataset.id,b.dataset.path).catch(err=>note(err.message));};
 async function downloadBatch(exporter) {
   const current=generation;
   try {
-    const blob=await exporter(active());
+    const receipts=active();
+    const blob=await exporter(receipts);
     const hash=await fingerprint(blob);
-    if(current===generation) receiptFileHashes.add(hash);
+    if(current===generation) {
+      receiptFileHashes.add(hash);
+      recordExport(receipts,exporter===exportChinaExcel?'china':exporter===exportExcel?'detailed':'csv');
+      renderHistory();
+    }
   } catch(e) { note('Export failed. '+e.message); }
 }
 $('#excel').onclick=()=>downloadBatch(exportExcel);
+$('#excel-china').onclick=()=>downloadBatch(exportChinaExcel);
 $('#csv').onclick=()=>downloadBatch(exportCSV);
 async function prepareExcelRefresh(file){
   const currentGeneration=generation;
@@ -541,12 +611,13 @@ function finishExcelRefresh({filename,hash,parsed,currentGeneration,records,patc
   const previousOrders=orderList, clearReference=referenceHash===hash;
   if(clearReference)orderList=null;
   const drafts=new Map();
+  const refreshLookupChanges=new Map();
   let restored=[];
   try{
     if(records){
       const group=Symbol();
       restored=records.map((entry,i)=>{
-        const r={...entry,id:seq+i+1,data:normalData(entry.data),origin:'workbook',state:'done',lookupReady:true,
+        const r={...entry,id:seq+i+1,data:normalData(entry.data),origin:'workbook',state:'done',lookupReady:true,manualClears:new Set(entry.manualClears||[]),
           method:'Tillroll Excel',workbookName:filename,importGroup:group,editedReferences:new Set(Object.keys(referenceLabels)),
           ack:new Set(),notes:[],reasons:[]};
         evaluate(r);finalizeOutput(r);return r;
@@ -554,12 +625,18 @@ function finishExcelRefresh({filename,hash,parsed,currentGeneration,records,patc
       if(!parsed.exportKey)nextLegacy=nextLegacyWorkbookBaseline(parsed,restored,[]);
     }else{
       if(!parsed.exportKey)nextLegacy=nextLegacyWorkbookBaseline(parsed,batch,patches);
-      for(const {receipt:r,receiptChanges,itemChanges} of patches){
+      for(const {receipt:r,receiptChanges,itemChanges,clearedFields=[]} of patches){
         const data=structuredClone(r.record || r.data);
         Object.assign(data,receiptChanges);
         for(const {index,fields} of itemChanges)Object.assign(data.items[index],fields);
-        const draft={...r,ack:new Set(r.ack),editedReferences:new Set(r.editedReferences),sourceNotes:r.sourceNotes?.slice()};
-        updateReceiptFields(draft,data);drafts.set(r,draft);
+        const beforeLookup=JSON.stringify((r.verification||[]).map(line=>({status:line.status,reason:line.reason,source:line.source})));
+        const draft={...r,ack:new Set(r.ack),manualClears:new Set(r.manualClears||[]),editedReferences:new Set(r.editedReferences),sourceNotes:r.sourceNotes?.slice()};
+        updateReceiptFields(draft,data);
+        for(const field of clearedFields)draft.manualClears.add(field);
+        evaluate(draft);
+        const afterLookup=JSON.stringify((draft.verification||[]).map(line=>({status:line.status,reason:line.reason,source:line.source})));
+        refreshLookupChanges.set(r,beforeLookup!==afterLookup);
+        drafts.set(r,draft);
       }
       if(clearReference){
         for(const r of batch)if(r.data && !drafts.has(r)){
@@ -577,6 +654,13 @@ function finishExcelRefresh({filename,hash,parsed,currentGeneration,records,patc
   for (const r of batch) if (r.state==='done') scheduleLookup(r);
   render();
   const n=records ? restored.length : patches.length;
+  if(records) restored.forEach(receipt=>recordRefresh({receipt,changedFields:[],clearedFields:receipt.manualClears||[],lookupChanged:(receipt.verification||[]).some(hasVerificationMismatch)}));
+  else patches.forEach(({receipt,receiptChanges,itemChanges,clearedFields=[]})=>{
+    const changedFields=[...Object.keys(receiptChanges),...itemChanges.flatMap(({index,fields})=>Object.keys(fields).map(key=>`items.${index}.${key}`))];
+    const updated=drafts.get(receipt)||receipt;
+    recordRefresh({receipt:updated,changedFields,clearedFields,lookupChanged:refreshLookupChanges.get(receipt)??false});
+  });
+  renderHistory();
   const message=records ? `Opened ${n} receipt${n===1?'':'s'} from Excel.`
     : n ? `Updated ${n} receipt${n===1?'':'s'} from Excel. Checks refreshed.` : 'Already up to date.';
   note(message+(clearReference?' Select a separate file to compare orders.':''));

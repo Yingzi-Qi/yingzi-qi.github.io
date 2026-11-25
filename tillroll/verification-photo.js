@@ -1,5 +1,5 @@
 import {currencyMarks,receiptCurrency} from './photo-currency.js';
-import {readPrintedProductRows,readPrintedAmounts,nearbyPrintedRows} from './extract.js?v=curatedphotos1';
+import {readPrintedProductRows,readPrintedAmounts,nearbyPrintedRows} from './extract.js?v=discounts1';
 
 const fields=['item','brand','amount','unitPrice','qty','currency'];
 const fold=value=>String(value??'').normalize('NFKC').replace(/\s+/g,' ').trim().toLowerCase();

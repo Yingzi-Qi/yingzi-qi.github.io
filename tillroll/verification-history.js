@@ -31,4 +31,5 @@ export function classifyVerification(result,earlier=[]) {
   return {...result,status:earlier.length?'Previously flagged':'Verification error',reason:result.reason+' '+history};
 }
 
-export const hasVerificationMismatch=line=>line?.status==='Verification error' || line?.status==='Previously flagged';
+export const hasVerificationMismatch=line=>Boolean(line) && line.status!=='Manually cleared' &&
+  (line.status==='Verification error' || line.status==='Previously flagged' || (line.kind==='lookup' && !line.skipped));
