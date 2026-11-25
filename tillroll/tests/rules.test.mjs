@@ -16,6 +16,11 @@ const read = rows => { const ocr = makeOcr(rows); const data = extractLocal(ocr)
 const flagsFor = (review, field) => review.flags.filter(f => f.field === field && f.severity !== 'info');
 
 // ---- 2. 采购时间 -----------------------------------------------------------
+test('receipt numbers keep O and I and offer the digit reading', () => {
+  const shop = read(['ATELIER', '15/11/2026 14:03', 'Wool hat 25.00', 'Receipt # AT-1O0I', 'TOTAL 25.00']);
+  assert.equal(shop.data.receiptReference, 'AT-1O0I');
+  assert.ok(shop.data.receiptReferenceAlternatives.includes('AT-1001'));
+});
 test('time: 24-hour HH:MM:SS, seconds default to :00, am/pm converted', () => {
   assert.equal(normalizePurchaseTime('14:03'), '14:03:00');
   assert.equal(normalizePurchaseTime('9:05'), '09:05:00');

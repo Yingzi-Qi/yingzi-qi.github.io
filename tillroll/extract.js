@@ -3,7 +3,7 @@ import {inspectReference} from './reference.js?v=6';
 import {isGtin,isPrintedItemNumber,parsePrintedItemId,printedBarcodeDetail,barcodesBelowNames} from './product-code.js?v=productcodes3';
 import {readPurchaseDate} from './purchase-date.js?v=8';
 import {comparePhotoFields,mergeReadings} from './reading-comparison.js?v=discounts1';
-import {readPurchaseTime,normalizePurchaseTime,readTender,normalizeTender,toPaymentMethod,dropCardDigits,brandItemIdCandidate,readPrintedStyleRef,readStoreClues,mergeStoreClues,storeReceiptId,cleanProductCode,applyZeroPriceExclusion,isUkPurchase} from './receipt-rules.js?v=1';
+import {readPurchaseTime,normalizePurchaseTime,readTender,normalizeTender,toPaymentMethod,dropCardDigits,brandItemIdCandidate,readPrintedStyleRef,readStoreClues,mergeStoreClues,storeReceiptId,cleanProductCode,applyZeroPriceExclusion,isUkPurchase,confusableDigitAlternative} from './receipt-rules.js?v=1';
 import {sortItemFields} from './field-sorter.js';
 import {applyItemIdentifiers, isUntrustedReceiptText, maskCardField, cardScheme} from './item-identifiers.js';
 // OCR assets resolve on this site. Receipt images remain in the tab unless the
@@ -929,6 +929,11 @@ export function extractLocal(ocr) {
   const reference=inspectReference(result,ocr);
   if (reference.status==='found' && !result[reference.kind] && !(storeId && reference.kind==='receiptReference'))
     result[reference.kind]=reference.value;
+  const confusable=confusableDigitAlternative(result.receiptReference);
+  if(confusable){
+    const list=result.receiptReferenceAlternatives||[];
+    if(!list.includes(confusable)) result.receiptReferenceAlternatives=[...list, confusable];
+  }
   result.imageQuality=ocr.confidence<.65?'poor':'unknown';
   result.model='On-device OCR'; result.cost=0;
   return applyItemIdentifiers(applyZeroPriceExclusion(normalizeReading(result),ocr), ocr);

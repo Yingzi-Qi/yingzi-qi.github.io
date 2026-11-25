@@ -14,6 +14,14 @@ const pad = value => String(value).padStart(2, '0');
 const clockPattern = /(?<![\d:.,])([01]?\d|2[0-3])\s*[:h]\s*([0-5]\d)(?:\s*:\s*([0-5]\d))?(?:\s*([ap])\.?\s*m\.?(?![a-z]))?(?![\d:]|[.,]\d)/i;
 
 // Normalise one printed clock value. Returns null when the value is not a valid time.
+// Keep the printed receipt number. O and I are also offered as 0 and 1.
+export function confusableDigitAlternative(value) {
+  const text = String(value ?? '');
+  if (!/[OI]/i.test(text)) return null;
+  const swapped = text.replace(/O/gi, '0').replace(/I/gi, '1');
+  return swapped === text ? null : swapped;
+}
+
 export function normalizePurchaseTime(value) {
   const text = clean(value);
   if (!text) return null;
