@@ -300,11 +300,13 @@ export function officialSource(candidate, brand, table = DEFAULT_OFFICIAL_FALLBA
   const allowed = onPrimaryUrl || serverPrimary || (fallbackUrlsOnly && access.primaryBlocked);
   const blockedName = access.blockedDomain || spec.primary[0] || 'official site';
   const place = fallbackUrl ? placeOf(fallbackUrl, spec.fallbacks) : '';
+  const gbpConfirmed = String(candidate?.currency || '').trim().toUpperCase() === 'GBP';
+  const priceClause = gbpConfirmed ? '' : '; GBP price cannot be confirmed on the fallback path';
   return {
     acceptable: allowed,
     onPrimary: onPrimaryUrl || serverPrimary,
     fallbackOnly: Boolean(fallbackUrlsOnly && access.primaryBlocked && allowed),
-    fallbackNote: fallbackUrlsOnly && access.primaryBlocked ? `${blockedName} blocked; confirmed on ${place}` : '',
+    fallbackNote: fallbackUrlsOnly && access.primaryBlocked ? `${blockedName} blocked; confirmed on ${place}${priceClause}` : '',
   };
 }
 

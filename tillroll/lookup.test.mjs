@@ -324,7 +324,7 @@ describe('official-site acceptance', () => {
     assert.equal(row.flag, 'amber');
     assert.equal(row.flagColour, '#FDE68A');
     assert.equal(row.fields['品名'].flag, 'amber');
-    assert.match(row.reviewNote, /chanel\.com blocked; confirmed on chanel\.cn\/gb/);
+    assert.match(row.reviewNote, /chanel\.com blocked; confirmed on chanel\.cn\/gb; GBP price cannot be confirmed on the fallback path/);
     assert.equal(row.fields['采购商品原价'].value, 5200);
     assert.equal(row.fields['采购商品原价'].flag, null);
     assert.deepEqual(row.fields['采购商品原价'].officialValue, { amount: 88000, currency: 'CNY' });
@@ -346,7 +346,17 @@ describe('official-site acceptance', () => {
       blockedDomain: 'chanel.com',
     });
     assert.equal(errored.winner.officialName, 'Mini Flap Bag');
-    assert.equal(errored.fallbackNote, 'chanel.com blocked; confirmed on chanel.cn/gb');
+    assert.equal(errored.fallbackNote, 'chanel.com blocked; confirmed on chanel.cn/gb; GBP price cannot be confirmed on the fallback path');
+    const gbp = selectCandidate([{
+      ...miniFixture.candidates[0],
+      currency: 'GBP',
+      onOfficialSite: false,
+      sourceUrls: [page],
+    }], { brand: 'Chanel', itemId: 'A01112', name: 'Mini Flap Bag', price: 5200, currency: 'GBP' }, {
+      primaryBlocked: true,
+      blockedDomain: 'chanel.com',
+    });
+    assert.equal(gbp.fallbackNote, 'chanel.com blocked; confirmed on chanel.cn/gb');
   });
 
   it('does not force Amber when the primary official domain also confirms the candidate', async () => {
