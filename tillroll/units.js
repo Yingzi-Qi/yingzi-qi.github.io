@@ -43,7 +43,9 @@ export function num(v) {
   return Number.isFinite(n) ? n : null;
 }
 
-// Same rules the sanity loop already published: 24-hour, seconds 00 if absent.
+// P7: unclear UK numeric dates are DD/MM (Reader rule). The backend must never
+// re-parse them as MM/DD — there is no US-style fallback. 03/04/2026 is 3 April.
+// ISO YYYY-MM-DD is accepted as already-unambiguous. Time is 24-hour, seconds 00 if absent.
 export function joinPurchaseTime(date, time) {
   const d = str(date);
   if (!d) return null;
@@ -51,6 +53,8 @@ export function joinPurchaseTime(date, time) {
   let Y, M, D, t = str(time);
   if (m) { [, Y, M, D] = m; t = t || m[4] || null; }
   else if ((m = d.match(/^(\d{1,2})[/.](\d{1,2})[/.](\d{2,4})$/))) {
+    // Day first, month second. A US MM/DD reading is never tried, even if the
+    // day is out of range for DD/MM (e.g. 04/13/2026 is rejected, not 13 April).
     D = m[1].padStart(2, '0'); M = m[2].padStart(2, '0'); Y = m[3].length === 2 ? '20' + m[3] : m[3];
   } else return null;
   if (+M < 1 || +M > 12 || +D < 1 || +D > 31) return null;

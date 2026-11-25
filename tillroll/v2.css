@@ -15,3 +15,10 @@
 .v2-list li{display:flex;justify-content:space-between;gap:1rem;padding:.6rem 0;border-bottom:1px solid #eee}
 .v2-attribution{text-align:center;font-size:.78rem;color:#6b7280;margin:2rem 0 1rem}
 .v2-attribution a{color:inherit}
+#v2-run{font-weight:600;border:2px solid #1f4f3a;background:#e8f3ec;color:#143326;padding:.4rem .85rem;border-radius:8px;cursor:pointer}
+#v2-run:hover:not(:disabled){background:#d7eadc}
+#v2-run:disabled{opacity:.55;cursor:not-allowed;background:#f3f4f1;border-color:#c5c8be;color:#5b5f57}
+.v2-select-bar{display:flex;flex-wrap:wrap;align-items:center;gap:.75rem 1.25rem;margin:.6rem 0 0;padding:.55rem .75rem;border:1px dashed #c5c8be;border-radius:10px;background:#f7f8f4;font-size:.9rem}
+.v2-select-bar .hint{color:#4b5563;flex:1;min-width:16rem}
+.v2-needs-check{display:flex;align-items:center;gap:.35rem;font-size:.78rem;font-weight:560;color:#1f4f3a;white-space:nowrap}
+.v2-needs-check input,.v2-check-all input{accent-color:#1f4f3a}

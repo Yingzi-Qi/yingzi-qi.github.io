@@ -156,7 +156,7 @@ test('one Reading History control and dialog; server-backed with local fallback'
   assert.match(v2js, /serverHistory,/);
   assert.match(app, /from '\.\/history-dialog\.js\?v=merge1'/);
   assert.match(dialog, /window\.tillrollV2Hooks\?\.serverHistory/);
-  for (const v of ['style.css?v=merge2', 'v2.css?v=merge2', 'app.js?v=merge2', 'v2.js?v=merge2']) assert.ok(html.includes(v), v);
+  for (const v of ['style.css?v=followup3', 'v2.css?v=followup3', 'app.js?v=followup3', 'v2.js?v=followup3']) assert.ok(html.includes(v), v);
 });
 
 test("P4: 'VISA ****1234' becomes Card with no digits on the server path, 中文 Excel and CSV", async () => {

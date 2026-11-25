@@ -66,5 +66,7 @@ describe('page load', () => {
     assert.match(html, /id="v2-unlock-dialog"/);
     assert.match(html, /id="lookup-locked-dialog"/);
     assert.doesNotMatch(html, /id="v2-history-dialog"|id="v2-history"|id="landing-history"/);
+    assert.match(html, /id="v2-select-bar"/);
+    assert.match(html, /id="v2-check-all"/);
   });
 });

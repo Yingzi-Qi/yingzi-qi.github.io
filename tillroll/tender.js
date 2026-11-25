@@ -5,16 +5,17 @@
 // digits are ever written.
 export const ALLOWED_TENDERS = ['UnionPay', 'Card', 'Alipay', 'WeChat'];
 export const TENDER_REASON = 'Payment method must be UnionPay, Card, Alipay or WeChat.';
-const SCHEME = /\b(visa|mastercard|master\s*card|maestro|amex|american express|debit|credit|card)\b/i;
+const SCHEME = /\b(visa|mastercard|master\s*card|maestro|amex|american express|carte\s*(?:bleue|bancaire)|debit|credit|card)\b/i;
 const WALLET = /\b(apple\s*pay|google\s*pay|samsung\s*pay|garmin\s*pay|android\s*pay|wallet)\b/i;
 const str = v => (v === undefined || v === null || String(v).trim() === '') ? null : String(v).trim();
 
 export function normaliseTender(p) {
   const s = str(p);
   if (!s) return null;
-  if (/union\s*pay/i.test(s)) return 'UnionPay';
+  if (/union\s*pay|银联/i.test(s)) return 'UnionPay';
   if (/ali\s*pay/i.test(s)) return 'Alipay';
   if (/we\s*chat|wechat/i.test(s)) return 'WeChat';
+  if (/gift\s*card/i.test(s)) return s;
   if (SCHEME.test(s) || WALLET.test(s)) return 'Card';
   return s;
 }
