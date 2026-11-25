@@ -561,8 +561,11 @@ export function checkReceipt(data, ocr, previous = null, {independentPhoto = fal
   const items = data.items || [], flags = [], confirmedFields = [];
   const repeats = Array(items.length).fill(null);
   const add = (field, message, severity, escalate = severity !== 'info', category = severity === 'info' ? 'info' : 'reading') => {
-    if (!flags.some(flag => flag.field === field && flag.message === message))
-      flags.push({field, message, severity, escalate, category});
+    if (!flags.some(flag => flag.field === field && flag.message === message)) {
+      const flag = {field, message, severity, escalate, category};
+      if (category === 'reading' || category === 'lookup') flag.kind = category;
+      flags.push(flag);
+    }
   };
   if (!items.length) add('receipt','No line items were read.', 'fix');
   if (!items.length && number(data.total) !== null) add('receipt','items-missing', 'check');

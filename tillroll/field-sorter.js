@@ -120,7 +120,9 @@ export function sortItemFields(item) {
   if (found) {
     row.brand = found.brand;
     row.brandRaw = row.brandRaw || found.raw;
-    name = clean([found.before, found.after].filter(Boolean).join(' '));
+    const stripped = clean([found.before, found.after].filter(Boolean).join(' '));
+    if (stripped !== name && row.receiptItem == null) row.receiptItem = original;
+    name = stripped;
   } else if (!row.brand && row.brandRaw) {
     const fromRaw = edgeBrand(row.brandRaw) || aliases.map(entry => ({...entry, pattern: aliasReg(entry.alias)}))
       .find(entry => entry.pattern.test(row.brandRaw));

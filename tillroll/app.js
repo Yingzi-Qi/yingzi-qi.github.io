@@ -172,7 +172,7 @@ function evaluateReceipt(r,fillMissing){
   if(r.origin==='ai' && ocr.text) {
     for(const issue of photoFieldConflicts(r.record,ocr)) extra.push({...issue,stage:'Model compared with photo OCR'});
   }
-  if(r.verifyIssue)extra.push({field:'verification',message:r.verifyIssue,severity:'check',escalate:false,category:'reading'});
+  if(r.verifyIssue)extra.push({field:'verification',message:r.verifyIssue,severity:'check',escalate:false,category:'reading',kind:'reading'});
   for(const issue of extra){
     if(choice && issue.field===choice.kind)continue;
     if(!r.review.flags.some(f=>f.field===issue.field && f.message===issue.message))r.review.flags.push(issue);
@@ -215,7 +215,7 @@ function applyBatchDateSanity(){
     r.review.flags=r.review.flags.filter(flag=>flag.source!=='batch-date');
     const flag=byId.get(r.id);
     if(!flag || [...(r.ack||[])].some(key=>String(key).startsWith('purchaseTime')))continue;
-    r.review.flags.push({field:'purchaseTime', message:flag.message, severity:'check', escalate:true, category:'reading', source:'batch-date'});
+    r.review.flags.push({field:'purchaseTime', message:flag.message, severity:'check', escalate:true, category:'reading', kind:'reading', source:'batch-date'});
   }
 }
 function pump(){while(nowReading<2 && queue.length){const r=queue.shift();if(r.generation!==generation)continue;nowReading++;run(r).finally(()=>{nowReading--;if(!queue.length&&!batch.some(notDone)){finishedTime=Date.now();applyBatchDateSanity();}render();pump();});}}

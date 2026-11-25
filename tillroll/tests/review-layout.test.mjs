@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {makeOcr} from './ocr-fixture.mjs';
 import {extractLocal, cleanReceipt, geminiPrompt} from '../extract.js';
 import {checkReceipt, flagCategory} from '../checks.js';
+import {kindForFlag, reviewKinds} from '../receipt-policy.js';
 import {sortItemFields} from '../field-sorter.js';
 import {buildCsvBlob, buildXlsxBlob, buildChinaXlsxBlob} from '../exports.js';
 import * as zipPackage from '../export-vendor/jszip.min.js';
@@ -166,6 +167,32 @@ test('a model card number does not survive normalisation, flags or exports', asy
   assert.equal(data.card, '[card]');
   assert.equal(data.items[0].itemId, null);
   assert.match(JSON.stringify(data.fieldIssues), /matches the card and was cleared/);
+});
+
+test('a stripped brand prefix keeps the printed item for audit', () => {
+  const sorted = sortItemFields({item: 'CHANEL WOOL CREW SZ 36', amount: 80});
+  assert.equal(sorted.item.brand, 'Chanel');
+  assert.equal(sorted.item.item, 'WOOL CREW SZ 36');
+  assert.equal(sorted.item.receiptItem, 'CHANEL WOOL CREW SZ 36');
+  const kept = sortItemFields({item: 'CHANEL WOOL CREW SZ 36', receiptItem: 'printed earlier', amount: 80});
+  assert.equal(kept.item.receiptItem, 'printed earlier');
+  assert.equal(sortItemFields({item: 'Mini Acme Widget', amount: 10}).item.receiptItem, undefined);
+});
+
+test('reading and lookup flags carry the kind the policy classifier expects', () => {
+  const reading = checkReceipt({merchant: null, total: null, items: []}, makeOcr(['SHOP']), null, {today});
+  const missing = reading.flags.find(flag => flag.field === 'merchant');
+  assert.equal(missing.category, 'reading');
+  assert.equal(missing.kind, 'reading');
+  assert.equal(kindForFlag(missing), reviewKinds.reading);
+  const lookup = checkReceipt({
+    merchant: 'Harrods', date: '2026-11-25', time: '10:00:00', total: 10, payment: 'Visa', orderNumber: 'NOT-A-MATCH',
+    items: [{item: 'Scarf', amount: 10, qty: 1}],
+  }, makeOcr(['HARRODS', 'Scarf 10.00', 'TOTAL 10.00']), null, {today, demoFormats: true});
+  const format = lookup.flags.find(flag => flag.field === 'orderNumber' && flag.category === 'lookup');
+  assert.ok(format);
+  assert.equal(format.kind, 'lookup');
+  assert.equal(kindForFlag(format), reviewKinds.lookup);
 });
 
 test('filled item names skip labels and staff, then go through the sorter', () => {
