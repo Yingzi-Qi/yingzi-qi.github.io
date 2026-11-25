@@ -234,9 +234,14 @@ export function printedItemCount(lines) {
   return null;
 }
 
+function zeroServiceLine(item) {
+  if (Number(item?.amount) !== 0) return false;
+  return /\b(?:by\s+appointment|appointment|carrier\s+bag|gift\s*wrap|wrapping|sample|tester|complimentary|packaging|consultation)\b/i.test(String(item?.item || ''));
+}
+
 export function itemCountCheck(lines, items) {
   const printed = printedItemCount(lines);
-  const counted = (items || []).length;
+  const counted = (items || []).filter(item => !zeroServiceLine(item)).length;
   return {
     printed,
     counted,

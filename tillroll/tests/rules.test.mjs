@@ -8,7 +8,7 @@ import {
 } from '../receipt-rules.js';
 import {extractLocal, cleanReceipt, geminiSchema, geminiPrompt, prepareModelReading, reconcileReadings} from '../extract.js';
 import {sortItemFields} from '../field-sorter.js';
-import {identifierClasses} from '../item-identifiers.js';
+import {identifierClasses, itemCountCheck} from '../item-identifiers.js';
 import {checkReceipt, flagCategory, verifyImportedItemIds} from '../checks.js';
 
 const today = new Date('2026-11-25T12:00:00Z');
@@ -566,6 +566,16 @@ test('residuals: noisy total, footer lines, zeros, phones, missing items and a b
   assert.equal(shop.data.items.length, 1);
   assert.equal(shop.data.items[0].qty, 1);
   assert.equal(shop.data.total, 40);
+});
+test('a zero service line is not part of TOTAL (n items)', () => {
+  const lines = makeOcr(['ATELIER', 'Scarf 18.00', 'By Appointment 0.00', 'TOTAL (1 item) 18.00']).lines;
+  const check = itemCountCheck(lines, [{item: 'Scarf', amount: 18}, {item: 'By Appointment', amount: 0}]);
+  assert.equal(check.printed, 1);
+  assert.equal(check.counted, 1);
+  assert.equal(check.matches, true);
+  const kept = itemCountCheck(lines, [{item: 'Scarf', amount: 18}, {item: 'Spare button', amount: 0}]);
+  assert.equal(kept.counted, 2);
+  assert.equal(kept.matches, false);
 });
 test('identifiers: labels, priority, masks, count and untrusted text', () => {
   assert.equal(new Set(identifierClasses).size, identifierClasses.length);
