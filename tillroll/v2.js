@@ -8,11 +8,11 @@ const FIELD_TO_COL = [[/^items\.\d+\.itemId/, '品牌货号'], [/^items\.\d+\.(i
   [/^items\.\d+\.brand/, '品牌'], [/^(date|time)/, '采购时间'], [/^(orderNumber|orderId|receiptReference)/, '采购小票id'], [/^payment/, '采购商品方法'], [/^merchant/, '供应商']];
 let lastResult = null, lastBatchId = null;
 
-async function api(path, init = {}) {
+async function api(path, init = {}, allowUnlock = true) {
   const res = await fetch(path, { credentials: 'same-origin', ...init, headers: { ...(init.body && !(init.body instanceof Blob) ? { 'Content-Type': 'application/json' } : {}), ...(init.headers || {}) } });
-  if (res.status === 401) {
+  if (allowUnlock && res.status === 401) {
     const body = await res.clone().json().catch(() => ({}));
-    if (body.code === 'locked' && (await unlock())) return api(path, init);
+    if (body.code === 'locked' && (await unlock())) return api(path, init, false);
   }
   return res;
 }
@@ -21,14 +21,18 @@ const note = msg => { const n = $('#notice'); if (!n) return; n.textContent = ms
 function unlock() {
   return new Promise(resolve => {
     const d = $('#v2-unlock-dialog'); const f = $('#v2-unlock-form'); const err = $('#v2-unlock-error');
-    err.textContent = ''; f.passcode.value = '';
+    const pass = f.querySelector('[name=passcode]');
+    let settled = false;
+    const finish = ok => { if (settled) return; settled = true; resolve(ok); };
+    err.textContent = ''; pass.value = '';
     f.onsubmit = async e => {
       e.preventDefault();
-      const r = await fetch('/api/auth/unlock', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ passcode: f.passcode.value }) });
-      if (r.ok) { d.close(); resolve(true); } else err.textContent = (await r.json().catch(() => ({}))).error || 'Could not unlock.';
+      const r = await fetch('/api/auth/unlock', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ passcode: pass.value }) });
+      if (r.ok) { finish(true); d.close(); }
+      else err.textContent = (await r.json().catch(() => ({}))).error || 'Could not unlock.';
     };
-    d.addEventListener('close', () => resolve(false), { once: true });
-    d.showModal();
+    d.addEventListener('close', () => finish(false), { once: true });
+    if (!d.open) d.showModal();
   });
 }
 
@@ -184,18 +188,25 @@ async function openWorkbooks() {
     } catch (e) { btn.disabled = false; btn.textContent = e.message || 'Refresh failed'; }
   };
 }
-// Reading History: the single #history-dialog lives in app.js. When signed in,
-// app.js asks this hook for the server-backed history (/api/history); on 401,
-// a locked session or any error it gets {ok:false} and falls back to the
-// browser-local history (reading-history.js). No unlock prompt from here.
+// One Reading History dialog. api() opens the unlock dialog on a locked 401
+// and retries this request once. 5xx and network errors are an offline fallback.
 async function serverHistory(limit = 100) {
   try {
-    const r = await fetch(`/api/history?limit=${encodeURIComponent(limit)}`, { credentials: 'same-origin' });
-    if (!r.ok) return { ok: false, status: r.status };
+    const r = await api(`/api/history?limit=${encodeURIComponent(limit)}`);
+    if (r.status === 401) {
+      const body = await r.json().catch(() => ({}));
+      if (body.code === 'locked') return { ok: false, status: 401, locked: true };
+      return { ok: false, status: 401, error: body.error || 'History request was not authorized.' };
+    }
+    if (r.status >= 500) return { ok: false, status: r.status, offline: true };
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      return { ok: false, status: r.status, error: body.error || `History request failed (${r.status}).` };
+    }
     const data = await r.json().catch(() => null);
-    if (!data || !Array.isArray(data.entries)) return { ok: false, status: r.status };
+    if (!data || !Array.isArray(data.entries)) return { ok: false, status: r.status, error: 'History response was not a list.' };
     return { ok: true, entries: data.entries };
-  } catch { return { ok: false, status: 0 }; }
+  } catch { return { ok: false, status: 0, offline: true }; }
 }
 
 function init() {

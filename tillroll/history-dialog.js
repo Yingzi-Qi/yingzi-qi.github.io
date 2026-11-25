@@ -26,19 +26,28 @@ function renderServerHistory(entries){
   const list=$('#history-server-list');if(!list)return;
   list.innerHTML=entries.length?entries.map(e=>`<article class="history-entry"><strong>${escape(e.kind||'Event')}</strong> · ${escape(e.summary||'')}<small>${escape(formatHistoryTime(e.created_at))}${e.batch_id?' · '+escape(e.batch_id):''}</small></article>`).join(''):'<p class="history-empty">No reading or workbook history yet.</p>';
 }
-function showHistoryMode(server){
+function showHistoryMode(mode, errorText){
   const s=$('#history-server-list'),l=$('#history-list'),c=$('#history-clear'),st=$('#history-status');
-  if(s)s.hidden=!server; if(l)l.hidden=server; if(c)c.hidden=server;
-  if(st)st.textContent=server?'Showing the reading history saved on the Tillroll server.':'Showing the history kept in this browser (offline).';
+  const server=mode==='server', local=mode==='offline'||mode==='locked';
+  if(s)s.hidden=!server;
+  if(l)l.hidden=!local;
+  if(c)c.hidden=!local;
+  if(!st)return;
+  st.textContent=server?'Showing the reading history saved on the Tillroll server.'
+    :mode==='locked'?'Showing the history kept in this browser (offline, locked).'
+    :mode==='error'?(errorText||'Could not load reading history.')
+    :'Showing the history kept in this browser (offline).';
 }
 let historyMode='local';
 async function openHistory(){
   const dialog=$('#history-dialog');
   const hook=window.tillrollV2Hooks?.serverHistory;
   let server=null;
-  if(typeof hook==='function'){try{server=await hook();}catch{server=null;}}
-  if(server?.ok){historyMode='server';renderServerHistory(server.entries);showHistoryMode(true);}
-  else{historyMode='local';renderHistory();showHistoryMode(false);}
+  if(typeof hook==='function'){try{server=await hook();}catch{server={ok:false,offline:true,status:0};}}
+  if(server?.ok){historyMode='server';renderServerHistory(server.entries);showHistoryMode('server');}
+  else if(server?.error){historyMode='error';showHistoryMode('error', server.error);}
+  else if(server?.locked){historyMode='local';renderHistory();showHistoryMode('locked');}
+  else{historyMode='local';renderHistory();showHistoryMode('offline');}
   if(dialog && !dialog.open)dialog.showModal();
 }
 function refreshHistoryView(){if(historyMode==='local')renderHistory();}
