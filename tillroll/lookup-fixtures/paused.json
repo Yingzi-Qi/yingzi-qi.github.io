@@ -1,0 +1,12 @@
+{
+  "cacheHit": false,
+  "cacheKey": "lookup:v2:item:chanel:ABC123",
+  "sourcesQueried": [],
+  "candidates": [],
+  "flag": "#FDE68A",
+  "printedItemId": "ABC123",
+  "canonicalBrand": "Chanel",
+  "paused": true,
+  "unavailableReason": "Gemini grounding daily guard reached.",
+  "quotaGuard": ["Gemini grounding daily guard reached."]
+}

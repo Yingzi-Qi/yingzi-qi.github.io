@@ -8,6 +8,7 @@ import {bindExcelRefresh} from './excel-refresh-ui.js?v=1';
 import {loadSamples} from './samples.js?v=curatedphotos1';
 import {compareOrder,orderNeedsReview} from './orders.js?v=lineverify1';
 import {verifyOutputItems} from './item-verification.js?v=curatedphotos1';
+import {createLookupClient, enrichReceipt} from './lookup-enrich.js?v=lookup1';
 import {photoVerificationRows} from './verification-photo.js?v=curatedphotos1';
 import {captureLineWarnings,classifyVerification,hasVerificationMismatch} from './verification-history.js?v=lineverify1';
 const $ = s=>document.querySelector(s);
@@ -16,6 +17,9 @@ const paths={settings:'<path d="M4 7h5m4 0h7M4 17h9m4 0h3"/><circle cx="11" cy="
 for(const el of document.querySelectorAll('[data-icon]')) el.innerHTML=`<svg aria-hidden="true" class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${paths[el.dataset.icon]}</svg>`;
 let batch=[],orderList=null,orderFilename='',filter='all',seq=0,generation=0,nowReading=0;
 let mode='local',apiKey='',savedSamples=false,noticeTimer,startTime=0,finishedTime=0;
+let lookupBaseUrl='';
+const showLookupLocked=()=>{const dialog=$('#lookup-locked-dialog');if(dialog&&!dialog.open)dialog.showModal();};
+let lookupClient=createLookupClient({baseUrl:'',onLocked:showLookupLocked});
 const queue=[], hashOwners=new Map();
 const receiptFileHashes=new Set();
 let referenceHash=null,referenceRevision=0;
@@ -61,6 +65,50 @@ function comparePurchase(record) {
   return compareOrder(record,purchases);
 }
 
+function lineReading(r) {
+  const items=r.record?.items || r.data?.items || [];
+  return items.map((_,i)=>{
+    const errors=[], prefix='items.'+i+'.';
+    for (const flag of r.review?.flags || []) {
+      if (flag.severity!=='fix') continue;
+      if (flag.field===prefix+'itemId') errors.push('itemId');
+      if (flag.field===prefix+'amount' || flag.field===prefix+'unitPrice') errors.push('price');
+    }
+    const photo=r.review?.photo?.[i];
+    if (photo?.status==='Needs review' && /item id/i.test(`${photo.reason || ''} ${photo.itemIdEvidence || ''}`)) errors.push('itemId');
+    return errors;
+  });
+}
+function noteItemIdEdits(r, before, after) {
+  const edits=r.editedItemIds || (r.editedItemIds={});
+  const count=Math.max(before?.length || 0, after?.length || 0);
+  for (let i=0;i<count;i++) {
+    const previous=String(before?.[i]?.itemId ?? '').trim();
+    const next=String(after?.[i]?.itemId ?? '').trim();
+    if (previous!==next) edits[i]={previousItemId:previous, itemId:next};
+  }
+}
+function scheduleLookup(r) {
+  if (!r || r.state!=='done' || !batch.includes(r) || !(r.record || r.data)) return;
+  const token=(r.lookupToken=(r.lookupToken || 0)+1);
+  enrichReceipt(r.record || r.data, {
+    ocrText:[r.ocr?.text, r.otherOcr?.text].filter(Boolean).join('\n'),
+    orders:orderList,
+    client:lookupClient,
+    fictionalSample:r.demo?.set==='demo',
+    round:r.lookupSnapshot ? 2 : 1,
+    previous:r.lookupSnapshot || null,
+    reading:lineReading(r),
+    editedItemIds:r.editedItemIds || {},
+  }).then(result=>{
+    if (r.lookupToken!==token || !batch.includes(r)) return;
+    r.lookup=result;
+    r.lookupSnapshot=result.snapshot;
+    r.editedItemIds={};
+    if (result.locked) showLookupLocked();
+    render();
+  }).catch(()=>{});
+}
 function verifyFinalOutput(r) {
   let readings=r.itemIdReadings || [r.ocr,r.otherOcr].filter(Boolean);
   const local=r.origin==='local';
@@ -213,7 +261,7 @@ async function run(r){
       }catch{r.verifyIssue='The second reading could not be completed. Check the receipt against the first reading.';}
     }
     if(r.usedAI && !r.ocr.text)r.verifyIssue='On-device photo verification was unavailable. Check the model reading against the receipt.';
-    if(!current())return;evaluate(r);finalizeOutput(r);r.state='done';
+    if(!current())return;evaluate(r);finalizeOutput(r);r.state='done';scheduleLookup(r);
   }catch(err){if(current()){r.state='error';r.error=String(err?.message||'Could not process this receipt.');}}
   finally{r.elapsed=(performance.now()-begun)/1000;if(current()){duplicates();render();}}
 }
@@ -225,8 +273,11 @@ function cell(r,path,txt,title,extraClass=''){
   const idLine=/^items\.(\d+)\.itemId$/.exec(path);
   const product=/^items\.(\d+)\.(item|brand|amount|itemId)$/.exec(path);
   const mismatch=product && r.verification?.[Number(product[1])]?.fields.some(f=>f.key===product[2] && f.status==='mismatch');
+  const lookupField=/^items\.(\d+)\.(brand|item|amount|itemId)$/.exec(path);
+  const lookupKey=lookupField && {brand:'品牌',item:'品名',amount:'采购商品原价',itemId:'品牌货号'}[lookupField[2]];
+  const lookupAmber=lookupKey && (r.lookup?.unitRows || []).some(row=>row.sourceIndex===Number(lookupField[1]) && row.fields?.[lookupKey]?.flag==='amber');
   const warning=mismatch || r.review.flags.some(f=>f.field===path && f.severity!=='info') || (r.itemIdReadings && idLine && r.review.photo[Number(idLine[1])]?.status==='Needs review');
-  return `<button class="cell ${extraClass} ${warning?'marked':''}" data-id="${r.id}" data-path="${escape(path)}" title="${escape(title??txt??'Edit')}">${escape(txt??'')||'—'}</button>`;
+  return `<button class="cell ${extraClass} ${warning?'marked':''} ${lookupAmber?'lookup-fill':''}" data-id="${r.id}" data-path="${escape(path)}" title="${escape(title??txt??'Edit')}">${escape(txt??'')||'—'}</button>`;
 }
 function orderNumberCell(r){
   const value=(r.record || r.data).orderNumber;
@@ -261,7 +312,9 @@ function itemRow(r,item,i,shared=''){
   const price=item.amount==null ? '' : [r.data.currency,amountFormat.format(item.amount)].filter(Boolean).join(' ');
   const check=r.verification?.[i];
   const status=check ? `<button class="line-verification ${hasVerificationMismatch(check)?'line-warning':''}" data-id="${r.id}" data-path="verification.${i}" title="${escape(check.reason)}" aria-label="${escape('Line '+(i+1)+' verification: '+check.status)}">${escape(check.status)}</button>` : '';
-  return `<tr>${shared}<td>${cell(r,field+'brand',item.brand,'Edit brand')}</td><td class="item-id">${productCodeCell(r,item,field)}</td><td>${cell(r,field+'item',item.item,'Edit item')}${status}</td><td class="money">${cell(r,field+'amount',price,'Line amount including quantity')}</td></tr>`;
+  const lookupRows=(r.lookup?.unitRows || []).filter(row=>row.sourceIndex===i);
+  const lookupLabel=lookupRows.some(row=>row.flag==='amber') ? `<span class="lookup-pill" title="${escape(lookupRows.map(row=>row.reviewNote).filter(Boolean).join(' '))}">Look-up</span>` : '';
+  return `<tr>${shared}<td>${cell(r,field+'brand',item.brand,'Edit brand')}</td><td class="item-id">${productCodeCell(r,item,field)}</td><td>${cell(r,field+'item',item.item,'Edit item')}${status}${lookupLabel}</td><td class="money">${cell(r,field+'amount',price,'Line amount including quantity')}</td></tr>`;
 }
 function rowHTML(r){
   const preview=r.url ? `<img src="${escape(r.url)}" alt="" width="48" height="60" loading="lazy" decoding="async">` : '';
@@ -344,6 +397,7 @@ function removeReceiptLine(r,i){
   }
 }
 function updateReceiptFields(r,data,removeIndex=null){
+  noteItemIdEdits(r, r.data?.items || [], data?.items || []);
   if(r.origin==='achung'){
     resolveImportFlags(r,r.nativeFlags.filter(f=>{
       const after=get(data,f.field);
@@ -361,12 +415,12 @@ function updateReceiptFields(r,data,removeIndex=null){
 }
 async function openDetail(id,path=''){
   const r=batch.find(x=>x.id===Number(id));if(!r)return;
-  const {showDetail}=await import('./detail.js?v=curatedphotos1');
+  const {showDetail}=await import('./detail.js?v=lookup1');
   const refresh=()=>{duplicates();render();};
   const rerender=(focus='')=>{refresh();openDetail(r.id,focus).catch(e=>note(e.message));};
   showDetail({...r,data:r.record||r.data},{
     onSave(data,removeIndex=null){
-      updateReceiptFields(r,data,removeIndex);refresh();note('Changes saved. Checks updated.');
+      updateReceiptFields(r,data,removeIndex);refresh();scheduleLookup(r);note('Changes saved. Checks updated.');
     },
     onConfirmReference(candidate,kind){
       if(!Object.hasOwn(referenceLabels,kind) || !r.reference.requiresReview)return;
@@ -378,15 +432,15 @@ async function openDetail(id,path=''){
     onAcknowledge(f){if(f.severity==='check'&&!f.field.endsWith('.photo')){
       if(r.origin==='achung')resolveImportFlags(r,[f]);
       else r.ack.add(f.field+'|'+f.message);
-    }evaluate(r);rerender();},
+    }evaluate(r);scheduleLookup(r);rerender();},
     onKeepBoth(){if(!r.exactOf)r.keepBoth=true;rerender();},
     onRemove(){if(r.exactOf||r.duplicateOf){batch=batch.filter(x=>x!==r);URL.revokeObjectURL(r.url);if(hashOwners.get(r.hash)===r.id)hashOwners.set(r.hash,r.duplicateOf);for(const other of batch)if(other.exactOf===r.id)other.exactOf=r.duplicateOf;if($('#receipt-dialog').open)$('#receipt-dialog').close();refresh();}},
     onRetry(){if(r.state!=='error')return;r.notes=[];r.state='queued';r.readerSettings={mode,key:apiKey};finishedTime=0;queue.push(r);$('#receipt-dialog').close();pump();},
     onRemoveLine(i){
       removeReceiptLine(r,i);
-      r.ack.clear();evaluate(r);rerender();
+      r.ack.clear();evaluate(r);scheduleLookup(r);rerender();
     },
-    onAddLine(){r.data.items.push(blankItem());evaluate(r);rerender(`items.${r.data.items.length-1}.item`);},
+    onAddLine(){r.data.items.push(blankItem());evaluate(r);scheduleLookup(r);rerender(`items.${r.data.items.length-1}.item`);},
     onOpenOriginal(){if(r.duplicateOf)openDetail(r.duplicateOf);}
   },path);
 }
@@ -488,7 +542,9 @@ function finishExcelRefresh({filename,hash,parsed,currentGeneration,records,patc
   if(records){batch=restored;seq+=restored.length;filter='all';$('#search').value='';}
   if(nextBaseline)excelBaselines.set(parsed.exportKey,nextBaseline);
   if(nextLegacy)legacyBaselines.set(filename,nextLegacy);
-  receiptFileHashes.add(hash);duplicates();render();
+  receiptFileHashes.add(hash);duplicates();
+  for (const r of batch) if (r.state==='done') scheduleLookup(r);
+  render();
   const n=records ? restored.length : patches.length;
   const message=records ? `Opened ${n} receipt${n===1?'':'s'} from Excel.`
     : n ? `Updated ${n} receipt${n===1?'':'s'} from Excel. Checks refreshed.` : 'Already up to date.';
@@ -581,7 +637,7 @@ $('#achung-input').onchange=async e=>{
       evaluate(r);finalizeOutput(r);
       return r;
     });
-    batch=batch.concat(imported);filter='all';$('#search').value='';duplicates();render();
+    batch=batch.concat(imported);filter='all';$('#search').value='';duplicates();imported.forEach(scheduleLookup);render();
     achungDialog.close();note(`Imported ${imported.length} receipts from Achung.`+(removedSelfReference?' Select a separate file to verify this workbook.':''));
   }catch(err){$('#achung-error').textContent=err.message || 'The workbook could not be imported.';}
   finally{importingWorkbook=false;$('#pick-achung').disabled=false;}
@@ -600,18 +656,18 @@ $('#orders-input').onchange=async e=>{
     if (revision!==referenceRevision || current!==generation) return;
     if (receiptFileHashes.has(hash)) throw new Error('Choose an independent order or product list for this batch.');
     referenceHash=hash;orderFilename=file.name;orderList=rows;
-    batch.forEach(r=>evaluate(r));duplicates();render();$('#orders-dialog').close();
+    batch.forEach(r=>{evaluate(r);if(r.state==='done')scheduleLookup(r);});duplicates();render();$('#orders-dialog').close();
     note(`${rows.length} reference lines loaded. Item verification updated.`);
   } catch(err) { if (revision===referenceRevision) $('#order-error').textContent=err.message; }
 };
 $('#landing-clear-orders').onclick=$('#clear-orders').onclick=()=>{
   referenceRevision++;referenceHash=null;orderList=null;orderFilename='';
-  batch.forEach(r=>evaluate(r));duplicates();render();
+  batch.forEach(r=>{evaluate(r);if(r.state==='done')scheduleLookup(r);});duplicates();render();
 };
-$('#startover').onclick=()=>$('#reset-dialog').showModal();$('#reset').onclick=()=>{generation++;unlinkWorkbook();excelBaselines.clear();legacyBaselines.clear();for(const r of batch)URL.revokeObjectURL(r.url);batch=[];queue.length=0;hashOwners.clear();receiptFileHashes.clear();referenceHash=null;referenceRevision++;seq=0;orderList=null;orderFilename='';startTime=finishedTime=0;$('#search').value='';$('#reset-dialog').close();render();};
+$('#startover').onclick=()=>$('#reset-dialog').showModal();$('#reset').onclick=()=>{generation++;unlinkWorkbook();excelBaselines.clear();legacyBaselines.clear();lookupClient.resetRun();for(const r of batch)URL.revokeObjectURL(r.url);batch=[];queue.length=0;hashOwners.clear();receiptFileHashes.clear();referenceHash=null;referenceRevision++;seq=0;orderList=null;orderFilename='';startTime=finishedTime=0;$('#search').value='';$('#reset-dialog').close();render();};
 const refreshSettings=()=>{const ai=$('#reader').value==='ai';$('#key-box').hidden=!ai;$('#key').required=ai;$('#local-explain').hidden=ai;};
-$('#settings').onclick=()=>{$('#reader').value=mode;$('#key').value=apiKey;$('#sample-reading').value=savedSamples?'saved':'live';refreshSettings();$('#settings-dialog').showModal();};$('#reader').onchange=refreshSettings;
-$('#settings-form').onsubmit=e=>{e.preventDefault();const selected=$('#reader').value,key=$('#key').value.trim();if(selected==='ai'&&!key)return;mode=selected;apiKey=selected==='ai'?key:'';savedSamples=$('#sample-reading').value==='saved';$('#key').value='';$('#settings-dialog').close();note('Reading settings saved.');};
+$('#settings').onclick=()=>{$('#reader').value=mode;$('#key').value=apiKey;$('#lookup-base').value=lookupBaseUrl;$('#sample-reading').value=savedSamples?'saved':'live';refreshSettings();$('#settings-dialog').showModal();};$('#reader').onchange=refreshSettings;
+$('#settings-form').onsubmit=e=>{e.preventDefault();const selected=$('#reader').value,key=$('#key').value.trim();if(selected==='ai'&&!key)return;const nextLookup=$('#lookup-base').value.trim();const lookupChanged=nextLookup!==lookupBaseUrl;mode=selected;apiKey=selected==='ai'?key:'';savedSamples=$('#sample-reading').value==='saved';lookupBaseUrl=nextLookup;if(lookupChanged){lookupClient=createLookupClient({baseUrl:lookupBaseUrl,onLocked:showLookupLocked});batch.forEach(r=>{if(r.state==='done')scheduleLookup(r);});}$('#key').value='';$('#settings-dialog').close();note(lookupBaseUrl?'Reading settings saved. Brand look-up will use the service you entered.':'Reading settings saved.');};
 for(const b of document.querySelectorAll('[data-close]'))b.onclick=()=>document.getElementById(b.dataset.close).close();
 for(const d of document.querySelectorAll('dialog'))d.addEventListener('click',e=>{if(e.target===d){const b=d.getBoundingClientRect();if(e.clientX<b.left||e.clientX>b.right||e.clientY<b.top||e.clientY>b.bottom)d.close();}});
 

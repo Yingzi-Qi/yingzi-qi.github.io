@@ -1,0 +1,17 @@
+{
+  "cacheHit": false,
+  "cacheKey": null,
+  "sourcesQueried": ["gemini-grounding"],
+  "candidates": [],
+  "flag": "#FDE68A",
+  "printedItemId": null,
+  "canonicalBrand": "Rolex",
+  "branch": {
+    "supplier": "Rolex",
+    "officialStoreName": "Rolex Canary Wharf",
+    "sourceUrls": ["https://www.rolex.com/rolex-dealers/united-kingdom/canary-wharf.html"],
+    "source": "known-branch-table",
+    "cacheKey": "lookup:v2:branch:rolex:e14-5ab",
+    "cacheHit": false
+  }
+}

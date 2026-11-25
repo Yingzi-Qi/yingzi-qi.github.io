@@ -81,3 +81,7 @@ button.review-reason{min-height:28px;border-color:transparent;font-weight:500}bu
 .receipt-lines .line-verification{display:block;margin-top:.2rem;padding:.12rem 0;max-width:100%;min-height:0;text-align:left;background:transparent;border:0;font-size:.8rem;font-weight:500;line-height:1.3;color:var(--muted);white-space:normal}
 .receipt-lines .line-verification:hover,.receipt-lines .line-verification:focus-visible{text-decoration:underline}
 .receipt-lines .line-warning{color:#84441a;font-weight:650}
+.receipt-lines td button.cell.lookup-fill{background:#FDE68A}
+.lookup-pill{display:inline-block;margin-top:.2rem;padding:.05rem .35rem;border-radius:4px;background:#FDE68A;color:#633806;font-size:.75rem;font-weight:650}
+.lookup-note{margin-top:8px;padding:8px 10px;border-radius:6px;background:#FDE68A;font-size:.88rem;line-height:1.4}
+.lookup-note p{margin:4px 0 0}

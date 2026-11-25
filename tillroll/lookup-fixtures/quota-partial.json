@@ -1,0 +1,24 @@
+{
+  "cacheHit": false,
+  "cacheKey": "lookup:v2:pf:chanel:GBP:100.00",
+  "sourcesQueried": ["brave"],
+  "candidates": [
+    {
+      "brand": "Chanel",
+      "officialName": "Classic Wallet",
+      "itemId": "WALLET1",
+      "price": 100,
+      "currency": "GBP",
+      "weightGrams": 80,
+      "sourceUrls": ["https://www.chanel.com/gb/wallet"],
+      "onOfficialSite": true,
+      "matchedFields": ["price"],
+      "confidence": 0.4,
+      "matchType": "price-fallback"
+    }
+  ],
+  "flag": "#FDE68A",
+  "printedItemId": "UNKNOWN1",
+  "canonicalBrand": "Chanel",
+  "quotaGuard": ["Brave Search monthly guard reached."]
+}
