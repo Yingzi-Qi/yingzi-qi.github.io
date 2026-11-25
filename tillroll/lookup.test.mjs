@@ -238,6 +238,47 @@ describe('official-site acceptance', () => {
     assert.doesNotMatch(row.reviewNote, /official mirror/);
   });
 
+  it('does not let a mirror price decide a match or become a price mismatch', async () => {
+    const { result } = trackingClient(() => json({
+      ...miniFixture,
+      flag: null,
+      mismatches: [{ field: 'price', receiptValue: 5200, officialValue: 100, currency: 'CNY' }],
+      candidates: [{
+        ...miniFixture.candidates[0],
+        price: 100,
+        currency: 'CNY',
+        onOfficialSite: false,
+        matchedFields: ['itemId', 'name', 'price'],
+        sourceUrls: ['https://www.chanel.cn/gb/fashion/p/A01112/mini-flap-bag'],
+      }],
+    }));
+    const enriched = await enrichLines({ items: [line()], currency: 'GBP', client: result });
+    const row = enriched.unitRows[0];
+    assert.equal(row.accepted.officialName, 'Mini Flap Bag');
+    assert.equal(row.fields['采购商品原价'].value, 5200);
+    assert.equal(row.fields['采购商品原价'].flag, null);
+    assert.deepEqual(row.fields['采购商品原价'].officialValue, { amount: 100, currency: 'CNY' });
+    assert.equal(row.mismatches.some(entry => entry.field === '采购商品原价'), false);
+    const ranked = selectCandidate([
+      { brand: 'Chanel', officialName: 'Mirror Bag', itemId: 'A01112', price: 5200, currency: 'GBP', onOfficialSite: false, matchType: 'id', matchedFields: ['itemId', 'price'], sourceUrls: ['https://www.chanel.cn/gb/mirror'] },
+      { brand: 'Chanel', officialName: 'Mini Flap Bag', itemId: 'A01112', price: 6000, currency: 'GBP', onOfficialSite: true, matchType: 'id', matchedFields: ['itemId', 'name'], sourceUrls: ['https://www.chanel.com/gb/primary'] },
+    ], { brand: 'Chanel', itemId: 'A01112', name: 'Mini Flap Bag', price: 5200, currency: 'GBP' });
+    assert.equal(ranked.winner.officialName, 'Mini Flap Bag');
+  });
+
+  it('does not let a mirror-only price win a price fallback', () => {
+    const ranked = rankPriceFallback([
+      { brand: 'Chanel', officialName: 'Mirror exact', itemId: 'M1', price: 100, currency: 'GBP', weightGrams: 50, onOfficialSite: false, matchedFields: ['price'], sourceUrls: ['https://www.chanel.cn/gb/exact'] },
+      { brand: 'Chanel', officialName: 'Primary further', itemId: 'P1', price: 140, currency: 'GBP', weightGrams: 200, onOfficialSite: true, matchedFields: [], sourceUrls: ['https://www.chanel.com/gb/further'] },
+    ], { brand: 'Chanel', name: 'Unrelated tote', style: '', price: 100, currency: 'GBP' });
+    assert.equal(ranked.winner.officialName, 'Primary further');
+    const selected = selectCandidate([
+      { brand: 'Chanel', officialName: 'Mirror exact', itemId: 'M1', price: 100, currency: 'GBP', weightGrams: 50, onOfficialSite: false, matchType: 'price-fallback', matchedFields: ['price'], sourceUrls: ['https://www.chanel.cn/gb/exact'] },
+      { brand: 'Chanel', officialName: 'Primary further', itemId: 'P1', price: 140, currency: 'GBP', weightGrams: 200, onOfficialSite: true, matchType: 'price-fallback', matchedFields: [], sourceUrls: ['https://www.chanel.com/gb/further'] },
+    ], { brand: 'Chanel', itemId: 'PRINTED', name: 'Unrelated tote', style: '', price: 100, currency: 'GBP' });
+    assert.equal(selected.winner.officialName, 'Primary further');
+  });
+
   it('rejects a domain that is neither the primary site nor a listed mirror', async () => {
     const { result } = trackingClient(() => json({
       ...miniFixture,

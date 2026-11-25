@@ -77,9 +77,14 @@ function priceGap(candidate, query) {
   return Math.abs(left - right);
 }
 
+function rankingGap(candidate, query) {
+  if (query?.brand && officialSource(candidate, query.brand, query.officialMirrors).mirrorOnly) return null;
+  return priceGap(candidate, query);
+}
+
 export function rankPriceFallback(candidates, query, closeGap = CLOSE_GAP) {
   const rows = candidates.map(candidate => {
-    const gap = priceGap(candidate, query);
+    const gap = rankingGap(candidate, query);
     return {
       candidate,
       gap,
@@ -123,11 +128,17 @@ export function rankPriceFallback(candidates, query, closeGap = CLOSE_GAP) {
   return { winner: null, tie: true, tier, weightUnresolved: true };
 }
 
-function rankByFields(candidates) {
+function countedFields(candidate, brand, mirrors) {
+  const fields = candidate.matchedFields || [];
+  if (brand && officialSource(candidate, brand, mirrors).mirrorOnly) return fields.filter(field => field !== 'price');
+  return fields;
+}
+
+function rankByFields(candidates, brand, mirrors) {
   if (!candidates.length) return { winner: null, tie: false };
   const scored = candidates.map(candidate => ({
     candidate,
-    fields: (candidate.matchedFields || []).length,
+    fields: countedFields(candidate, brand, mirrors).length,
     confidence: typeof candidate.confidence === 'number' ? candidate.confidence : 0,
   }));
   scored.sort((a, b) => b.fields - a.fields || b.confidence - a.confidence);
@@ -173,7 +184,7 @@ export function computeMismatches(receipt, official) {
   if (officialName && fold(printedName) !== fold(officialName)) {
     mismatches.push({ field: '品名', receiptValue: printedName, officialValue: officialName });
   }
-  const officialPrice = roundMoney(official?.price);
+  const officialPrice = official?.ignorePrice ? null : roundMoney(official?.price);
   if (officialPrice != null && receipt.price != null) {
     const currencyClash = Boolean(official?.currency && receipt.currency && official.currency !== receipt.currency);
     if (currencyClash || officialPrice !== roundMoney(receipt.price)) {
@@ -254,19 +265,19 @@ export function selectCandidate(candidates, query, { partial = false, closeGap =
   const idMatches = query.itemId ? official.filter(candidate => idMatch(candidate, query.itemId)) : [];
   const attach = (ranked, rest) => describeSelection(ranked, { brand: query.brand, mirrors: officialMirrors, rest });
   if (idMatches.length) {
-    const ranked = rankByFields(idMatches);
+    const ranked = rankByFields(idMatches, query.brand, officialMirrors);
     return attach(ranked, { matchType: ranked.winner ? 'id' : null, fallback: false, corroboration, considered: idMatches });
   }
   const multi = official.filter(candidate => candidate.matchType !== 'price-fallback');
   const fallbackPool = official.filter(candidate => candidate.matchType === 'price-fallback');
   if (!query.itemId && multi.length) {
-    const ranked = rankByFields(multi);
+    const ranked = rankByFields(multi, query.brand, officialMirrors);
     return attach(ranked, { matchType: ranked.winner ? (ranked.winner.matchType || 'multi-field') : null, fallback: false, corroboration, considered: multi });
   }
   if (partial || !fallbackPool.length) {
     return attach({ winner: null, tie: false }, { matchType: null, fallback: false, corroboration, considered: fallbackPool, weightUnresolved: false });
   }
-  const ranked = rankPriceFallback(fallbackPool, query, closeGap);
+  const ranked = rankPriceFallback(fallbackPool, { ...query, officialMirrors }, closeGap);
   return attach(ranked, {
     matchType: ranked.winner ? 'price-fallback' : null,
     fallbackTier: ranked.tier,

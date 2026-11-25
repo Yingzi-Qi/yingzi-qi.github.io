@@ -23,7 +23,24 @@ function differs(field, receipt, official) {
   return fold(receipt) !== fold(official);
 }
 
-function cell(field, receiptValue, officialValue, { locked, colour, forceAmber = false, keepReceipt = false } = {}) {
+function mirrorPriceRecord(candidate) {
+  const amount = roundMoney(candidate?.price);
+  if (amount == null) return null;
+  const currency = String(candidate?.currency ?? '').trim();
+  return { amount, currency: currency ? currency.toUpperCase() : null };
+}
+
+function cell(field, receiptValue, officialValue, { locked, colour, forceAmber = false, keepReceipt = false, informational = null } = {}) {
+  if (informational) {
+    return {
+      value: receiptValue ?? '',
+      receiptValue: receiptValue ?? '',
+      officialValue: informational,
+      flag: null,
+      flagColour: null,
+      locked: Boolean(locked),
+    };
+  }
   const hasOfficial = officialValue != null && officialValue !== '';
   const changed = hasOfficial && differs(field, receiptValue, officialValue);
   const value = locked || keepReceipt || !hasOfficial ? (receiptValue ?? '') : officialValue;
@@ -79,7 +96,11 @@ function finish(result, row, { response = null, selection = null, orders = null,
     || result.skipped === 'reading-error'
     || result.skipped === 'doubtful-zero';
   const accepted = selection?.winner || null;
-  const reported = mergeMismatches(response?.mismatches, accepted?.mismatches);
+  const mirrorOnly = Boolean(selection?.mirrorOnly);
+  const reportedAll = mergeMismatches(response?.mismatches, accepted?.mismatches);
+  const reported = mirrorOnly
+    ? reportedAll.filter(entry => entry.field !== '采购商品原价' && entry.field !== '采购商品金额')
+    : reportedAll;
   const reportedBrand = reported.find(entry => entry.field === '品牌')?.officialValue;
   const reportedName = reported.find(entry => entry.field === '品名')?.officialValue;
   const reportedPrice = reported.find(entry => entry.field === '采购商品原价')?.officialValue;
@@ -96,7 +117,7 @@ function finish(result, row, { response = null, selection = null, orders = null,
     storeClues: row.storeClues,
     branch: response?.branch || null,
   });
-  const mirrorOnly = Boolean(selection?.mirrorOnly);
+  const mirrorPrice = mirrorOnly ? mirrorPriceRecord(accepted) : null;
   const forceName = Boolean(selection?.fallback) || mirrorOnly || result.flag === 'amber' && !accepted && result.queried;
   const fields = {
     '供应商': cell('供应商', row.supplier, supplier.supplier, { locked: fieldLocked(row.locks, '供应商'), colour }),
@@ -105,8 +126,8 @@ function finish(result, row, { response = null, selection = null, orders = null,
     '品牌货号': cell('品牌货号', row.itemId, officialId, {
       locked: fieldLocked(row.locks, '品牌货号'), colour, keepReceipt: true,
     }),
-    '采购商品原价': cell('采购商品原价', row.listUnit, row.priceField === '采购商品金额' && reportedPrice == null ? null : officialPrice, {
-      locked: fieldLocked(row.locks, '采购商品原价'), colour, keepReceipt: true,
+    '采购商品原价': cell('采购商品原价', row.listUnit, mirrorPrice ? null : (row.priceField === '采购商品金额' && reportedPrice == null ? null : officialPrice), {
+      locked: fieldLocked(row.locks, '采购商品原价'), colour, keepReceipt: true, informational: mirrorPrice,
     }),
     '采购商品金额': cell('采购商品金额', row.paidUnit, row.priceField === '采购商品金额' && reportedPrice == null ? officialPrice : null, {
       locked: fieldLocked(row.locks, '采购商品金额'), colour, keepReceipt: true,
@@ -126,6 +147,7 @@ function finish(result, row, { response = null, selection = null, orders = null,
         officialName,
         price: accepted?.price,
         currency: accepted?.currency,
+        ignorePrice: mirrorOnly,
         itemId: accepted?.itemId,
       },
     ));
