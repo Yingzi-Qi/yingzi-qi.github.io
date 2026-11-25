@@ -523,6 +523,39 @@ test('field sorter: Dior description, brand-only line, Gucci style and a bad pri
   assert.ok(priceFlags.some(flag => /not a number/i.test(flag.message) && flagCategory(flag) === 'reading'));
   assert.equal(sortItemFields({item: 'Mini Acme Widget', amount: 1200}).item.item, 'Mini Acme Widget');
 });
+test('residuals: noisy total, footer lines, zeros, phones, missing items and a boutique slip', () => {
+  const noisy = read(['HARRODS', '12/11/2026 14:15 NT04567-222333', 'Silk scarf 18.00',
+    'TOTAL (1 item)', 'TAG ATTACHED', 'garbled', 'AMOUNT £18.00',
+    'Mastercard Tendered 18.00', 'ARQC 18.00', 'AUTH CODE 123456', 'APPROVED', '**** **** **** 4242',
+    'BALANCE DUE 18.00']);
+  assert.equal(noisy.data.total, 18);
+  assert.deepEqual(noisy.data.items.map(row => row.item), ['Silk scarf']);
+  const merged = read(['HARRODS', '12/11/2026 14:20 NT04567-222334',
+    'Wool scarf 80.00 Rewards Saving -8.00', 'TOTAL GBP 72.00']);
+  assert.equal(merged.data.items.length, 1);
+  assert.equal(merged.data.items[0].item, 'Wool scarf');
+  assert.equal(merged.data.items[0].amount, 80);
+  assert.equal(merged.data.items[0].lineDiscount, 8);
+  assert.match(merged.data.items[0].lineDiscountLabel, /Rewards Saving/);
+  assert.equal(merged.review.flags.some(flag => flag.field === 'total' && flag.severity !== 'info'), false);
+  const zeros = read(['HARRODS', '12/11/2026 14:25 NT04567-222335', 'Silk scarf 18.00',
+    '000123456 By Appointment 0.00', 'Carrier Bag 0.00', 'TOTAL GBP 18.00']);
+  assert.deepEqual(zeros.data.items.map(row => row.item), ['Silk scarf']);
+  assert.deepEqual(zeros.data.excludedZeroItems.map(row => row.item.item).sort(), ['By Appointment', 'Carrier Bag']);
+  const phones = readStoreClues(makeOcr(['SHOP', 'Tel: 020 7730 1234', '020 7730 124', '07 730 1234', 'TOTAL 10.00']).lines, 'Shop');
+  assert.equal(phones.phone, '020 7730 1234');
+  const missing = read(['SHOP', '12/11/2026 10:00', 'TOTAL 20.00']);
+  assert.equal(missing.data.items.length, 0);
+  assert.equal(missing.data.total, 20);
+  assert.ok(missing.review.flags.some(flag => flag.message === 'items-missing' && flagCategory(flag) === 'reading'));
+  const shop = read(['N.PEAL', 'London', '00:00', '12/11/2026 15:04', 'Cashmere scarf 4 40.00',
+    '1 Unit(s)', '|tem Total: £40.00', 'Visa']);
+  assert.equal(shop.data.merchant, 'N.PEAL');
+  assert.equal(shop.data.time, '15:04:00');
+  assert.equal(shop.data.items.length, 1);
+  assert.equal(shop.data.items[0].qty, 1);
+  assert.equal(shop.data.total, 40);
+});
 test('Gemini reading: the store rule replaces a generic Harrods id', () => {
   const ocr = makeOcr(['HARRODS', '12/11/2026 14:03 NT01234-567890', 'Scarf 20.00', 'TOTAL GBP 20.00']);
   const out = prepareModelReading({merchant: 'Harrods', receiptReference: 'AB12CD34', items: [{item: 'Scarf', amount: 20}], storeClues: {phone: '020 7000 0000'}}, ocr);

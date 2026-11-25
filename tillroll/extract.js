@@ -151,7 +151,8 @@ function findMerchant(lines, text) {
     const sign=signs.find(([pattern])=>pattern.test(line));
     if(sign)return sign[1];
   }
-  return lines.slice(0,4).map(l => l.text.trim()).find(line => /\p{L}/u.test(line) && line.length >= 3 && !/\d|receipt|invoice|thank you|order (id|no|confirmation)|welcome|telephone|register|subtotal|^date\b/i.test(line)) || null;
+  const city=/^(?:london|paris|manchester|edinburgh|glasgow|dublin|birmingham|bristol|leeds|liverpool|cambridge|oxford|chelsea|mayfair|knightsbridge|westminster|soho)$/i;
+  return lines.slice(0,4).map(l => l.text.trim()).find(line => /\p{L}/u.test(line) && line.length >= 3 && !city.test(line) && !/\d|receipt|invoice|thank you|order (id|no|confirmation)|welcome|telephone|register|subtotal|^date\b/i.test(line)) || null;
 }
 const refLabels = {orderNumber:/\border\s*(?:number|no\.?|#)/i, orderId:/\border\s*i\.?d\.?\b/i};
 function references(lines, receipt) {
@@ -345,13 +346,31 @@ function embeddedModelNumber(item,parsed,sku) {
   return parsed?.evidence==='position' && sku && sku!==parsed.itemId &&
     String(item??'').trim().endsWith(parsed.itemId);
 }
-const itemTotalLine=/^(?:\d+\s+)?(?:units?\s*(?:\(\s*s\s*\))?\s+)?item\s+total\b/i;
+const itemTotalLine=/^(?:\|?\s*tem\s+total\b|(?:\d+\s+)?(?:units?\s*(?:\(\s*s\s*\))?\s*)?(?:item|tem)\s+total\b)/i;
+function isServiceTotal(text) {
+  const raw=String(text||'').trim();
+  return itemTotalLine.test(raw) || itemTotalLine.test(tidyLine(raw)) || /^\|?\s*tem\s+total\b/i.test(raw);
+}
+function isUnitMarker(text) {
+  return /^(?:\d+\s+)?units?\s*(?:\(\s*s\s*\))?\s*:?\s*$/i.test(tidyLine(text));
+}
+function isPaymentFooter(text) {
+  if(maskedDigitsOnly(text)) return true;
+  if(/\b(?:arqc|pan\s*seq|auth(?:orisation|orization)?\s*code|card\s*number)\b/i.test(text)) return true;
+  return /^(?:aid|terminal|contactless|approved)\b/i.test(tidyLine(text));
+}
+function maskedDigitsOnly(text) {
+  const value=String(text||'').trim();
+  return !!value && (/^[\s*•xX#.\-]+$/.test(value) || /^(?:[*•xX]{2,}[\s.-]*)+\d{0,4}$/.test(value));
+}
+function isTenderOrBalance(text) {
+  return /^(?:balance\s+(?:due|to\s+pay|paid)|amount\s+(?:due|paid|to\s+pay))\b|\b(?:tender(?:ed)?|visa|master\s*card|maestro|amex|american\s+express|union\s*pay|alipay|we\s*chat|weixin|\bcash\b|citcon|adyen|arqc|contactless|approved)\b/i.test(tidyLine(text));
+}
 function isClosingTotal(text) {
   const label=tidyLine(text);
   // Harrods closes the item list with "TOTAL (1 item)" / "TOTAL (3 items)".
-  // The amount may sit on that line, or on the following bare AMOUNT line.
-  // "1 Unit(s) Item Total:" is the same close with a quantity prefix.
-  if(/^(?:(?:grand|order|receipt|net|gross)\s+)?total\s*\(\s*\d+\s+items?\s*\)/i.test(label) || itemTotalLine.test(label)) return true;
+  // The amount may sit on that line, or a few lines later. "|tem Total" is the same close.
+  if(/^(?:(?:grand|order|receipt|net|gross)\s+)?total\s*\(\s*\d+\s+items?\s*\)/i.test(label) || isServiceTotal(text)) return true;
   const prices=amounts(text);
   if(prices.length!==1) return false;
   const head=tidyLine(text.slice(0,prices[0].start));
@@ -377,11 +396,12 @@ function parseHarrodsItem(label) {
   if(!/\p{L}/u.test(rest)) return null;
   return {concessionCode:match[1], internalCode:match[2], styleRef, item:rest};
 }
-function itemsFromLines(lines, trace) {
+function itemsFromLines(lines, trace, receiptTotal=null) {
   const items=[]; const used=new Set(), inlineSuffixes=new Map();
   const prefixes=printedProductPrefixes(lines), belowNames=barcodesBelowNames(lines);
   let layout=null, lastHeader=-1, lastProduct=-10, pastTotal=false, skipCashier=false;
   function record(row,priceLine,nameLine=priceLine,unitLine=priceLine,header=-1) {
+    if(row.qty==null) row.qty=1;
     items.push(row);
     if(trace)trace.push({priceLine,nameLine,unitLine,header,idLine:null});
   }
@@ -404,6 +424,9 @@ function itemsFromLines(lines, trace) {
       }
       continue;
     }
+    if(isPaymentFooter(text) || isUnitMarker(text))continue;
+    const repeatedTotal=receiptTotal!=null && /^(?:balance\s+(?:due|to\s+pay|paid)|amount\s+(?:due|paid)|visa|master\s*card|maestro|amex|union\s*pay|alipay|we\s*chat|cash|citcon|adyen|contactless|arqc)\b/i.test(tidyLine(text)) && amounts(text).some(price=>Math.abs(price.value-receiptTotal)<.02);
+    if(repeatedTotal){pastTotal=true;continue;}
     if(pastTotal){if(!footerSaving(text))continue;}
     else if(isClosingTotal(text)){pastTotal=true;continue;}
     const header=productColumns(line);
@@ -461,17 +484,28 @@ function itemsFromLines(lines, trace) {
     if(printedCurrency.test(label))continue;
     // "_ 2574 By Appointment 0.00": drop the leading mark and stray digits so the zero line still parses.
     if(final.value===0){
-      label=label.replace(/^[^\p{L}\p{N}]+/u,'').replace(/^\d{3,6}\s+(?=\p{L})/u,'').trim();
+      label=label.replace(/^[^\p{L}\p{N}]+/u,'').replace(/^\d{3,10}\s+(?=\p{L})/u,'').trim();
     }
-    const row=itemShape(); row.amount=final.value;
-    if (prices.length>1) row.unitPrice=prices.at(-2).value;
-    const qty=label.match(/(?:^|\s)(\d+)\s*(?:[x×@]\s*)?$/i);
+    const between=prices.length>1 ? text.slice(prices[0].end, final.start) : '';
+    const mergedSaving=prices.length>1 && prices[0].value>0 && final.value<0 && discountWording.test(between);
+    const row=itemShape();
+    row.amount=mergedSaving ? prices[0].value : final.value;
+    if (!mergedSaving && prices.length>1) row.unitPrice=prices.at(-2).value;
+    if (mergedSaving) {
+      row.unitPrice=prices[0].value;
+      const savingLabel=between.replace(/[£$€]/g,'').replace(/\s+/g,' ').trim() || 'Saving';
+      row.lineDiscounts=[{label:savingLabel, amount:roundMoney(-final.value)}];
+      row.lineDiscount=roundMoney(-final.value);
+      row.lineDiscountLabel=savingLabel;
+    }
+    const namedSaving=/^(.*\p{L}.*?\S)\s+((?:rewards\s+saving|customer\s+\d+\s*%\s*day|staff\s+saving)\b.*)$/iu.exec(label);
+    if(namedSaving && !discountWording.test(namedSaving[1])) label=namedSaving[1].trim();
+    const qty=label.match(/(?:^|\s)(?:(?:qty|quantity)\s*[:#]?\s*(\d+)|(\d+)\s*[x×@])\s*$/i);
     if(qty){
-      const explicit=/[x×@]/i.test(qty[0]) || (quantityColumn && columns(line).includes(qty[1]));
-      const balances=prices.length>1 && !/^0\d/.test(qty[1]) && Math.abs(Number(qty[1])*row.unitPrice-row.amount)<.02;
-      if(explicit || (prices.length>1 && (!isPrintedItemNumber(qty[1]) || balances))){
-        row.qty=Number(qty[1]);label=label.slice(0,qty.index).trim();
-      }
+      row.qty=Number(qty[1] || qty[2]);label=label.slice(0,qty.index).trim();
+    } else if(quantityColumn) {
+      const columnQty=label.match(/(?:^|\s)(\d+)\s*$/);
+      if(columnQty && columns(line).includes(columnQty[1])){row.qty=Number(columnQty[1]);label=label.slice(0,columnQty.index).trim();}
     }
     const harrodsItem=parseHarrodsItem(label);
     if(harrodsItem){
@@ -703,8 +737,18 @@ export function extractLocal(ocr) {
   result.card=text.match(/(?:ending(?:\s+in)?\s*|[*•]{2,}\s*)(\d{4})\b/i)?.[1] || null;
   const totals=new Set();
   const printedDiscounts=[];
+  const merchandiseTotal=lines.some(line=>{
+    const label=tidyLine(line.text);
+    return /^(?:(?:grand|order|receipt|net|gross)\s+)?total\b/i.test(label) && !otherTotal.test(label);
+  });
+  let savingAfterTotal=false;
   for(const [i,l] of lines.entries()) {
     const label=tidyLine(l.text);
+    if(result.total!=null && amounts(l.text).some(price=>price.value<0)) savingAfterTotal=true;
+    const balanceDue=/^(?:balance\s+(?:due|to\s+pay|paid)|amount\s+(?:due|paid|to\s+pay))\b/i.test(label);
+    const heading=/^(?:(?:grand|order|receipt|net|gross)\s+)?total\b/i.test(label);
+    // A tender is not the total once a TOTAL heading exists. Balance due remains the total after a printed saving.
+    if(merchandiseTotal && !heading && ((isTenderOrBalance(l.text) && !balanceDue) || (balanceDue && result.total!=null && !savingAfterTotal))) continue;
     let key=null;
     if (subLabel.test(label)) key='subtotal';
     else if (taxLabel.test(label)) key='tax';
@@ -729,8 +773,14 @@ export function extractLocal(ocr) {
     const next=lines[i+1];
     if(key==='total' && /^total\s*\(\s*\d+\s+items?\s*\)/i.test(label)){
       if(values.length===1){result.total=values[0].value;totals.add(result.total);continue;}
-      const amountLine=next && /^amount\b/i.test(tidyLine(next.text)) ? amounts(next.text) : [];
-      if(amountLine.length===1){result.total=amountLine[0].value;totals.add(result.total);}
+      let later=null;
+      for(let step=1; step<=3 && i+step<lines.length; step++){
+        const follow=lines[i+step];
+        if(isTenderOrBalance(follow.text)) continue;
+        const found=amounts(follow.text);
+        if(found.length===1){later=found[0].value;break;}
+      }
+      if(later!=null){result.total=later;totals.add(result.total);}
       continue;
     }
     let pricedHere=values.length>0;
@@ -751,7 +801,7 @@ export function extractLocal(ocr) {
     result[key]=key==='discount' ? Math.abs(value) : value;
   }
   if(totals.size>1) result.fieldIssues.push({field:'total',reason:'conflicting_printed_totals',evidence:'Several labelled totals appear on the photo: '+[...totals].join(' / ')+'.'});
-  const recovered=recoverPhotoItemIds({items:itemsFromLines(lines)},ocr,false).items;
+  const recovered=recoverPhotoItemIds({items:itemsFromLines(lines, null, result.total)},ocr,false).items;
   for(const item of recovered){
     if(item.itemId && [item.concessionCode,item.internalCode,item.ean].includes(item.itemId)) item.itemId=null;
   }

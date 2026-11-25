@@ -48,6 +48,9 @@ export function readPurchaseTime(text) {
     }
   }
   if (!candidates.length) return {time: null, issue: null};
+  // 00:00 is a blank clock. A real printed time on the same receipt replaces it.
+  const printedTimes = candidates.filter(c => c.time !== '00:00:00');
+  if (printedTimes.length) candidates.splice(0, candidates.length, ...printedTimes);
   const best = Math.max(...candidates.map(c => c.score));
   const chosen = candidates.filter(c => c.score === best);
   const distinct = [...new Set(chosen.map(c => c.time))];
@@ -309,10 +312,25 @@ function readUkPostcode(text) {
   }
   return raw;
 }
+function londonPhone(text) {
+  // 020 plus exactly eight digits. Spaces and dots are allowed; a short or split fragment is not a phone.
+  const match = text.match(/\b(0[\s.]*2[\s.]*0(?:[\s.]*\d){8})(?![\s.]*\d)/);
+  if (!match) return null;
+  const digits = match[1].replace(/\D/g, '');
+  return digits === '020' + digits.slice(3) && digits.length === 11 ? match[1].replace(/\s+/g, ' ').replace(/\.+/g, ' ').trim() : null;
+}
 function extractPhone(text) {
+  const london = londonPhone(text);
+  if (london) return london;
   const spaced = text.match(/\b((?:\+44\s?(?:\(0\)\s?)?|0)\d{2,4}(?:[\s-]\d{3,4}){1,3})\b/);
   const generic = text.match(/(?:\b(?:tel|phone|telephone|tél|téléphone|telefon)\.?\s*(?:no\.?)?\s*[:.]?\s*)?(\+?\(?\d[\d\s().-]{6,}\d)/i);
-  return ((spaced && spaced[1]) || (generic && generic[1]) || '').trim() || null;
+  const raw = ((spaced && spaced[1]) || (generic && generic[1]) || '').trim();
+  if (!raw) return null;
+  const digits = raw.replace(/\D/g, '');
+  // A truncated London number, or a short 07 fragment, is not a phone.
+  if (digits.startsWith('020') && digits.length !== 11) return null;
+  if (digits.startsWith('07') && digits.length !== 11) return null;
+  return raw;
 }
 const usZip = /\b[A-Z]{2}\s+(\d{5}(?:-\d{4})?)\b/;
 const euPostcode = /^(?:[A-Z]-)?(\d{4,5})\s+[A-ZÀ-Ý][A-Za-zÀ-ÿ'’ -]{2,}$/;
@@ -471,6 +489,8 @@ const near = (a, b) => Math.abs(a - b) <= .02;
 function receiptBalances(data) {
   const total = Number(data.total);
   if (data.total == null || !Number.isFinite(total)) return false;
+  // A total with no product lines is not a reconciliation.
+  if (!data.items?.length) return false;
   const amounts = (data.items || []).map(i => i.amount);
   if (amounts.some(a => a == null || !Number.isFinite(Number(a)))) return false;
   const sum = amounts.reduce((t, a) => t + Number(a), 0);

@@ -429,10 +429,16 @@ function arithmetic(data, items, flag, repeats) {
   const amounts = items.map(i => number(i.amount)), total = number(data.total);
   const sum = amounts.reduce((a, b) => a + (b || 0), 0), tax = number(data.tax);
   const alreadyApplied = items.reduce((value,item)=>value+includedLineDiscount(item),0);
+  // A saving kept beside the product's own price is not already inside that amount.
+  const outsideLine = items.reduce((value, item) => {
+    const discount = number(item.lineDiscount), amount = number(item.amount), unit = number(item.unitPrice), qty = number(item.qty) ?? 1;
+    if (discount === null || discount <= 0 || amount === null || includedLineDiscount(item)) return value;
+    return unit == null || near(qty * unit, amount) ? value + discount : value;
+  }, 0);
   // receiptDiscount is only the saving that is not already inside a line amount.
   // Older readings that lack the field still use the printed discount minus line discounts.
   const listedReceiptDiscount = number(data.receiptDiscount);
-  const discount = listedReceiptDiscount !== null ? Math.max(0, listedReceiptDiscount) : Math.max(0,(number(data.discount) ?? 0)-alreadyApplied);
+  const discount = (listedReceiptDiscount !== null ? Math.max(0, listedReceiptDiscount) : Math.max(0,(number(data.discount) ?? 0)-alreadyApplied)) + outsideLine;
   const balances = beforeDiscount => total !== null && (
     near(beforeDiscount - discount, total) || (tax !== null && near(beforeDiscount - discount + tax, total)));
   const repeated = new Map();
@@ -554,6 +560,7 @@ export function checkReceipt(data, ocr, previous = null, {independentPhoto = fal
       flags.push({field, message, severity, escalate, category});
   };
   if (!items.length) add('receipt','No line items were read.', 'fix');
+  if (!items.length && number(data.total) !== null) add('receipt','items-missing', 'check');
   if (!text(data.merchant)) add('merchant','Retailer is missing.', 'fix');
   if (number(data.total) === null) add('total','Receipt total is missing or unreadable.', 'fix');
   inspectDate(data.date, data.dateIssue, today, add);
