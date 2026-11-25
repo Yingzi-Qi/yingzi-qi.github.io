@@ -246,6 +246,79 @@ describe('brand item id', () => {
     }), '3607670123456');
   });
 
+  it('does not keep a store code or an id that misses the brand format', async () => {
+    const note = 'No brand style ref found; store/internal code not used';
+    const { result } = trackingClient(() => json({ cacheHit: false, candidates: [], flag: null, sourcesQueried: [] }));
+    const cases = [
+      { brand: 'Maison', item: 'Silk scarf', itemId: '1234', sku: '', comment: 'printed value not a recognised style code: 1234' },
+      { brand: 'Selfridges Atelier', item: 'Wool coat', itemId: '1234500000', sku: '', comment: 'printed value not a recognised style code: 1234500000' },
+      { brand: 'Chanel', item: 'Card holder', itemId: 'NOT-A-REF', sku: '', comment: undefined },
+    ];
+    for (const item of cases) {
+      const enriched = await enrichLines({ items: [line(item)], currency: 'GBP', client: result });
+      const row = enriched.unitRows.at(-1);
+      assert.equal(row.fields['品牌货号'].value, '');
+      assert.equal(row.fields['品牌货号'].flag, 'pink');
+      assert.equal(row.fields['品牌货号'].flagColour, '#FECDD3');
+      assert.equal(row.fields['品牌货号'].note, note);
+      assert.equal(row.fields['品牌货号'].comment, item.comment);
+      assert.equal(row.request.itemId, undefined);
+    }
+  });
+
+  it('keeps a style ref beside a store code, and keeps an EAN when that is the only code', async () => {
+    const { result, calls } = trackingClient(() => json({ cacheHit: false, candidates: [], flag: null, sourcesQueried: [] }));
+    const styled = await enrichLines({
+      items: [line({ brand: 'Chanel', item: 'Wool coat AS10004', itemId: '1234', sku: '1234500000' })],
+      currency: 'GBP',
+      client: result,
+    });
+    assert.equal(styled.unitRows[0].fields['品牌货号'].value, 'AS10004');
+    assert.equal(styled.unitRows[0].fields['品牌货号'].flag, null);
+    assert.equal(styled.unitRows[0].fields['品牌货号'].comment, undefined);
+    assert.equal(styled.unitRows[0].request.itemId, 'AS10004');
+    const ean = await enrichLines({
+      items: [line({ brand: 'Chanel', item: 'Silk scarf', itemId: '0000000000017', sku: '' })],
+      currency: 'GBP',
+      client: result,
+    });
+    assert.equal(ean.unitRows[0].fields['品牌货号'].value, '0000000000017');
+    assert.equal(ean.unitRows[0].fields['品牌货号'].flag, null);
+    assert.equal(ean.unitRows[0].request.itemId, '0000000000017');
+    assert.equal(calls.at(-1).body.itemId, '0000000000017');
+  });
+
+  it('does not quote card, auth, merchant, terminal or approval digits in the item-id comment', async () => {
+    const noise = {
+      card: '4000000000000001',
+      auth: '100000000001',
+      merchant: '200000000002',
+      terminal: '300000000003',
+      approval: '400000000004',
+    };
+    const { result } = trackingClient(() => json({ cacheHit: false, candidates: [], flag: null, sourcesQueried: [] }));
+    const kept = await enrichLines({
+      items: [line({ brand: 'Chanel', item: 'Wool coat', itemId: 'AS10004', sku: '', ...noise })],
+      currency: 'GBP',
+      client: result,
+    });
+    const keptCell = kept.unitRows[0].fields['品牌货号'];
+    assert.equal(keptCell.value, 'AS10004');
+    assert.equal(keptCell.comment, undefined);
+    const dumped = JSON.stringify(keptCell);
+    for (const value of Object.values(noise)) assert.equal(dumped.includes(value), false);
+    const rejected = await enrichLines({
+      items: [line({ brand: 'Chanel', item: 'Card holder', itemId: '1234', sku: '', ...noise })],
+      currency: 'GBP',
+      client: result,
+    });
+    const cell = rejected.unitRows[0].fields['品牌货号'];
+    assert.equal(cell.value, '');
+    assert.equal(cell.flag, 'pink');
+    assert.equal(cell.comment, 'printed value not a recognised style code: 1234');
+    for (const value of Object.values(noise)) assert.equal(JSON.stringify(cell).includes(value), false);
+  });
+
   it('does not use a concession code as a Chanel item id, and falls through to the EAN', () => {
     assert.equal(chooseItemId({ brand: 'Chanel', fields: { itemId: '9999999001', sku: '3607670123456' } }), '3607670123456');
     assert.equal(chooseItemId({ brand: 'Other Atelier', fields: { itemId: '3607670123456' } }), '3607670123456');
@@ -659,14 +732,14 @@ describe('enrichment', () => {
       flag: '#FDE68A', canonicalBrand: 'Chanel', sourcesQueried: ['brave', 'gemini-grounding'],
     }));
     const enriched = await enrichLines({
-      items: [line({ item: 'Unrelated tote', itemId: 'PRINTED01', sku: '', unitPrice: 100, amount: 100 })],
+      items: [line({ item: 'Unrelated tote', itemId: 'AS10005', sku: '', unitPrice: 100, amount: 100 })],
       currency: 'GBP',
       client: result,
     });
     const row = enriched.unitRows[0];
     const mismatch = row.mismatches.find(entry => entry.field === '品牌货号');
-    assert.equal(row.fields['品牌货号'].value, 'PRINTED01');
-    assert.equal(mismatch.receiptValue, 'PRINTED01');
+    assert.equal(row.fields['品牌货号'].value, 'AS10005');
+    assert.equal(mismatch.receiptValue, 'AS10005');
     assert.equal(mismatch.officialValue, 'OFFICIAL9');
     assert.equal(row.flag, 'amber');
     assert.equal(row.candidates.length, 1);
@@ -719,7 +792,7 @@ describe('enrichment', () => {
   it('stops at the run cap and keeps the deferred rows', async () => {
     const { result, calls } = trackingClient(() => json(miniFixture), { maxLookupsPerRun: 2 });
     const enriched = await enrichLines({
-      items: [line({ itemId: 'A1' }), line({ itemId: 'A2' }), line({ itemId: 'A3' })],
+      items: [line({ itemId: 'AS10001' }), line({ itemId: 'AS10002' }), line({ itemId: 'AS10003' })],
       currency: 'GBP',
       client: result,
     });
@@ -976,12 +1049,12 @@ describe('enrichment', () => {
         { field: 'name', receiptValue: null, officialValue: 'Should be ignored' },
         { field: 'price', receiptValue: 5200, officialValue: 5300 },
       ],
-      candidates: [{ ...miniFixture.candidates[0], brand: 'Van Cleef & Arpels', mismatches: [
-        { field: 'itemId', receiptValue: 'A01112', officialValue: 'DIFFERENT' },
+      candidates: [{ ...miniFixture.candidates[0], brand: 'Van Cleef & Arpels', itemId: 'VCAR12345', mismatches: [
+        { field: 'itemId', receiptValue: 'VCAR12345', officialValue: 'DIFFERENT' },
       ] }],
     }));
     const enriched = await enrichLines({
-      items: [line({ brand: 'VCA' })],
+      items: [line({ brand: 'VCA', itemId: 'VCAR12345' })],
       currency: 'GBP',
       client: result,
     });
@@ -990,7 +1063,7 @@ describe('enrichment', () => {
     assert.equal(row.fields['品牌'].flag, 'amber');
     assert.equal(row.fields['采购商品原价'].value, 5200);
     assert.equal(row.fields['采购商品原价'].officialValue, 5300);
-    assert.equal(row.fields['品牌货号'].value, 'A01112');
+    assert.equal(row.fields['品牌货号'].value, 'VCAR12345');
     assert.equal(row.mismatches.some(entry => entry.officialValue === 'Should be ignored'), false);
     assert.equal(row.mismatches.find(entry => entry.field === '品牌货号').officialValue, 'DIFFERENT');
     assert.equal(row.flagColour, '#FDE68A');
