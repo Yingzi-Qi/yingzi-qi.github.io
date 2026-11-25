@@ -1,5 +1,5 @@
 import {orderNeedsReview} from './orders.js?v=lineverify1';
-import {reviewForLine} from './checks.js?v=productcodes3';
+import {reviewForLine,flagCategory} from './checks.js?v=productcodes3';
 import {validateOrderPatterns} from './retail-rules.js?v=6';
 import {parsePrintedItemId} from './product-code.js?v=productcodes3';
 import * as zipPackage from './export-vendor/jszip.min.js';
@@ -102,20 +102,24 @@ function exportData(receipts,includeRefresh=false) {
         }
         const field = source === 'line' ? prefix+key : key;
         const fieldFlags=flags.filter(f=>f.field===field);
-        if (imported && fieldFlags.length && (source==='receipt' || source==='line')) {
-          const style=fieldFlags.some(f=>f.severity==='fix') ? 8 : 6;
-          return {value,numeric,style:type==='money' ? style+1 : style};
-        }
-        if (source==='verification' && verification.status==='Verification error' && key!=='source')
-          return {value,style:8};
+        // Two colours only: Pink #FECDD3 for reading errors, Amber #FDE68A for look-up uncertainty.
+        const fill = kind => kind==='reading' ? (type==='money' ? PINK+1 : PINK) : (type==='money' ? AMBER+1 : AMBER);
+        if (imported && fieldFlags.length && (source==='receipt' || source==='line'))
+          return {value,numeric,style:fill(fieldFlags.some(f=>flagCategory(f)==='reading') ? 'reading' : 'lookup')};
         if (imported && source==='review' && value && !photoIssue && !orderIssue && !verificationMismatch) return {value,numeric,style:2};
-        const flagged = fieldFlags.length || (source==='review' && value!=='' && (!imported || photoIssue || orderIssue || verificationMismatch))
-          || (source==='verification' && verificationMismatch && key!=='source')
+        const lineReading=flags.some(f=>flagCategory(f)==='reading') || Boolean(photoIssue);
+        const reading = fieldFlags.some(f=>flagCategory(f)==='reading')
+          || (source==='review' && value!=='' && lineReading)
           || (imported && photoIssue && r.itemIdReadings?.length && source==='line' && key==='itemId')
           || (source==='proposal' && value!=='')
-          || (source==='photo' && ['status','reason'].includes(key) && photo.status === 'Needs review')
+          || (source==='photo' && ['status','reason'].includes(key) && photo.status === 'Needs review');
+        const lookup = fieldFlags.some(f=>flagCategory(f)==='lookup')
+          || (source==='review' && value!=='' && (!imported || orderIssue || verificationMismatch))
+          || (source==='verification' && verificationMismatch && key!=='source')
           || (source==='order' && ['status','reason'].includes(key) && orderNeedsReview(order));
-        return {value,numeric,style:flagged ? (type==='money' ? 5 : 4) : type==='money' ? 3 : 0};
+        if (reading) return {value,numeric,style:fill('reading')};
+        if (lookup) return {value,numeric,style:fill('lookup')};
+        return {value,numeric,style:type==='money' ? 3 : 0};
       });
       if (includeRefresh) {
         const receiptKey=r.refreshKey??=crypto.randomUUID();
@@ -154,17 +158,19 @@ function cellXml(row,col,{value,numeric,style}) {
   if (value==='') return '<c'+attrs+'/>';
   return '<c'+attrs+' t="inlineStr"><is><t xml:space="preserve">'+esc(String(value).slice(0,32767))+'</t></is></c>';
 }
+// Cell styles 4/5 are Amber #FDE68A (text/money); 6/7 are Pink #FECDD3 (text/money).
+const AMBER = 4, PINK = 6;
 const styles = XML + `<styleSheet xmlns="${MAIN}">
   <fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><color rgb="FFFFFFFF"/><sz val="11"/><name val="Calibri"/></font></fonts>
-  <fills count="6"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>${['FF1E4946','FFFFEDC0','FFFDE68A','FFFECDD3'].map(rgb=>'<fill><patternFill patternType="solid"><fgColor rgb="'+rgb+'"/><bgColor indexed="64"/></patternFill></fill>').join('')}</fills>
+  <fills count="5"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>${['FF1E4946','FFFDE68A','FFFECDD3'].map(rgb=>'<fill><patternFill patternType="solid"><fgColor rgb="'+rgb+'"/><bgColor indexed="64"/></patternFill></fill>').join('')}</fills>
   <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
   <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-  <cellXfs count="10">
+  <cellXfs count="8">
     <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf>
     <xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1"><alignment wrapText="1" vertical="center"/></xf>
     <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf>
     <xf numFmtId="4" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyAlignment="1"><alignment vertical="top"/></xf>
-    ${[3,4,5].map(fill=>'<xf numFmtId="0" fontId="0" fillId="'+fill+'" borderId="0" xfId="0" applyFill="1" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf><xf numFmtId="4" fontId="0" fillId="'+fill+'" borderId="0" xfId="0" applyNumberFormat="1" applyFill="1" applyAlignment="1"><alignment vertical="top"/></xf>').join('')}
+    ${[3,4].map(fill=>'<xf numFmtId="0" fontId="0" fillId="'+fill+'" borderId="0" xfId="0" applyFill="1" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf><xf numFmtId="4" fontId="0" fillId="'+fill+'" borderId="0" xfId="0" applyNumberFormat="1" applyFill="1" applyAlignment="1"><alignment vertical="top"/></xf>').join('')}
   </cellXfs>
   <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`;
 export async function buildXlsxBlob(receipts) {
@@ -517,7 +523,7 @@ function nativeFlags(rows) {
   const flags=[];
   function add(field,message,severity) {
     if (!flags.some(f=>f.field===field && f.message===message && f.severity===severity))
-      flags.push({field,message,severity,escalate:false});
+      flags.push({field,message,severity,escalate:false,category:severity==='fix' ? 'reading' : 'lookup'});
   }
   const perRow=rows.map(row=>row.note ? row.note.split('; ') : []);
   rows.forEach(({marks},i)=>{
