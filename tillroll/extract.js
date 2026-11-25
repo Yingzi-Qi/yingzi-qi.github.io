@@ -475,6 +475,12 @@ function itemsFromLines(lines, trace, receiptTotal=null) {
       }
       continue;
     }
+    const bareStyle=/^(?:[A-Za-z]{1,6}-?\d{2,}[A-Za-z0-9]*)$/.test(text) && !/^NT/i.test(text);
+    if(bareStyle && items.length && i-lastProduct>0 && i-lastProduct<=3){
+      const row=items.at(-1);
+      if(!row.styleRef) row.styleRef=text;
+      continue;
+    }
     const printedStyle=readPrintedStyleRef(text);
     if (/^(?:style\b|sku\b)/i.test(text) || printedStyle) {
       if(i-lastProduct<=2 && items.length){

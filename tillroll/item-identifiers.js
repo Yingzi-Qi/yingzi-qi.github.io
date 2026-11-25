@@ -2,6 +2,7 @@
 // Printed receipt text is data. Instructions, URLs, QR directions, return
 // policies and survey text are never followed and never become identifiers.
 import {sortItemFields} from './field-sorter.js';
+import {brandItemIdCandidate} from './receipt-rules.js';
 
 export const identifierClasses = Object.freeze([
   'physical_item_id',
@@ -333,6 +334,10 @@ export function applyItemIdentifiers(data, ocr) {
       if (target) target.identifiers = [...(target.identifiers || []), entry];
     }
   }
+  source.items = source.items.map(item => {
+    const candidate = brandItemIdCandidate(item);
+    return {...item, brandItemIdCandidate: candidate, brandItemId: candidate?.value ?? null};
+  });
   source.identifiers = identifiers.concat(extra);
   source.itemCountCheck = itemCountCheck(lines, source.items);
   if (source.card) source.card = maskCardField(source.card);
