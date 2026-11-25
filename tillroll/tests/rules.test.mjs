@@ -7,6 +7,7 @@ import {
   nonItemName, readStoreClues, mergeStoreClues, storeReceiptId, confirmedStoreReceiptId, classifyZeroPrice, applyZeroPriceExclusion,
 } from '../receipt-rules.js';
 import {extractLocal, cleanReceipt, geminiSchema, geminiPrompt, prepareModelReading, reconcileReadings} from '../extract.js';
+import {sortItemFields} from '../field-sorter.js';
 import {checkReceipt, flagCategory, verifyImportedItemIds} from '../checks.js';
 
 const today = new Date('2026-11-25T12:00:00Z');
@@ -349,7 +350,9 @@ test('Harrods line: concession, internal code, style and EAN stay out of itemId'
   assert.equal(item.internalCode, '9999999001');
   assert.equal(item.styleRef, 'A12345');
   assert.equal(item.ean, '5001111222333');
-  assert.equal(item.item, 'CHANEL Wool coat');
+  assert.equal(item.brand, 'Chanel');
+  assert.equal(item.brandRaw, 'CHANEL');
+  assert.equal(item.item, 'Wool coat');
   assert.equal(item.itemId, null);
   assert.notEqual(item.brand, 'Alex Example');
   assert.ok(!/alex example/i.test([item.brand, item.item, item.concessionCode].filter(Boolean).join(' ')));
@@ -489,6 +492,36 @@ test('brand item id: style ref, then brand code, then EAN; never a store code', 
   const model = read(['ATELIER', '12/11/2026 11:00', 'Linen shirt 40.00', 'Model: ZX-90', 'TOTAL 40.00']);
   assert.equal(model.data.items[0].styleRef, 'ZX-90');
   assert.equal(model.data.items[0].brandItemId, 'ZX-90');
+});
+test('field sorter: Dior description, brand-only line, Gucci style and a bad price', () => {
+  const knit = read(['HARRODS', '12/11/2026 14:03 NT04567-111222',
+    '2469 9999991234 Christian Dior £1,234.00', 'Product Info: 3610000000012 NAVY CREW 38', 'TOTAL GBP 1234.00']);
+  const knitItem = knit.data.items[0];
+  assert.equal(knitItem.brand, 'Dior');
+  assert.equal(knitItem.brandRaw, 'Christian Dior');
+  assert.equal(knitItem.item, 'NAVY CREW 38');
+  assert.equal(knitItem.ean, '3610000000012');
+  assert.equal(knitItem.concessionCode, '2469');
+  assert.equal(knitItem.internalCode, '9999991234');
+  assert.equal(knitItem.itemId, null);
+  assert.equal(knitItem.amount, 1234);
+  assert.equal(knitItem.brandItemIdCandidate.source, 'ean');
+  const mens = read(['HARRODS', '12/11/2026 15:04 NT04567-111223',
+    'DIOR MENS £860.00', 'Product Info: 3610000000012', 'TOTAL GBP 860.00']);
+  assert.equal(mens.data.items[0].brand, 'Dior');
+  assert.equal(mens.data.items[0].item, null);
+  const mensFlags = flagsFor(mens.review, 'items.0.item');
+  assert.ok(mensFlags.length && mensFlags.every(flag => flagCategory(flag) === 'reading'));
+  const belt = read(['SHOP', '12/11/2026 16:00', 'Gucci Belt GG1234 450.00', 'TOTAL 450.00']);
+  assert.equal(belt.data.items[0].brand, 'Gucci');
+  assert.equal(belt.data.items[0].item, 'Belt');
+  assert.equal(belt.data.items[0].styleRef, 'GG1234');
+  assert.equal(belt.data.items[0].brandItemIdCandidate.source, 'styleRef');
+  const priced = cleanReceipt({merchant: 'Shop', items: [{item: 'Belt', amount: '£abc'}]});
+  assert.equal(priced.items[0].amount, null);
+  const priceFlags = checkReceipt(priced, makeOcr(['Shop', 'Belt']), null, {today}).flags.filter(flag => flag.field === 'items.0.amount');
+  assert.ok(priceFlags.some(flag => /not a number/i.test(flag.message) && flagCategory(flag) === 'reading'));
+  assert.equal(sortItemFields({item: 'Mini Acme Widget', amount: 1200}).item.item, 'Mini Acme Widget');
 });
 test('Gemini reading: the store rule replaces a generic Harrods id', () => {
   const ocr = makeOcr(['HARRODS', '12/11/2026 14:03 NT01234-567890', 'Scarf 20.00', 'TOTAL GBP 20.00']);

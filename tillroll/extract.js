@@ -4,6 +4,7 @@ import {isGtin,isPrintedItemNumber,parsePrintedItemId,printedBarcodeDetail,barco
 import {readPurchaseDate} from './purchase-date.js?v=8';
 import {comparePhotoFields,mergeReadings} from './reading-comparison.js?v=discounts1';
 import {readPurchaseTime,normalizePurchaseTime,readTender,normalizeTender,toPaymentMethod,dropCardDigits,brandItemIdCandidate,readPrintedStyleRef,readStoreClues,mergeStoreClues,storeReceiptId,cleanProductCode,applyZeroPriceExclusion} from './receipt-rules.js?v=1';
+import {sortItemFields} from './field-sorter.js';
 // OCR assets resolve on this site. Receipt images remain in the tab unless the
 // caller explicitly starts the optional Gemini reader using a supplied API key.
 const asset = name => new URL(`./ocr/${name}`, import.meta.url).href;
@@ -114,7 +115,7 @@ function amounts(text) {
   });
 }
 const roundMoney = value => Math.round(value * 100) / 100;
-const itemShape = () => ({ brand:null, item:null, itemId:null, sku:null, colour:null, size:null, qty:null, unitPrice:null, amount:null, lineDiscount:null, lineDiscountLabel:null, lineDiscounts:null, concessionCode:null, internalCode:null, ean:null, styleRef:null, brandItemId:null, brandItemIdCandidate:null });
+const itemShape = () => ({ brand:null, brandRaw:null, item:null, itemId:null, sku:null, colour:null, size:null, qty:null, unitPrice:null, amount:null, lineDiscount:null, lineDiscountLabel:null, lineDiscounts:null, concessionCode:null, internalCode:null, ean:null, styleRef:null, brandItemId:null, brandItemIdCandidate:null });
 const receiptShape = () => ({ merchant:null, date:null, time:null, orderNumber:null, orderId:null, receiptReference:null,
   total:null, subtotal:null, discount:null, receiptDiscount:null, receiptDiscounts:[], tax:null, currency:null, payment:null, card:null,
   storeClues:{addressLines:[],postcode:null,storeNumber:null,phone:null},
@@ -390,11 +391,15 @@ function itemsFromLines(lines, trace) {
     if(used.has(i))continue;
     if(skipCashier){skipCashier=false;continue;}
     if(/you have been served today by/i.test(text)){skipCashier=true;continue;}
-    const productInfo=/^product\s+info\s*:\s*(\d{13})\b/i.exec(text);
+    const productInfo=/^product\s+info\s*:\s*(\d{13})(?:\s+(.+))?$/i.exec(text);
     if(productInfo){
       if(items.length && i-lastProduct<=3){
         const row=items.at(-1);
         row.ean=productInfo[1];
+        if(productInfo[2]){
+          if(row.item && row.item !== productInfo[2].trim()) row.brandRaw=row.brandRaw || row.item;
+          row.item=productInfo[2].trim();
+        }
         if(row.itemId===row.ean || row.itemId===row.concessionCode || row.itemId===row.internalCode) row.itemId=null;
       }
       continue;
@@ -470,7 +475,7 @@ function itemsFromLines(lines, trace) {
     }
     const harrodsItem=parseHarrodsItem(label);
     if(harrodsItem){
-      Object.assign(row,harrodsItem,{brand:null,itemId:null});
+      Object.assign(row,harrodsItem,{itemId:null});
       if(pastTotal)row.afterTotal=true;
       record(row,i);lastProduct=i;continue;
     }
@@ -830,7 +835,9 @@ export function normalizeReading(data) {
   const context={card:out.card,phone:out.storeClues?.phone,date:out.date};
   const harrodsMerchant=/harrods/i.test(out.merchant||'');
   out.items=(out.items||[]).map((item,i)=>{
-    const row={...item};
+    const sorted=sortItemFields(item);
+    const row={...sorted.item};
+    for(const problem of sorted.issues) issue('items.'+i+'.'+problem.field, problem.reason, problem.evidence);
     const parked=parkHarrodsEan(row, harrodsMerchant || row.concessionCode || row.internalCode);
     if(parked){row.itemId=null;row.ean=parked.ean;}
     for(const key of ['itemId','sku']){
@@ -908,10 +915,15 @@ export function cleanReceipt(raw) {
     if(amount==null) return null;
     return {label:str(entry.label), amount:Math.abs(amount)};
   }).filter(Boolean):[];
-  out.items=raw.items.filter(i=>i && typeof i==='object').map(i=>{
+  out.fieldIssues=(Array.isArray(raw.fieldIssues)?raw.fieldIssues:[]).filter(v=>v && typeof v.field==='string' && typeof v.reason==='string').map(v=>({field:v.field,reason:v.reason,evidence:str(v.evidence)||''}));
+  out.items=raw.items.filter(i=>i && typeof i==='object').map((i,index)=>{
     const row=itemShape();
     for(const key of itemStrings) row[key]=str(i[key]);
-    for(const key of itemNumbers) row[key]=num(i[key]);
+    for(const key of itemNumbers){
+      if(i[key]!=null && i[key]!=='' && !(typeof i[key]==='number' && Number.isFinite(i[key])))
+        out.fieldIssues.push({field:'items.'+index+'.'+key, reason:'unreadable_price', evidence:'The price is not a number ('+i[key]+').'});
+      row[key]=num(i[key]);
+    }
     const lines=discountList(i.lineDiscounts);
     if(lines.length){
       row.lineDiscounts=lines;
@@ -928,7 +940,8 @@ export function cleanReceipt(raw) {
   out.storeClues={addressLines:(Array.isArray(clues.addressLines)?clues.addressLines:[]).map(str).filter(Boolean),
     postcode:str(clues.postcode),storeNumber:str(clues.storeNumber),phone:str(clues.phone)};
   out.imageQuality=raw.imageQuality==='poor'?'poor':raw.imageQuality==='good'?'good':'unknown';
-  out.fieldIssues=(Array.isArray(raw.fieldIssues)?raw.fieldIssues:[]).filter(v=>v && typeof v.field==='string' && typeof v.reason==='string').map(v=>({field:v.field,reason:v.reason,evidence:str(v.evidence)||''}));
+  const supplied=(Array.isArray(raw.fieldIssues)?raw.fieldIssues:[]).filter(v=>v && typeof v.field==='string' && typeof v.reason==='string').map(v=>({field:v.field,reason:v.reason,evidence:str(v.evidence)||''}));
+  out.fieldIssues=[...out.fieldIssues.filter(v=>v.reason==='unreadable_price'), ...supplied];
   return normalizeReading(out);
 }
 export {schema as geminiSchema, prompt as geminiPrompt};
