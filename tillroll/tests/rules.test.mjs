@@ -6,7 +6,7 @@ import {
   normalizePurchaseTime, readPurchaseTime, normalizeTender, readTender, cleanProductCode,
   nonItemName, readStoreClues, mergeStoreClues, storeReceiptId, confirmedStoreReceiptId, classifyZeroPrice, applyZeroPriceExclusion,
 } from '../receipt-rules.js';
-import {extractLocal, cleanReceipt, geminiSchema, geminiPrompt, prepareModelReading} from '../extract.js';
+import {extractLocal, cleanReceipt, geminiSchema, geminiPrompt, prepareModelReading, reconcileReadings} from '../extract.js';
 import {checkReceipt, flagCategory, verifyImportedItemIds} from '../checks.js';
 
 const today = new Date('2026-11-25T12:00:00Z');
@@ -410,6 +410,42 @@ test('storeClues: fused till digits are not a phone, spaced UK numbers stay whol
   assert.equal(clues.postcode, 'SW1X 7XL');
   const raw = readStoreClues(makeOcr(['SHOP', 'Somewhere QQ1A 9ZZ', 'TOTAL 10.00']).lines, 'Shop');
   assert.equal(raw.postcode, 'QQ1A 9ZZ');
+});
+test('Harrods total: same-line TOTAL (n items) amount closes the list and tenders are not items', () => {
+  const {data} = read(['HARRODS', '12/11/2026 14:15 NT04567-111222',
+    'Silk scarf 2400.00', 'Carrier Bag 0.00', '_ 2574 By Appointment 0.00',
+    'TOTAL (1 item) £2,400.00', 'Mastercard Tendered 2400.00', 'Citcon QR Tendered 2400.00']);
+  assert.equal(data.total, 2400);
+  assert.deepEqual(data.items.map(row => row.item), ['Silk scarf']);
+  assert.deepEqual(data.excludedZeroItems.map(row => row.item.item).sort(), ['By Appointment', 'Carrier Bag']);
+});
+test('N.Peal quantity prefix before Item Total is not an item', () => {
+  const {data} = read(['N.PEAL', 'Date 12/11/2026 15:04', 'Cashmere scarf 40.00', '1 Unit(s) Item Total: £40.00', 'Visa Tendered 40.00']);
+  assert.equal(data.total, 40);
+  assert.deepEqual(data.items.map(row => row.item), ['Cashmere scarf']);
+});
+test('Harrods: a 13-digit EAN is stored on ean and never on itemId', () => {
+  const {data} = read(['HARRODS', '12/11/2026 16:10 NT01234-567890', 'Silk scarf 5009999888777 30.00', 'TOTAL GBP 30.00']);
+  assert.equal(data.items[0].itemId, null);
+  assert.equal(data.items[0].ean, '5009999888777');
+  const model = cleanReceipt({merchant: 'Harrods', items: [{item: 'Scarf', itemId: '5009999888777', amount: 30}]});
+  assert.equal(model.items[0].itemId, null);
+  assert.equal(model.items[0].ean, '5009999888777');
+  const other = cleanReceipt({merchant: 'Corner Shop', items: [{item: 'Widget', itemId: '7615537002132', amount: 10}]});
+  assert.equal(other.items[0].itemId, '7615537002132');
+  assert.equal(other.items[0].ean, null);
+});
+test('store id: one-digit pass conflict keeps the clearer id and flags it', () => {
+  const first = extractLocal(makeOcr(['HARRODS', {text: '12/11/2026 14:03 NT0682-111111', wordConfidence: {'NT0682-111111': 0.96}}, 'Scarf 20.00', 'TOTAL GBP 20.00']));
+  const second = extractLocal(makeOcr(['HARRODS', {text: '12/11/2026 14:03 NT0882-111111', wordConfidence: {'NT0882-111111': 0.71}}, 'Scarf 20.00', 'TOTAL GBP 20.00']));
+  const merged = reconcileReadings(first, second);
+  assert.equal(merged.data.receiptReference, 'NT0682-111111');
+  const review = checkReceipt(merged.data, makeOcr(['HARRODS', '12/11/2026 14:03 NT0682-111111', 'Scarf 20.00', 'TOTAL GBP 20.00']), null, {today});
+  const flags = review.flags.filter(f => /receipt id pass conflict/i.test(f.message));
+  assert.equal(flags.length, 1);
+  assert.equal(flagCategory(flags[0]), 'reading');
+  const flipped = reconcileReadings(second, first);
+  assert.equal(flipped.data.receiptReference, 'NT0682-111111');
 });
 test('Gemini reading: the store rule replaces a generic Harrods id', () => {
   const ocr = makeOcr(['HARRODS', '12/11/2026 14:03 NT01234-567890', 'Scarf 20.00', 'TOTAL GBP 20.00']);

@@ -77,11 +77,31 @@ function rowSummary(rows) {
   return display+(rows.length>4?'…':'');
 }
 
+function oneDigitApart(a, b) {
+  const left=String(a).trim().toUpperCase(), right=String(b).trim().toUpperCase();
+  if (!left || left.length!==right.length || left===right) return false;
+  let diffs=0;
+  for (let i=0;i<left.length;i++) if (left[i]!==right[i]) {
+    if (!/\d/.test(left[i]+right[i])) return false;
+    diffs++;
+  }
+  return diffs===1;
+}
 export function mergeReadings(first,second,photo) {
   const data={...first,model:second.model??first.model,cost:second.cost??first.cost,
     items:(first.items||[]).map(row=>({...row})),fieldIssues:[...(first.fieldIssues||[])]};
   const conflicts=[];
-  compareFields(first,second,receiptFields,'',conflicts,data,'The second reading',photo);
+  let fields=receiptFields;
+  if (present(first.receiptReference) && present(second.receiptReference) && !same('receiptReference',first.receiptReference,second.receiptReference) && oneDigitApart(first.receiptReference,second.receiptReference)) {
+    const firstConfidence=Number(first.readConfidence?.receiptReference);
+    const secondConfidence=Number(second.readConfidence?.receiptReference);
+    const preferSecond=Number.isFinite(secondConfidence) && (!Number.isFinite(firstConfidence) || secondConfidence>firstConfidence);
+    data.receiptReference=preferSecond ? second.receiptReference : first.receiptReference;
+    data.readConfidence={...(data.readConfidence||{}), receiptReference: preferSecond ? secondConfidence : (Number.isFinite(firstConfidence) ? firstConfidence : 0)};
+    data.fieldIssues.push({field:'receiptReference', reason:'receipt_id_pass_conflict', evidence:first.receiptReference+' / '+second.receiptReference});
+    fields=receiptFields.filter(key=>key!=='receiptReference');
+  }
+  compareFields(first,second,fields,'',conflicts,data,'The second reading',photo);
   data.dateIssue=[...new Set([first.dateIssue,second.dateIssue].filter(Boolean))].join(' ') || null;
   const other=second.items||[], pairs=pairRows(data.items,other);
   const witnesses=uniquePrintedRows(other,photo?.items||[]);

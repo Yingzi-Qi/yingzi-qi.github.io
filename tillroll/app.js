@@ -123,7 +123,7 @@ function evaluateReceipt(r,fillMissing){
   r.record={...r.data};
   const choice=r.confirmedReference;
   const competing=choice?.values || (r.reference.suggestion ? r.reference.candidates.map(c=>c.value) : []);
-  const storeOwned=confirmedStoreReceiptId(r.data.merchant, ocr, r.data.receiptReference);
+  const storeOwned=[ocr, other].filter(Boolean).some(pass=>confirmedStoreReceiptId(r.data.merchant, pass, r.data.receiptReference));
   for(const key of Object.keys(referenceLabels)){
     if(storeOwned && key==='receiptReference') continue;
     if(!r.editedReferences?.has(key) && competing.some(value=>sameReference(value,r.data[key]))) r.record[key]=null;

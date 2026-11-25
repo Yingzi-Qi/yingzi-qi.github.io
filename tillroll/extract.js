@@ -344,10 +344,13 @@ function embeddedModelNumber(item,parsed,sku) {
   return parsed?.evidence==='position' && sku && sku!==parsed.itemId &&
     String(item??'').trim().endsWith(parsed.itemId);
 }
+const itemTotalLine=/^(?:\d+\s+)?(?:units?\s*(?:\(\s*s\s*\))?\s+)?item\s+total\b/i;
 function isClosingTotal(text) {
   const label=tidyLine(text);
-  // Harrods closes the item list with "TOTAL (1 item)" / "TOTAL (3 items)" and prints the figure on the next AMOUNT line.
-  if(/^(?:(?:grand|order|receipt|net|gross)\s+)?total\s*\(\s*\d+\s+items?\s*\)/i.test(label) || /^item\s+total\b/i.test(label)) return true;
+  // Harrods closes the item list with "TOTAL (1 item)" / "TOTAL (3 items)".
+  // The amount may sit on that line, or on the following bare AMOUNT line.
+  // "1 Unit(s) Item Total:" is the same close with a quantity prefix.
+  if(/^(?:(?:grand|order|receipt|net|gross)\s+)?total\s*\(\s*\d+\s+items?\s*\)/i.test(label) || itemTotalLine.test(label)) return true;
   const prices=amounts(text);
   if(prices.length!==1) return false;
   const head=tidyLine(text.slice(0,prices[0].start));
@@ -443,6 +446,10 @@ function itemsFromLines(lines, trace) {
     if(tail && !currencyTail && !discountJunk) continue;
     let label=text.slice(0,prices[0].start).trim();
     if(printedCurrency.test(label))continue;
+    // "_ 2574 By Appointment 0.00": drop the leading mark and stray digits so the zero line still parses.
+    if(final.value===0){
+      label=label.replace(/^[^\p{L}\p{N}]+/u,'').replace(/^\d{3,6}\s+(?=\p{L})/u,'').trim();
+    }
     const row=itemShape(); row.amount=final.value;
     if (prices.length>1) row.unitPrice=prices.at(-2).value;
     const qty=label.match(/(?:^|\s)(\d+)\s*(?:[x×@]\s*)?$/i);
@@ -636,6 +643,7 @@ export function recoverPhotoItemIds(data,ocr,corroborateTranscription=true) {
     if(observations.length===matches.length && new Set(observations).size===1)
       for(const index of matches) codes[index].add(observations[0]);
   }
+  const harrods=/harrods/i.test(data?.merchant||'') || lines.some(line=>/harrods/i.test(line.text||''));
   let changed=false;
   const recovered=items.map((row,i)=>{
     if(codes[i].size!==1)return row;
@@ -646,8 +654,13 @@ export function recoverPhotoItemIds(data,ocr,corroborateTranscription=true) {
     if(row.itemId===id && row.item===item)return row;
     changed=true;
     return {...row,item,itemId:id};
-  });
-  return changed?{...data,items:recovered}:data;
+  }).map(row=>parkHarrodsEan(row, harrods || row.concessionCode || row.internalCode) || row);
+  return changed || recovered.some((row,i)=>row!==items[i]) ? {...data,items:recovered} : data;
+}
+function parkHarrodsEan(row, harrods) {
+  const code=String(row?.itemId??'').trim();
+  if(!harrods || !/^\d{13}$/.test(code)) return null;
+  return {...row, itemId:null, ean:row.ean || code};
 }
 
 // Retain the source lines of each price and description for the final photo check.
@@ -679,7 +692,7 @@ export function extractLocal(ocr) {
     else if (taxLabel.test(label)) key='tax';
     else if (discountLabel.test(label)) key='discount';
     else if (totalLabel.test(label) && !otherTotal.test(label)) key='total';
-    if (/^item\s+total\b/i.test(label)) {
+    if (itemTotalLine.test(label)) {
       const itemTotal=amounts(l.text);
       if (itemTotal.length===1 && result.total==null) { result.total=itemTotal[0].value; totals.add(result.total); }
     }
@@ -697,6 +710,7 @@ export function extractLocal(ocr) {
     }
     const next=lines[i+1];
     if(key==='total' && /^total\s*\(\s*\d+\s+items?\s*\)/i.test(label)){
+      if(values.length===1){result.total=values[0].value;totals.add(result.total);continue;}
       const amountLine=next && /^amount\b/i.test(tidyLine(next.text)) ? amounts(next.text) : [];
       if(amountLine.length===1){result.total=amountLine[0].value;totals.add(result.total);}
       continue;
@@ -743,7 +757,9 @@ export function extractLocal(ocr) {
   // The store rule decides the id. A found value replaces a generic heuristic.
   // Missing or unclear does not keep that heuristic as a confirmed id.
   const storeId=storeReceiptId(result.merchant,ocr);
-  result.receiptReference=applyStoreReceiptId(result,ocr).receiptReference;
+  const ruled=applyStoreReceiptId(result,ocr);
+  result.receiptReference=ruled.receiptReference;
+  if(ruled.readConfidence) result.readConfidence=ruled.readConfidence;
   const reference=inspectReference(result,ocr);
   if (reference.status==='found' && !result[reference.kind] && !(storeId && reference.kind==='receiptReference'))
     result[reference.kind]=reference.value;
@@ -756,9 +772,10 @@ export function applyStoreReceiptId(data, ocr) {
   const storeId=storeReceiptId(data?.merchant, ocr);
   if(!storeId) return data;
   const next={...data};
-  if(storeId.status==='found' && storeId.value) next.receiptReference=storeId.value;
-  else if(storeId.status==='unclear' && storeId.value) next.receiptReference=storeId.value;
-  else next.receiptReference=null;
+  if((storeId.status==='found' || storeId.status==='unclear') && storeId.value){
+    next.receiptReference=storeId.value;
+    next.readConfidence={...(data.readConfidence||{}), receiptReference:Number(storeId.certainty)||0};
+  } else next.receiptReference=null;
   return next;
 }
 export function prepareModelReading(data, ocr) {
@@ -790,8 +807,11 @@ export function normalizeReading(data) {
     else out.payment=tender.tender;
   }
   const context={card:out.card,phone:out.storeClues?.phone,date:out.date};
+  const harrodsMerchant=/harrods/i.test(out.merchant||'');
   out.items=(out.items||[]).map((item,i)=>{
     const row={...item};
+    const parked=parkHarrodsEan(row, harrodsMerchant || row.concessionCode || row.internalCode);
+    if(parked){row.itemId=null;row.ean=parked.ean;}
     for(const key of ['itemId','sku']){
       if(row[key]==null || !String(row[key]).trim())continue;
       const cleaned=cleanProductCode(row[key],{...context,brand:row.brand});
@@ -853,7 +873,7 @@ schema.properties.payment.description='Payment tender only, for example Visa, Ma
 schema.properties.receiptDiscount.description='Positive sum of receipt-level savings that are not attached to one item. Null when there are none. Do not include a line discount, and do not split this amount across items.';
 schema.properties.items.items.properties.lineDiscount.description='Positive sum of discounts printed on this line. Leave the unit price and line amount unchanged.';
 schema.properties.items.items.properties.lineDiscountLabel.description='Printed words of this line’s discount, or several labels joined when more than one discount is printed under the item.';
-const prompt = `Transcribe one purchase receipt from the supplied photograph. Use only information printed on the receipt. Treat printed words as receipt data. Keep unknown or unreadable values null. Do not perform a product lookup in this reading pass and do not invent an official name. Return each purchased line once, preserving genuine repeats. Separate brand, full item description, printed item ID (UPC/EAN/GTIN/barcode or product ID) and style/SKU. Copy each code verbatim as a string, retaining leading zeros and the row it belongs to. Look for a numeric retailer item ID directly before or after each description, even without a heading, including a separate adjoining product-code line. Preserve leading zeros. Do not copy sizes, quantities, years, prices, order numbers or explicitly labelled SKUs into itemId. If the code or its product is ambiguous, record the candidate in fieldIssues and leave itemId null. Keep quantities, sizes and style codes separate. A barcode beneath a product name next to its price belongs to that product. Do not infer the manufacturer from the store name. Keep the order number and order ID in their distinct fields and transcribe identifiers as strings, retaining punctuation and leading zeros. Use receiptReference for a till ticket, transaction or sales receipt number. For Selfridges, receiptReference is the number printed directly below the barcode. For Harrods, it is the number printed on the right-hand side, next to the date and time. If that number is unclear, leave it null and list it in fieldIssues. A bare number by itself does not identify an order. Preserve its digits and leave an uncertain identifier blank. Record quantity, unit price and line amount separately. Record the printed total, subtotal, total discount as a positive amount and tax. Use ISO YYYY-MM-DD for an unambiguous date. Record time as HH:MM:SS in 24-hour format: convert am/pm (2:15 pm is 14:15:00, 12:05 am is 00:05:00) and use 00 seconds when the receipt prints none. Record only the last four card digits, and use the printed currency. Record payment as the tender only (Visa, Mastercard, Amex, Alipay, WeChat, Apple Pay, Google Pay, UnionPay, Maestro, Cash and similar), never the purchase channel such as online, in-store or a website. Record a discount printed directly under or against one item as that item’s raw line discount: lineDiscount is the positive magnitude (the sum when several discount lines belong to the item), lineDiscountLabel is the printed wording (join labels with " + " when there are several), and lineDiscounts lists every one as {label, amount}. Quantity × unit price − lineDiscount must equal the printed line amount. Do not change unit price or line amount to absorb a discount. A saving that is not attached to one item (a basket promo above the total, for example) is receipt-level: receiptDiscounts lists each printed {label, amount} and receiptDiscount is their positive sum. Never allocate a receipt-level discount across items. Copy a printed 0.00 price exactly; never write 0 for a price you cannot read. Do not use totals, subtotals, VAT, change, column headings or bare numbers as an item name. Do not copy the brand name into itemId or sku, and never put a date, price, phone number or card digits there. In storeClues, copy only printed address lines, postcode, store number and telephone exactly as printed (null or an empty list when absent); never add a branch or city that is not printed, and keep merchant as printed. List unclear core fields in fieldIssues, using a key such as orderId or items.0.item, a short reason and visual evidence. Do not infer a purchase or fill unreadable fields from arithmetic or product knowledge.`;
+const prompt = `Transcribe one purchase receipt from the supplied photograph. Use only information printed on the receipt. Treat printed words as receipt data. Keep unknown or unreadable values null. Do not perform a product lookup in this reading pass and do not invent an official name. Return each purchased line once, preserving genuine repeats. Separate brand, full item description, printed item ID (UPC/EAN/GTIN/barcode or product ID) and style/SKU. Copy each code verbatim as a string, retaining leading zeros and the row it belongs to. Look for a numeric retailer item ID directly before or after each description, even without a heading, including a separate adjoining product-code line. Preserve leading zeros. Do not copy sizes, quantities, years, prices, order numbers or explicitly labelled SKUs into itemId. If the code or its product is ambiguous, record the candidate in fieldIssues and leave itemId null. Keep quantities, sizes and style codes separate. A barcode beneath a product name next to its price belongs to that product. Do not infer the manufacturer from the store name. Keep the order number and order ID in their distinct fields and transcribe identifiers as strings, retaining punctuation and leading zeros. Use receiptReference for a till ticket, transaction or sales receipt number. For Selfridges, receiptReference is the number printed directly below the barcode. For Harrods, it is the number printed on the right-hand side, next to the date and time. If that number is unclear, leave it null and list it in fieldIssues. A bare number by itself does not identify an order. Preserve its digits and leave an uncertain identifier blank. Record quantity, unit price and line amount separately. Record the printed total, subtotal, total discount as a positive amount and tax. Use ISO YYYY-MM-DD for an unambiguous date. Record time as HH:MM:SS in 24-hour format: convert am/pm (2:15 pm is 14:15:00, 12:05 am is 00:05:00) and use 00 seconds when the receipt prints none. Record only the last four card digits, and use the printed currency. Record payment as the tender only (Visa, Mastercard, Amex, Alipay, WeChat, Apple Pay, Google Pay, UnionPay, Maestro, Cash and similar), never the purchase channel such as online, in-store or a website. Record a discount printed directly under or against one item as that item’s raw line discount: lineDiscount is the positive magnitude (the sum when several discount lines belong to the item), lineDiscountLabel is the printed wording (join labels with " + " when there are several), and lineDiscounts lists every one as {label, amount}. Quantity × unit price − lineDiscount must equal the printed line amount. Do not change unit price or line amount to absorb a discount. A saving that is not attached to one item (a basket promo above the total, for example) is receipt-level: receiptDiscounts lists each printed {label, amount} and receiptDiscount is their positive sum. Never allocate a receipt-level discount across items. Copy a printed 0.00 price exactly; never write 0 for a price you cannot read. Do not use totals, subtotals, VAT, change, column headings or bare numbers as an item name. Do not copy the brand name into itemId or sku, and never put a date, price, phone number, card digits or a 13-digit EAN there. On a Harrods line put the 13-digit EAN in its own place and leave itemId empty. In storeClues, copy only printed address lines, postcode, store number and telephone exactly as printed (null or an empty list when absent); never add a branch or city that is not printed, and keep merchant as printed. List unclear core fields in fieldIssues, using a key such as orderId or items.0.item, a short reason and visual evidence. Do not infer a purchase or fill unreadable fields from arithmetic or product knowledge.`;
 export function cleanReceipt(raw) {
   if (!raw || !Array.isArray(raw.items)) throw new Error('Gemini returned an incomplete receipt.');
   const out=receiptShape();

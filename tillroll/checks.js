@@ -517,6 +517,7 @@ const readerIssueMessages = {
   unreadable_time:'Purchase time is unreadable',
   ambiguous_time:'Purchase time is ambiguous',
   discount_line_unclear:'discount line unclear',
+  receipt_id_pass_conflict:'receipt id pass conflict',
 };
 
 // A line amount must be printed on the item's own row or its short detail block.
@@ -621,7 +622,8 @@ export function checkReceipt(data, ocr, previous = null, {independentPhoto = fal
   }
   // Store-specific 采购小票id layouts. The store rule decides the id.
   // Missing or unclear is a reading error even when a generic heuristic also found a number.
-  if (storeId && ocr?.lines?.length) {
+  const passConflict = (data.fieldIssues||[]).some(issue => issue?.field==='receiptReference' && issue.reason==='receipt_id_pass_conflict');
+  if (storeId && ocr?.lines?.length && !passConflict) {
     const recorded = text(data.receiptReference);
     if (storeId.status === 'found') {
       if (recorded && name(recorded) !== name(storeId.value))
