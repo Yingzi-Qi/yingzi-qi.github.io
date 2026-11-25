@@ -1,0 +1,16 @@
+{
+  "cacheHit": false,
+  "cacheKey": "item:dior:123456",
+  "sourcesQueried": [],
+  "candidates": [],
+  "mismatches": [],
+  "flag": "#FDE68A",
+  "printedItemId": "123456",
+  "canonicalBrand": "Dior",
+  "paused": true,
+  "unavailableReason": "Brave Search monthly guard reached (950). Gemini grounding daily guard reached (1450).",
+  "quotaGuard": [
+    "Brave Search monthly guard reached (950).",
+    "Gemini grounding daily guard reached (1450)."
+  ]
+}

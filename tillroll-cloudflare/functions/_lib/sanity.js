@@ -3,6 +3,7 @@
 // Excel Sync audit) and iterates until the audit converges. Only the final
 // agreed version leaves this module; the internal trail is stored in D1 only.
 import { canonicalBrand } from './brands.js';
+import { chooseItemId, isConcessionCode, matchesBrandItemId } from '../../../tillroll/brand-item-ids.js';
 import { lookup as defaultLookup, invalidate, priceFallbackIsTie } from './lookup.js';
 import { nowIso, sha256Hex } from './http.js';
 import { expandReceipt, joinPurchaseTime, supplierVisibleName } from '../../../tillroll/units.js';
@@ -93,11 +94,14 @@ function readerStage(receipt, rIndex, state) {
     const confirmedZero = (it.zeroConfirmed === true && (zeroUnit || zeroAmt)) || (zeroUnit && zeroAmt && it.zeroConfirmed !== false);
     if (confirmedZero) { state.excludedZero.push({ receiptKey: receipt.receiptKey, lineIndex, name: str(it.item) }); return; }
     const brandRaw = str(it.brand);
+    const printedId = stripBrandFromItemId(it.itemId ?? it.sku, brandRaw);
+    const chosenId = chooseItemId({ brand: brandRaw, fields: { itemId: it.itemId, sku: it.sku, item: it.item, name: it.name, allowEan: true } });
+    const itemCell = chosenId || (printedId && !isConcessionCode(printedId) ? printedId : null);
     const unitCount = it.unitCount || (receipt.items || []).filter(x => (x.lineIndex ?? 0) === lineIndex).length || 1;
     const row = { rowId: it.rowId || `${receipt.receiptKey}:${lineIndex}:u${it.unitIndex ?? 0}`, receiptKey: receipt.receiptKey, lineIndex,
       unitIndex: it.unitIndex ?? 0, unitCount, discountKind: it.discountKind || 'none', estimated: it.estimated === true || it.discountKind === 'estimated',
       flags: {}, notes: [], _reading: [], _lookup: [], lookup: null,
-      cells: { '采购小票id': receiptId, '采购时间': ts, '供应商': merchant, '品牌': brandRaw, '品名': str(it.item), '品牌货号': stripBrandFromItemId(it.itemId ?? it.sku, brandRaw),
+      cells: { '采购小票id': receiptId, '采购时间': ts, '供应商': merchant, '品牌': brandRaw, '品名': str(it.item), '品牌货号': itemCell,
         '采购商品原价': unit ?? (amount !== null ? round2((amount + discount) / (qty || 1)) : null), '采购商品金额': amount, '采购商品方法': tender, '销售金额': null },
       raw: { style: str(it.sku) !== str(it.itemId) ? str(it.sku) : null, colour: str(it.colour), size: str(it.size), qty, currency: str(receipt.currency),
         amount, lineDiscount: num(it.lineDiscount ?? it.discount), unitDiscount: num(it.unitDiscount ?? it.perItemDiscount ?? it.itemDiscount) } };
@@ -158,6 +162,9 @@ async function verifierStage(rows, receipt, ctx) {
     }
     const top = res.candidates?.[0];
     row.lookup = { cacheKey: res.cacheKey, matchType: top?.matchType || null, confidence: top?.confidence ?? null, sourceUrls: top?.sourceUrls || [] };
+    if (top?.matchType === 'id' && top.itemId && !matchesBrandItemId(c['品牌'], c['品牌货号']) && matchesBrandItemId(c['品牌'], top.itemId) && !ctx.locked(row.rowId, '品牌货号')) {
+      c['品牌货号'] = top.itemId;
+    }
     if (!top) { addFlag(row, '品名', AMBER, 'No official match found; values kept as printed.'); continue; }
     if (top.matchType === 'multi-field') {
       const ties = res.candidates.filter(x => x.matchType === 'multi-field' && x.matchedFields.length === top.matchedFields.length && x.confidence === top.confidence);

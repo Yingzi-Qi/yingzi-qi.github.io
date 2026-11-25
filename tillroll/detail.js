@@ -268,6 +268,19 @@ function showProof(panel, r) {
       if (verification.storeAddress) audit.append(element('p','Official branch · '+verification.storeAddress,'hint'));
       line.append(audit);
     }
+    const lookupRows=(r.lookup?.unitRows || []).filter(row=>row.sourceIndex===i);
+    if (lookupRows.length) {
+      const note=element('div',undefined,'lookup-note');
+      const units=lookupRows.length===1 ? '1 unit row' : lookupRows.length+' unit rows';
+      note.append(element('strong','Look-up · '+units));
+      const first=lookupRows[0];
+      if (first.reviewNote) note.append(element('p',first.reviewNote));
+      for (const mismatch of first.mismatches || []) {
+        note.append(element('p', mismatch.field+': receipt '+mismatch.receiptValue+', official '+mismatch.officialValue+'.'));
+      }
+      if (first.deferred || first.skipped==='paused' || first.skipped==='locked') note.append(element('p',first.reason || 'Not looked up.'));
+      line.append(note);
+    }
     if (receipt) {
       const summary = element('p');
       summary.append(element('span',receipt.status, 'status '+(receipt.status==='Needs review'?'warn reading-error':receipt.status==='Not verified'?'muted reading-error':'reading-error')),document.createTextNode(' '+receipt.reason));

@@ -1,6 +1,7 @@
 // Tillroll v2 layer: Run sanity checks, Linked Workbooks (Google Drive),
 // Reading History, quota status and Brave attribution. Talks only to the
 // same-origin /api/* Cloudflare Pages Functions; holds no secrets.
+import { exportAgreedChina } from './exports.js?v=1';
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const COLUMNS = ['采购小票id', '采购时间', '供应商', '品牌', '品名', '品牌货号', '采购商品原价', '采购商品金额', '采购商品方法', '销售金额'];
@@ -164,19 +165,39 @@ async function openWorkbooks() {
     window.tillrollV2Hooks?.refreshFromFile?.(file);
   };
 }
+function showBrowserHistory() {
+  const list = $('#v2-history-list');
+  if (list) list.innerHTML = '';
+  window.tillrollV2Hooks?.showLocalHistory?.();
+}
 async function openHistory() {
-  const d = $('#v2-history-dialog'), list = $('#v2-history-list');
-  list.innerHTML = '<p>Loading…</p>'; d.showModal();
-  const r = await api('/api/history?limit=100');
-  const data = await r.json().catch(() => ({}));
-  if (!r.ok) { list.innerHTML = `<p class="v2-error">${esc(data.error || 'Could not load history.')}</p>`; return; }
-  list.innerHTML = data.entries.length ? '<ul class="v2-list">' + data.entries.map(e => `<li><span><b>${esc(e.kind)}</b> · ${esc(e.summary)}<br><small>${esc(new Date(e.created_at).toLocaleString('en-GB', { timeZone: 'Europe/London' }))}${e.batch_id ? ' · ' + esc(e.batch_id) : ''}</small></span></li>`).join('') + '</ul>' : '<p>No history yet.</p>';
+  const d = $('#v2-history-dialog'), list = $('#v2-history-list'), fallback = $('#history-fallback');
+  if (!d) return;
+  if (list) list.innerHTML = '<p>Loading…</p>';
+  if (fallback) fallback.hidden = true;
+  d.showModal();
+  try {
+    const r = await api('/api/history?limit=100');
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || 'Could not load history.');
+    if (list) list.innerHTML = data.entries.length ? '<ul class="v2-list">' + data.entries.map(e => `<li><span><b>${esc(e.kind)}</b> · ${esc(e.summary)}<br><small>${esc(new Date(e.created_at).toLocaleString('en-GB', { timeZone: 'Europe/London' }))}${e.batch_id ? ' · ' + esc(e.batch_id) : ''}</small></span></li>`).join('') + '</ul>' : '<p>No history yet.</p>';
+  } catch {
+    showBrowserHistory();
+  }
 }
 
 function init() {
   $('#v2-run')?.addEventListener('click', runSanity);
   $('#v2-workbooks')?.addEventListener('click', openWorkbooks);
-  $('#v2-history')?.addEventListener('click', openHistory);
+  for (const id of ['v2-history', 'history', 'landing-history']) {
+    const button = document.getElementById(id);
+    if (button) button.onclick = openHistory;
+  }
+  const china = $('#excel-china');
+  if (china) {
+    const localExport = china.onclick;
+    china.onclick = event => lastResult?.agreedRows ? exportAgreedChina(lastResult.agreedRows) : localExport?.call(china, event);
+  }
   for (const b of document.querySelectorAll('[data-v2-close]')) b.onclick = () => document.getElementById(b.dataset.v2Close).close();
   const p = new URLSearchParams(location.search).get('drive');
   if (p === 'connected') note('Google Drive connected.'); else if (p === 'denied') note('Google Drive was not connected.');

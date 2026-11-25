@@ -148,6 +148,13 @@ async function waitFor(fn, { timeout = 2000, interval = 10 } = {}) {
   return last;
 }
 
+test('index.html element ids are unique', () => {
+  const html = readFileSync(join(tillrollDir, 'index.html'), 'utf8');
+  const ids = [...html.matchAll(/\sid="([^"]+)"/g)].map(match => match[1]);
+  const duplicates = [...new Set(ids.filter((id, index) => ids.indexOf(id) !== index))];
+  assert.deepEqual(duplicates, []);
+});
+
 test('index.html loads app.js and v2.js with no uncaught errors, and main handlers are bound', async t => {
   const html = readFileSync(join(tillrollDir, 'index.html'), 'utf8');
   // Evaluate app.js / v2.js ourselves so type=module scripts run under Node.
