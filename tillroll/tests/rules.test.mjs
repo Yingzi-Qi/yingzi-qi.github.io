@@ -7,6 +7,7 @@ import {
   nonItemName, readStoreClues, mergeStoreClues, storeReceiptId, confirmedStoreReceiptId, classifyZeroPrice, applyZeroPriceExclusion,
 } from '../receipt-rules.js';
 import {extractLocal, cleanReceipt, geminiSchema, geminiPrompt, prepareModelReading, reconcileReadings} from '../extract.js';
+import {inspectReference} from '../reference.js';
 import {sortItemFields} from '../field-sorter.js';
 import {identifierClasses, itemCountCheck} from '../item-identifiers.js';
 import {checkReceipt, flagCategory, verifyImportedItemIds} from '../checks.js';
@@ -500,6 +501,16 @@ test('brand item id: style ref, then brand code, then EAN; never a store code', 
   const model = read(['ATELIER', '12/11/2026 11:00', 'Linen shirt 40.00', 'Model: ZX-90', 'TOTAL 40.00']);
   assert.equal(model.data.items[0].styleRef, 'ZX-90');
   assert.equal(model.data.items[0].brandItemId, 'ZX-90');
+  const bare = read(['ATELIER', '12/11/2026 11:00', 'Wool coat 40.00', 'AB4401', 'TOTAL 40.00']);
+  assert.equal(bare.data.items[0].styleRef, 'AB4401');
+  assert.equal(bare.data.items[0].brandItemId, 'AB4401');
+  assert.equal(bare.data.items[0].brandItemIdCandidate.source, 'styleRef');
+});
+test('a standalone size line is not a style code', () => {
+  for (const size of ['EU36', 'UK10', 'IT38', 'S', 'M', 'L', 'S/M/L', '36.5']) {
+    const slip = read(['ATELIER', '12/11/2026 11:00', 'Wool coat 40.00', size, 'TOTAL 40.00']);
+    assert.equal(slip.data.items[0].styleRef ?? null, null);
+  }
 });
 test('field sorter: Dior description, brand-only line, Gucci style and a bad price', () => {
   const knit = read(['HARRODS', '12/11/2026 14:03 NT04567-111222',
@@ -584,6 +595,14 @@ test('TOTAL (n items) matches purchased lines or purchased plus excluded zeros',
   const accepted = checkReceipt({merchant: 'ATELIER', total: 18, items: purchased, excludedZeroItems: bag}, makeOcr(['ATELIER', 'Scarf 18.00', 'Carrier bag 0.00', 'TOTAL (1 item) 18.00']));
   assert.equal(accepted.flags.some(flag => flag.message === 'item_count_mismatch'), false);
 });
+test('an unlabelled hex token is not a receipt reference', () => {
+  const ocr = makeOcr(['ATELIER', '12/11/2026 11:00', 'Wool hat 25.00', 'TOTAL 25.00', 'ab12cd34']);
+  const ref = inspectReference({merchant: 'Atelier', items: [{item: 'Wool hat', amount: 25}]}, ocr);
+  assert.equal(ref.value, null);
+  assert.equal((ref.candidates || []).some(entry => entry.value === 'ab12cd34'), false);
+  const labelled = read(['ATELIER', '12/11/2026 11:00', 'Wool hat 25.00', 'Receipt # AB12345', 'TOTAL 25.00']);
+  assert.equal(labelled.data.receiptReference, 'AB12345');
+});
 test('identifiers: labels, priority, masks, count and untrusted text', () => {
   assert.equal(new Set(identifierClasses).size, identifierClasses.length);
   const wrapped = read(['ATELIER', '12/11/2026 10:00', 'Wool hat 25.00', 'Serial', 'Number: SN-100', 'TOTAL (1 item) 25.00']);
@@ -665,6 +684,10 @@ test('addendum: brand description, savings, footer amount, zero lines, merchant 
   assert.equal(sortItemFields({item: 'YCA Necklace', amount: 10}).item.brand, 'Van Cleef & Arpels');
   assert.equal(sortItemFields({item: 'VCA Necklace', amount: 10}).item.item, 'Necklace');
   assert.equal(sortItemFields({item: 'Bulgari Ring', amount: 10}).item.brand, 'Bulgari');
+  assert.equal(sortItemFields({item: 'Salesperson: Alex', amount: 10}).item.item, null);
+  assert.equal(sortItemFields({item: 'Visa Tendered 18.00', amount: 18}).item.item, null);
+  assert.equal(sortItemFields({item: 'CHANEL', amount: 80}).item.item, null);
+  assert.equal(sortItemFields({item: 'Cashmere cardigan', amount: 40}).item.item, 'Cashmere cardigan');
 });
 test('Gemini reading: the store rule replaces a generic Harrods id', () => {
   const ocr = makeOcr(['HARRODS', '12/11/2026 14:03 NT01234-567890', 'Scarf 20.00', 'TOTAL GBP 20.00']);
