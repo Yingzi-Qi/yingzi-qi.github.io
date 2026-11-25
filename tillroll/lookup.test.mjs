@@ -37,7 +37,7 @@ function line(overrides = {}) {
   return {
     brand: 'Chanel',
     item: 'Mini Flap Bag',
-    itemId: 'A01112',
+    itemId: 'AS01112',
     sku: '',
     qty: 1,
     unitPrice: 5200,
@@ -156,12 +156,12 @@ describe('unit price', () => {
 });
 
 describe('price fallback ranking', () => {
-  const printed = { name: 'Mini flap bag', style: 'A01112', price: 100, currency: 'GBP' };
+  const printed = { name: 'Mini flap bag', style: 'AS01112', price: 100, currency: 'GBP' };
 
   it('tier (a) prefers a combined description, item number and price match', () => {
     const ranked = rankPriceFallback([
       { brand: 'Chanel', officialName: 'Classic Wallet', itemId: 'OTHER', price: 100, currency: 'GBP', weightGrams: 50, onOfficialSite: true, matchType: 'price-fallback', matchedFields: ['price'] },
-      { brand: 'Chanel', officialName: 'Mini Flap Bag', itemId: 'A01112', price: 102, currency: 'GBP', weightGrams: 300, onOfficialSite: true, matchType: 'price-fallback', matchedFields: ['name', 'style'] },
+      { brand: 'Chanel', officialName: 'Mini Flap Bag', itemId: 'AS01112', price: 102, currency: 'GBP', weightGrams: 300, onOfficialSite: true, matchType: 'price-fallback', matchedFields: ['name', 'style'] },
     ], printed);
     assert.equal(ranked.tier, 'a');
     assert.equal(ranked.winner.officialName, 'Mini Flap Bag');
@@ -246,6 +246,46 @@ describe('brand item id', () => {
     }), '3607670123456');
   });
 
+  it('does not keep a store code or an id that misses the brand format', async () => {
+    const note = 'No brand style ref found; store/internal code not used';
+    const { result } = trackingClient(() => json({ cacheHit: false, candidates: [], flag: null, sourcesQueried: [] }));
+    const cases = [
+      { brand: 'Maison', item: 'Silk scarf', itemId: '2201', sku: '' },
+      { brand: 'Selfridges Atelier', item: 'Wool coat', itemId: '0003791468', sku: '' },
+      { brand: 'Chanel', item: 'Card holder', itemId: 'B99999', sku: '' },
+    ];
+    for (const item of cases) {
+      const enriched = await enrichLines({ items: [line(item)], currency: 'GBP', client: result });
+      const row = enriched.unitRows.at(-1);
+      assert.equal(row.fields['品牌货号'].value, '');
+      assert.equal(row.fields['品牌货号'].flag, 'pink');
+      assert.equal(row.fields['品牌货号'].flagColour, '#FECDD3');
+      assert.equal(row.fields['品牌货号'].note, note);
+      assert.equal(row.request.itemId, undefined);
+    }
+  });
+
+  it('keeps a style ref beside a store code, and keeps an EAN when that is the only code', async () => {
+    const { result, calls } = trackingClient(() => json({ cacheHit: false, candidates: [], flag: null, sourcesQueried: [] }));
+    const styled = await enrichLines({
+      items: [line({ brand: 'Chanel', item: 'Wool coat AS4401', itemId: '2201', sku: '0003791468' })],
+      currency: 'GBP',
+      client: result,
+    });
+    assert.equal(styled.unitRows[0].fields['品牌货号'].value, 'AS4401');
+    assert.equal(styled.unitRows[0].fields['品牌货号'].flag, null);
+    assert.equal(styled.unitRows[0].request.itemId, 'AS4401');
+    const ean = await enrichLines({
+      items: [line({ brand: 'Chanel', item: 'Silk scarf', itemId: '3607670123456', sku: '' })],
+      currency: 'GBP',
+      client: result,
+    });
+    assert.equal(ean.unitRows[0].fields['品牌货号'].value, '3607670123456');
+    assert.equal(ean.unitRows[0].fields['品牌货号'].flag, null);
+    assert.equal(ean.unitRows[0].request.itemId, '3607670123456');
+    assert.equal(calls.at(-1).body.itemId, '3607670123456');
+  });
+
   it('does not use a concession code or an EAN as a Chanel item id', () => {
     assert.equal(chooseItemId({ brand: 'Chanel', fields: { itemId: '9999999001', sku: '3607670123456' } }), '');
     assert.equal(chooseItemId({ brand: 'Other Atelier', fields: { itemId: '3607670123456' } }), '3607670123456');
@@ -266,9 +306,9 @@ describe('brand item id', () => {
 describe('official-site acceptance', () => {
   it('accepts only an onOfficialSite candidate when a brand is given', () => {
     const selected = selectCandidate([
-      { brand: 'Chanel', officialName: 'Retailer Bag', itemId: 'A01112', price: 5200, currency: 'GBP', onOfficialSite: false, matchType: 'id', matchedFields: ['itemId'], sourceUrls: ['https://www.selfridges.com/bag'] },
-      { brand: 'Chanel', officialName: 'Mini Flap Bag', itemId: 'A01112', price: 5300, currency: 'GBP', onOfficialSite: true, matchType: 'id', matchedFields: ['itemId'], sourceUrls: ['https://www.chanel.com/bag'] },
-    ], { brand: 'Chanel', itemId: 'A01112', name: 'Mini Flap Bag', price: 5200, currency: 'GBP' });
+      { brand: 'Chanel', officialName: 'Retailer Bag', itemId: 'AS01112', price: 5200, currency: 'GBP', onOfficialSite: false, matchType: 'id', matchedFields: ['itemId'], sourceUrls: ['https://www.selfridges.com/bag'] },
+      { brand: 'Chanel', officialName: 'Mini Flap Bag', itemId: 'AS01112', price: 5300, currency: 'GBP', onOfficialSite: true, matchType: 'id', matchedFields: ['itemId'], sourceUrls: ['https://www.chanel.com/bag'] },
+    ], { brand: 'Chanel', itemId: 'AS01112', name: 'Mini Flap Bag', price: 5200, currency: 'GBP' });
     assert.equal(selected.winner.officialName, 'Mini Flap Bag');
     assert.equal(selected.corroboration.length, 1);
     assert.equal(selected.fallback, false);
@@ -283,12 +323,12 @@ describe('official-site acceptance', () => {
           ...miniFixture.candidates[0],
           officialName: 'China listing',
           onOfficialSite: false,
-          sourceUrls: ['https://www.chanel.cn/gb/fashion/p/A01112/mini-flap-bag'],
+          sourceUrls: ['https://www.chanel.cn/gb/fashion/p/AS01112/mini-flap-bag'],
         },
         {
           ...miniFixture.candidates[0],
           onOfficialSite: true,
-          sourceUrls: ['https://www.chanel.com/gb/fashion/p/A01112/mini-flap-bag'],
+          sourceUrls: ['https://www.chanel.com/gb/fashion/p/AS01112/mini-flap-bag'],
         },
       ],
     }));
@@ -303,7 +343,7 @@ describe('official-site acceptance', () => {
   });
 
   it('uses chanel.cn/gb only when chanel.com is blocked and records that note', async () => {
-    const page = 'https://www.chanel.cn/gb/fashion/p/A01112/mini-flap-bag';
+    const page = 'https://www.chanel.cn/gb/fashion/p/AS01112/mini-flap-bag';
     const { result } = trackingClient(() => json({
       ...miniFixture,
       flag: null,
@@ -320,7 +360,7 @@ describe('official-site acceptance', () => {
     const enriched = await enrichLines({ items: [line()], currency: 'GBP', client: result });
     const row = enriched.unitRows[0];
     assert.equal(row.accepted.officialName, 'Mini Flap Bag');
-    assert.equal(row.fields['品牌货号'].value, 'A01112');
+    assert.equal(row.fields['品牌货号'].value, 'AS01112');
     assert.equal(row.flag, 'amber');
     assert.equal(row.flagColour, '#FDE68A');
     assert.equal(row.fields['品名'].flag, 'amber');
@@ -333,7 +373,7 @@ describe('official-site acceptance', () => {
       ...miniFixture.candidates[0],
       onOfficialSite: false,
       sourceUrls: [page],
-    }], { brand: 'Chanel', itemId: 'A01112', name: 'Mini Flap Bag', price: 5200, currency: 'GBP' });
+    }], { brand: 'Chanel', itemId: 'AS01112', name: 'Mini Flap Bag', price: 5200, currency: 'GBP' });
     assert.equal(open.winner, null);
     const errored = selectCandidate([{
       ...miniFixture.candidates[0],
@@ -341,7 +381,7 @@ describe('official-site acceptance', () => {
       currency: 'CNY',
       onOfficialSite: false,
       sourceUrls: [page],
-    }], { brand: 'Chanel', itemId: 'A01112', name: 'Mini Flap Bag', price: 5200, currency: 'GBP' }, {
+    }], { brand: 'Chanel', itemId: 'AS01112', name: 'Mini Flap Bag', price: 5200, currency: 'GBP' }, {
       primaryBlocked: primaryAccess({ sourceErrors: [{ domain: 'chanel.com', status: 500, error: 'failed' }] }, 'Chanel').blocked,
       blockedDomain: 'chanel.com',
     });
@@ -352,7 +392,7 @@ describe('official-site acceptance', () => {
       currency: 'GBP',
       onOfficialSite: false,
       sourceUrls: [page],
-    }], { brand: 'Chanel', itemId: 'A01112', name: 'Mini Flap Bag', price: 5200, currency: 'GBP' }, {
+    }], { brand: 'Chanel', itemId: 'AS01112', name: 'Mini Flap Bag', price: 5200, currency: 'GBP' }, {
       primaryBlocked: true,
       blockedDomain: 'chanel.com',
     });
@@ -367,8 +407,8 @@ describe('official-site acceptance', () => {
         ...miniFixture.candidates[0],
         onOfficialSite: true,
         sourceUrls: [
-          'https://www.chanel.com/gb/fashion/p/A01112/mini-flap-bag',
-          'https://www.chanel.cn/gb/fashion/p/A01112/mini-flap-bag',
+          'https://www.chanel.com/gb/fashion/p/AS01112/mini-flap-bag',
+          'https://www.chanel.cn/gb/fashion/p/AS01112/mini-flap-bag',
         ],
       }],
     }));
@@ -393,7 +433,7 @@ describe('official-site acceptance', () => {
         currency: 'CNY',
         onOfficialSite: false,
         matchedFields: ['itemId', 'name', 'price'],
-        sourceUrls: ['https://www.chanel.cn/gb/fashion/p/A01112/mini-flap-bag'],
+        sourceUrls: ['https://www.chanel.cn/gb/fashion/p/AS01112/mini-flap-bag'],
       }],
     }));
     const enriched = await enrichLines({ items: [line()], currency: 'GBP', client: result });
@@ -404,9 +444,9 @@ describe('official-site acceptance', () => {
     assert.deepEqual(row.fields['采购商品原价'].officialValue, { amount: 100, currency: 'CNY' });
     assert.equal(row.mismatches.some(entry => entry.field === '采购商品原价'), false);
     const ranked = selectCandidate([
-      { brand: 'Chanel', officialName: 'Mirror Bag', itemId: 'A01112', price: 5200, currency: 'GBP', onOfficialSite: false, matchType: 'id', matchedFields: ['itemId', 'price'], sourceUrls: ['https://www.chanel.cn/gb/mirror'] },
-      { brand: 'Chanel', officialName: 'Mini Flap Bag', itemId: 'A01112', price: 6000, currency: 'GBP', onOfficialSite: true, matchType: 'id', matchedFields: ['itemId', 'name'], sourceUrls: ['https://www.chanel.com/gb/primary'] },
-    ], { brand: 'Chanel', itemId: 'A01112', name: 'Mini Flap Bag', price: 5200, currency: 'GBP' }, blocked);
+      { brand: 'Chanel', officialName: 'Mirror Bag', itemId: 'AS01112', price: 5200, currency: 'GBP', onOfficialSite: false, matchType: 'id', matchedFields: ['itemId', 'price'], sourceUrls: ['https://www.chanel.cn/gb/mirror'] },
+      { brand: 'Chanel', officialName: 'Mini Flap Bag', itemId: 'AS01112', price: 6000, currency: 'GBP', onOfficialSite: true, matchType: 'id', matchedFields: ['itemId', 'name'], sourceUrls: ['https://www.chanel.com/gb/primary'] },
+    ], { brand: 'Chanel', itemId: 'AS01112', name: 'Mini Flap Bag', price: 5200, currency: 'GBP' }, blocked);
     assert.equal(ranked.winner.officialName, 'Mini Flap Bag');
   });
 
@@ -430,7 +470,7 @@ describe('official-site acceptance', () => {
       candidates: [{
         ...miniFixture.candidates[0],
         onOfficialSite: false,
-        sourceUrls: ['https://www.chanel.example/gb/fashion/p/A01112/mini-flap-bag'],
+        sourceUrls: ['https://www.chanel.example/gb/fashion/p/AS01112/mini-flap-bag'],
       }],
     }));
     const enriched = await enrichLines({ items: [line()], currency: 'GBP', client: result });
@@ -463,7 +503,7 @@ describe('official-site acceptance', () => {
   it('does not invent a price fallback when the item id was not confirmed as a miss', () => {
     const selected = selectCandidate([
       { brand: 'Chanel', officialName: 'Other', itemId: 'OTHER', price: 5200, currency: 'GBP', onOfficialSite: true, matchType: 'multi-field', matchedFields: ['price'] },
-    ], { brand: 'Chanel', itemId: 'A01112', name: 'Mini', price: 5200, currency: 'GBP' });
+    ], { brand: 'Chanel', itemId: 'AS01112', name: 'Mini', price: 5200, currency: 'GBP' });
     assert.equal(selected.winner, null);
     assert.equal(selected.fallback, false);
   });
@@ -582,7 +622,7 @@ describe('enrichment', () => {
     assert.equal(row.fields['品名'].flag, null);
     assert.equal(row.flag, null);
     assert.equal(row.flagColour, null);
-    assert.equal(row.fields['品牌货号'].value, 'A01112');
+    assert.equal(row.fields['品牌货号'].value, 'AS01112');
     assert.equal(row.fields['采购商品原价'].value, 5200);
     assert.equal(row.candidates[0].extra.retailerNote, 'kept as an extra field');
     assert.equal(row.mismatches.some(entry => entry.field === '品名'), false);
@@ -637,14 +677,14 @@ describe('enrichment', () => {
       flag: '#FDE68A', canonicalBrand: 'Chanel', sourcesQueried: ['brave', 'gemini-grounding'],
     }));
     const enriched = await enrichLines({
-      items: [line({ item: 'Unrelated tote', itemId: 'PRINTED01', sku: '', unitPrice: 100, amount: 100 })],
+      items: [line({ item: 'Unrelated tote', itemId: 'AS99999', sku: '', unitPrice: 100, amount: 100 })],
       currency: 'GBP',
       client: result,
     });
     const row = enriched.unitRows[0];
     const mismatch = row.mismatches.find(entry => entry.field === '品牌货号');
-    assert.equal(row.fields['品牌货号'].value, 'PRINTED01');
-    assert.equal(mismatch.receiptValue, 'PRINTED01');
+    assert.equal(row.fields['品牌货号'].value, 'AS99999');
+    assert.equal(mismatch.receiptValue, 'AS99999');
     assert.equal(mismatch.officialValue, 'OFFICIAL9');
     assert.equal(row.flag, 'amber');
     assert.equal(row.candidates.length, 1);
@@ -697,7 +737,7 @@ describe('enrichment', () => {
   it('stops at the run cap and keeps the deferred rows', async () => {
     const { result, calls } = trackingClient(() => json(miniFixture), { maxLookupsPerRun: 2 });
     const enriched = await enrichLines({
-      items: [line({ itemId: 'A1' }), line({ itemId: 'A2' }), line({ itemId: 'A3' })],
+      items: [line({ itemId: 'AS10001' }), line({ itemId: 'AS10002' }), line({ itemId: 'AS10003' })],
       currency: 'GBP',
       client: result,
     });
@@ -814,16 +854,16 @@ describe('enrichment', () => {
       });
     });
     const enriched = await enrichLines({
-      items: [line({ item: 'mini', itemId: 'A01112' })],
+      items: [line({ item: 'mini', itemId: 'AS01112' })],
       currency: 'GBP',
       round: 2,
       previous: [{ sourceIndex: 0, '品名': 'mini', '品牌': 'Chanel', '品牌货号': 'OLD', '供应商': '', '采购商品原价': 5200, '采购商品金额': 5200 }],
-      editedItemIds: { 0: { previousItemId: 'OLD', itemId: 'A01112' } },
+      editedItemIds: { 0: { previousItemId: 'OLD', itemId: 'AS01112' } },
       client: result,
     });
     assert.ok(calls.some(call => call.url.endsWith('/api/lookup/invalidate')));
     assert.deepEqual(calls.find(call => call.url.endsWith('/invalidate')).body, {
-      brand: 'Chanel', itemId: 'A01112', previousItemId: 'OLD', name: 'mini', currency: 'GBP', price: 5200,
+      brand: 'Chanel', itemId: 'AS01112', previousItemId: 'OLD', name: 'mini', currency: 'GBP', price: 5200,
     });
     assert.ok(enriched.unitRows[0].round2Changed.includes('品名'));
   });
@@ -921,7 +961,7 @@ describe('enrichment', () => {
     });
     assert.equal(missingName.calls[0].body.name, undefined);
     assert.equal(missingName.calls[0].body.brand, 'Chanel');
-    assert.equal(missingName.calls[0].body.itemId, 'A01112');
+    assert.equal(missingName.calls[0].body.itemId, 'AS01112');
     assert.equal(Object.hasOwn(missingName.calls[0].body, 'supplier'), false);
   });
 
@@ -936,7 +976,7 @@ describe('enrichment', () => {
         return json({ cacheHit: false, candidates: [], flag: '#FDE68A', sourcesQueried: ['brave', 'gemini-grounding'] });
       },
     });
-    const body = { brand: 'Chanel', itemId: 'A01112', price: 10, currency: 'GBP' };
+    const body = { brand: 'Chanel', itemId: 'AS01112', price: 10, currency: 'GBP' };
     await client.lookup(body);
     await client.lookup(body);
     assert.equal(fetches, 1);
@@ -955,7 +995,7 @@ describe('enrichment', () => {
         { field: 'price', receiptValue: 5200, officialValue: 5300 },
       ],
       candidates: [{ ...miniFixture.candidates[0], brand: 'Van Cleef & Arpels', mismatches: [
-        { field: 'itemId', receiptValue: 'A01112', officialValue: 'DIFFERENT' },
+        { field: 'itemId', receiptValue: 'AS01112', officialValue: 'DIFFERENT' },
       ] }],
     }));
     const enriched = await enrichLines({
@@ -968,7 +1008,7 @@ describe('enrichment', () => {
     assert.equal(row.fields['品牌'].flag, 'amber');
     assert.equal(row.fields['采购商品原价'].value, 5200);
     assert.equal(row.fields['采购商品原价'].officialValue, 5300);
-    assert.equal(row.fields['品牌货号'].value, 'A01112');
+    assert.equal(row.fields['品牌货号'].value, 'AS01112');
     assert.equal(row.mismatches.some(entry => entry.officialValue === 'Should be ignored'), false);
     assert.equal(row.mismatches.find(entry => entry.field === '品牌货号').officialValue, 'DIFFERENT');
     assert.equal(row.flagColour, '#FDE68A');
@@ -1043,15 +1083,15 @@ describe('enrichment', () => {
         });
       },
     });
-    await client.lookup({ brand: 'Chanel', itemId: 'A01112', price: 10, currency: 'GBP' });
-    await client.lookup({ brand: 'Chanel', itemId: 'A01112', price: 10, currency: 'GBP' });
-    await client.lookup({ brand: 'Chanel', itemId: 'A01112', price: 12, currency: 'GBP' });
+    await client.lookup({ brand: 'Chanel', itemId: 'AS01112', price: 10, currency: 'GBP' });
+    await client.lookup({ brand: 'Chanel', itemId: 'AS01112', price: 10, currency: 'GBP' });
+    await client.lookup({ brand: 'Chanel', itemId: 'AS01112', price: 12, currency: 'GBP' });
     await client.lookup({ brand: 'Chanel', itemId: 'OTHER', price: 12, currency: 'GBP' });
     assert.equal(fetches, 2);
     assert.equal(cacheKeys.item('Van Cleef & Arpels', ' ab 0123 '), 'lookup:v2:item:van-cleef-&-arpels:AB0123');
-    assert.equal(cacheKeys.mf('Chanel', 'Mini Bag', 'A01112'), 'lookup:v2:mf:chanel:mini-bag:a01112');
+    assert.equal(cacheKeys.mf('Chanel', 'Mini Bag', 'AS01112'), 'lookup:v2:mf:chanel:mini-bag:as01112');
     assert.equal(cacheKeys.pf('Chanel', 'gbp', 10), 'lookup:v2:pf:chanel:GBP:10.00');
-    assert.equal(cacheKeys.pf('Chanel', 'GBP', 10).includes('A01112'), false);
+    assert.equal(cacheKeys.pf('Chanel', 'GBP', 10).includes('AS01112'), false);
     assert.equal(cacheKeys.branch('Rolex', 'E14 5AB'), 'lookup:v2:branch:rolex:e14-5ab');
   });
 

@@ -1,16 +1,16 @@
 {
   "cacheHit": false,
-  "cacheKey": "lookup:v2:item:chanel:A01112",
+  "cacheKey": "lookup:v2:item:chanel:AS01112",
   "sourcesQueried": ["brave", "gemini-grounding"],
   "candidates": [
     {
       "brand": "Chanel",
       "officialName": "Mini Flap Bag",
-      "itemId": "A01112",
+      "itemId": "AS01112",
       "price": 5200,
       "currency": "GBP",
       "weightGrams": 220,
-      "sourceUrls": ["https://www.chanel.com/gb/fashion/p/A01112/mini-flap-bag"],
+      "sourceUrls": ["https://www.chanel.com/gb/fashion/p/AS01112/mini-flap-bag"],
       "onOfficialSite": true,
       "matchedFields": ["itemId", "name", "price", "brand"],
       "confidence": 0.99,
@@ -19,6 +19,6 @@
     }
   ],
   "flag": "#FDE68A",
-  "printedItemId": "A01112",
+  "printedItemId": "AS01112",
   "canonicalBrand": "Chanel"
 }

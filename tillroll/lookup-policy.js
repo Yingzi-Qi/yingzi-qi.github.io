@@ -3,7 +3,7 @@
 // price and is matched first. 采购商品金额 (paid unit) is used only when 原价 is missing.
 
 import { brandInLine, canonicalBrand, fold, knownBrand, normaliseItemId, productWords } from './brand-aliases.js';
-import { brandHasItemIdFormat, chooseItemId, isConcessionCode, isEan, stripProductCodes } from './brand-item-ids.js';
+import { chooseItemId, fallbackItemId, isConcessionCode, isEan, isStoreCode, stripProductCodes } from './brand-item-ids.js';
 import { extractStoreClues } from './uk-branches.js';
 
 export const AMBER = '#FDE68A';
@@ -72,23 +72,22 @@ function separateLine(item) {
       allowEan: unresolved,
     },
   });
-  let itemId = chosen;
-  if (!itemId) {
-    const blockEan = isEan(rawId) && brandHasItemIdFormat(brand) && !unresolved;
-    itemId = isConcessionCode(rawId) || blockEan ? '' : rawId;
-  }
+  const guarded = chosen && !isStoreCode(chosen)
+    ? { itemId: chosen, rejected: false }
+    : fallbackItemId(brand, rawId);
   return {
     brand,
     name: unresolved ? '' : nameField,
     printedName: nameField,
     nameUnresolved: unresolved,
-    itemId,
+    itemId: guarded.itemId,
+    itemIdRejected: guarded.rejected,
   };
 }
 
 function printedStyle(item, itemId) {
   const raw = String(item?.sku ?? item?.style ?? '').trim();
-  if (!raw || isConcessionCode(raw) || isEan(raw)) return '';
+  if (!raw || isConcessionCode(raw) || isStoreCode(raw) || isEan(raw)) return '';
   if (normaliseItemId(raw) === normaliseItemId(itemId)) return '';
   return raw;
 }
@@ -152,6 +151,7 @@ export function prepareUnitRows(items, { currency = '', merchant = '', storeClue
         printedName: separated.printedName,
         nameUnresolved: separated.nameUnresolved,
         itemId: separated.itemId,
+        itemIdRejected: separated.itemIdRejected,
         style: printedStyle(item, separated.itemId),
         currency: String(item?.currency ?? currency ?? '').trim().toUpperCase(),
         supplier: String(item?.supplier ?? item?.['供应商'] ?? merchant ?? '').trim(),

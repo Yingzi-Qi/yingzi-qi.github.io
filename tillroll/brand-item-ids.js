@@ -60,12 +60,42 @@ export function isConcessionCode(value) {
   return /^9999999\d*$/i.test(compact(value));
 }
 
-export function isEan(value) {
-  return /^\d{8,14}$/.test(compact(value));
+// A 4-digit department/concession code, or a 10-digit internal code.
+// 9999999… is the same kind of store code even when it is not exactly 10 digits.
+export function isStoreCode(value) {
+  const text = compact(value);
+  return /^\d{4}$/.test(text) || /^\d{10}$/.test(text) || isConcessionCode(text);
 }
+
+// Product barcodes only. A 10-digit store code is not an EAN.
+export function isEan(value) {
+  const text = compact(value);
+  if (!text || isStoreCode(text)) return false;
+  return /^(?:\d{8}|\d{12}|\d{13}|\d{14})$/.test(text);
+}
+
+export const ITEM_ID_GUARD_NOTE = 'No brand style ref found; store/internal code not used';
 
 export function brandHasItemIdFormat(brand) {
   return Boolean(ruleFor(brand));
+}
+
+export function matchesBrandItemId(brand, value) {
+  const rule = ruleFor(brand);
+  if (!rule) return false;
+  return rule.test(value);
+}
+
+// chooseItemId returned nothing. Do not keep a store code, or a raw printed
+// id that misses the brand's own format. An EAN is still a P1 item id.
+export function fallbackItemId(brand, raw) {
+  const text = squash(raw);
+  if (!text) return { itemId: '', rejected: false };
+  if (isEan(text)) return { itemId: compact(text), rejected: false };
+  if (isStoreCode(text) || (brandHasItemIdFormat(brand) && !matchesBrandItemId(brand, text))) {
+    return { itemId: '', rejected: true };
+  }
+  return { itemId: text, rejected: false };
 }
 
 function ruleFor(brand) {
