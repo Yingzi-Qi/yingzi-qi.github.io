@@ -1,0 +1,47 @@
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import {register} from 'node:module';
+import {dirname, join} from 'node:path';
+import test from 'node:test';
+import {fileURLToPath, pathToFileURL} from 'node:url';
+import {JSDOM} from 'jsdom';
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+
+test('app.js loads in jsdom', async () => {
+  await register(new URL('./strip-query-loader.mjs', import.meta.url));
+  const html = readFileSync(join(root, 'index.html'), 'utf8');
+  const dom = new JSDOM(html, {
+    url: 'https://tillroll.test/tillroll/index.html',
+    pretendToBeVisual: true,
+  });
+  const {window} = dom;
+  const install = (name, value) => {
+    Object.defineProperty(globalThis, name, {configurable: true, writable: true, value});
+  };
+  install('window', window);
+  install('document', window.document);
+  install('location', window.location);
+  install('localStorage', window.localStorage);
+  install('HTMLElement', window.HTMLElement);
+  install('getComputedStyle', window.getComputedStyle.bind(window));
+  const consoleErrors = [];
+  const uncaught = [];
+  const originalError = console.error;
+  console.error = (...args) => { consoleErrors.push(args.map(String).join(' ')); };
+  const onException = error => { uncaught.push(error); };
+  const onRejection = reason => { uncaught.push(reason); };
+  process.on('uncaughtException', onException);
+  process.on('unhandledRejection', onRejection);
+  try {
+    await import(pathToFileURL(join(root, 'app.js')).href);
+  } finally {
+    console.error = originalError;
+    process.off('uncaughtException', onException);
+    process.off('unhandledRejection', onRejection);
+  }
+  assert.deepEqual(consoleErrors, [], 'console.error during load:\n' + consoleErrors.join('\n'));
+  assert.deepEqual(uncaught.map(String), [], 'uncaught during load:\n' + uncaught.map(String).join('\n'));
+  assert.equal(document.querySelector('h1').textContent, 'Receipts');
+  assert.ok(document.querySelector('#settings'));
+});
