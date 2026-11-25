@@ -515,6 +515,7 @@ const readerIssueMessages = {
   channel_not_tender:'Payment must be the tender, not the purchase channel',
   unreadable_time:'Purchase time is unreadable',
   ambiguous_time:'Purchase time is ambiguous',
+  discount_line_unclear:'discount line unclear',
 };
 
 // A line amount must be printed on the item's own row or its short detail block.
@@ -561,7 +562,10 @@ export function checkReceipt(data, ocr, previous = null, {independentPhoto = fal
     add(key,label+(matches?' matches the ':' does not match the ')+description,matches?'info':'check',!matches,matches?'info':'lookup');
   }
   const printedNumbers = printedOrderNumbers(ocr);
-  if(reference.status==='found' && data[reference.kind] && name(data[reference.kind])!==name(reference.value)) {
+  const storeId = storeReceiptId(data.merchant, ocr);
+  // A store rule owns 采购小票id, so a generic heuristic is not the photo value to confirm.
+  const genericReceipt = storeId && reference.kind==='receiptReference';
+  if(!genericReceipt && reference.status==='found' && data[reference.kind] && name(data[reference.kind])!==name(reference.value)) {
     add(reference.kind,reference.label+' differs from the value on the photo ('+reference.value+').','check');
   } else if(reference.requiresReview && reference.suggestion) {
     add('receipt','Check the suggested reference '+reference.suggestion.value+' against the other possible numbers.','check');
@@ -612,14 +616,14 @@ export function checkReceipt(data, ocr, previous = null, {independentPhoto = fal
     if (tender.channel) add('payment','“'+text(data.payment)+'” is a purchase channel, not a payment tender.', 'fix');
     else if (!tender.known) add('payment','The payment tender “'+text(data.payment)+'” is not recognised.', 'check');
   }
-  // Store-specific 采购小票id layouts. An uncertain or contradicting number is a reading error.
-  const storeId = storeReceiptId(data.merchant, ocr);
+  // Store-specific 采购小票id layouts. The store rule decides the id.
+  // Missing or unclear is a reading error even when a generic heuristic also found a number.
   if (storeId && ocr?.lines?.length) {
     const recorded = text(data.receiptReference);
-    if (storeId.status === 'found' && recorded && name(recorded) !== name(storeId.value))
-      add('receiptReference', storeId.reason+' The photo shows '+storeId.value+'.', 'check');
-    else if (storeId.status === 'unclear') add('receiptReference', storeId.reason, 'check');
-    else if (storeId.status === 'missing' && !recorded) add('receiptReference', storeId.reason, 'check');
+    if (storeId.status === 'found') {
+      if (recorded && name(recorded) !== name(storeId.value))
+        add('receiptReference', storeId.reason+' The photo shows '+storeId.value+'.', 'check');
+    } else add('receiptReference', storeId.reason, 'check');
   }
   for (const issue of Array.isArray(data.fieldIssues) ? data.fieldIssues : []) {
     const field = text(issue?.field);

@@ -3,7 +3,7 @@ import {inspectReference,combineReferenceReadings} from './reference.js?v=6';
 import {readPhoto,secondReadPhoto,extractLocal,extractAI,reconcileReadings,photoFieldConflicts,recoverPhotoItemIds} from './extract.js?v=discounts1';
 import {checkReceipt,samePurchase,reviewForLine,verifyImportedItemIds} from './checks.js?v=discounts1';
 import {normalizeReading} from './extract.js?v=discounts1';
-import {applyZeroPriceExclusion,normalizePurchaseTime,readStoreClues} from './receipt-rules.js?v=1';
+import {applyZeroPriceExclusion,normalizePurchaseTime,readStoreClues,mergeStoreClues} from './receipt-rules.js?v=1';
 import {exportExcel,exportCSV,readOrderFile,readAchungWorkbook,readTillrollEdits} from './exports.js?v=policy1';
 import {planWorkbookRefresh,restoreWorkbookReceipts,nextWorkbookBaseline,withLegacyWorkbookBaseline,nextLegacyWorkbookBaseline} from './workbook-refresh.js?v=2';
 import {bindExcelRefresh} from './excel-refresh-ui.js?v=1';
@@ -90,10 +90,12 @@ function verifyFinalOutput(r) {
 // Model and saved readings get the same printed-store clues and true-zero audit as on-device OCR.
 function prepareModelReading(data,ocr) {
   let out=data;
-  const clues=out.storeClues;
-  if(ocr?.lines?.length && !(clues?.addressLines?.length || clues?.postcode || clues?.storeNumber || clues?.phone))
-    out={...out,storeClues:readStoreClues(ocr.lines,out.merchant)};
-  return ocr?.lines?.length ? applyZeroPriceExclusion(out,ocr) : out;
+  if(ocr?.lines?.length){
+    const printed=readStoreClues(ocr.lines,out.merchant);
+    out={...out,storeClues:mergeStoreClues(out.storeClues,printed)};
+    out=applyZeroPriceExclusion(out,ocr);
+  }
+  return out;
 }
 function zeroPriceNotes(r) {
   const excluded=r.data?.excludedZeroItems || [];

@@ -260,6 +260,21 @@ export function readStoreClues(lines, merchant = null) {
   return clues;
 }
 
+// Fill only the store-clue fields the model left empty. Never replace a printed
+// value the model already returned, and never invent a branch on the merchant.
+export function mergeStoreClues(existing, printed) {
+  const clues = existing && typeof existing === 'object' ? existing : {};
+  const text = value => { const cleaned = String(value ?? '').trim(); return cleaned || null; };
+  const addressLines = Array.isArray(clues.addressLines) ? clues.addressLines.map(text).filter(Boolean) : [];
+  const fromPrint = printed && typeof printed === 'object' ? printed : {addressLines:[], postcode:null, storeNumber:null, phone:null};
+  return {
+    addressLines: addressLines.length ? addressLines : (Array.isArray(fromPrint.addressLines) ? fromPrint.addressLines : []),
+    postcode: text(clues.postcode) || fromPrint.postcode || null,
+    storeNumber: text(clues.storeNumber) || fromPrint.storeNumber || null,
+    phone: text(clues.phone) || fromPrint.phone || null,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // 采购小票id store layouts. Geometry is normalised (0–1) to the upright photo.
 const hasBox = b => b && ['x', 'y', 'w', 'h'].every(k => Number.isFinite(b[k])) && b.w > 0 && b.h > 0;

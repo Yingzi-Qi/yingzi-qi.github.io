@@ -477,15 +477,25 @@ function foldLineDiscounts(items,trace) {
     i=start-1;
   }
 }
-// Discount rows that did not attach to the line above are receipt-level savings.
-// They leave the item list raw; nothing is spread onto other lines.
-function detachReceiptDiscountRows(items) {
-  const kept=[], entries=[];
-  for(const row of items){
-    if(!isDiscountRow(row)){kept.push(row);continue;}
-    entries.push({label:String(row.item??'').replace(/\s+/g,' ').trim()||null, amount:roundMoney(-row.amount)});
-  }
-  return {items:kept, entries};
+// A discount still sitting on its own row was not tied to a line.
+// Receipt level is only a saving printed above the total and not under a priced item.
+// A discount under a priced item whose arithmetic does not reconcile stays raw.
+function classifyLooseDiscounts(items) {
+  const kept=[], receipt=[], unclear=[];
+  items.forEach((row,index)=>{
+    if(!isDiscountRow(row)){kept.push(row);return;}
+    const previous=kept.at(-1);
+    const laterProduct=items.slice(index+1).some(next=>!isDiscountRow(next) && next.amount>0);
+    const underPricedItem=previous && previous.unitPrice!=null && previous.amount>0;
+    const entry={label:String(row.item??'').replace(/\s+/g,' ').trim()||null, amount:roundMoney(-row.amount)};
+    if(underPricedItem || laterProduct){
+      unclear.push(kept.length);
+      kept.push(row);
+      return;
+    }
+    receipt.push(entry);
+  });
+  return {items:kept, receipt, unclear};
 }
 function printedDiscountLabel(text, match) {
   return text.slice(0, match.start).replace(/[£$€]/g,'').replace(/\b(?:GBP|EUR|USD|CAD|AUD|CHF|MYR|SGD)\b/gi,'').replace(/\s+/g,' ').trim()||null;
@@ -645,11 +655,13 @@ export function extractLocal(ocr) {
     result[key]=key==='discount' ? Math.abs(value) : value;
   }
   if(totals.size>1) result.fieldIssues.push({field:'total',reason:'conflicting_printed_totals',evidence:'Several labelled totals appear on the photo: '+[...totals].join(' / ')+'.'});
-  const detached=detachReceiptDiscountRows(recoverPhotoItemIds({items:itemsFromLines(lines)},ocr,false).items);
-  result.items=detached.items;
+  const loose=classifyLooseDiscounts(recoverPhotoItemIds({items:itemsFromLines(lines)},ocr,false).items);
+  result.items=loose.items;
+  for(const index of loose.unclear)
+    result.fieldIssues.push({field:'items.'+index+'.amount', reason:'discount_line_unclear', evidence:result.items[index].item||''});
   const lineDiscountSum=roundMoney(result.items.reduce((sum,item)=>sum+(Number(item.lineDiscount)||0),0));
-  const detachedSum=roundMoney(detached.entries.reduce((sum,entry)=>sum+entry.amount,0));
-  const receiptDiscounts=[...detached.entries];
+  const detachedSum=roundMoney(loose.receipt.reduce((sum,entry)=>sum+entry.amount,0));
+  const receiptDiscounts=[...loose.receipt];
   // A totals line that only restates line discounts, or the basket rows already kept, is not a second saving.
   for(const entry of printedDiscounts){
     const restated=[lineDiscountSum, detachedSum, lineDiscountSum+detachedSum].some(amount=>amount>0 && Math.abs(amount-entry.amount)<=.02);
@@ -660,10 +672,15 @@ export function extractLocal(ocr) {
   result.receiptDiscount=receiptDiscounts.length?roundMoney(receiptDiscounts.reduce((sum,entry)=>sum+entry.amount,0)):null;
   result.storeClues=readStoreClues(lines,result.merchant);
   // Store-specific 采购小票id layouts (Selfridges below the barcode, Harrods beside date/time).
+  // The store rule decides the id. A found value replaces a generic heuristic.
+  // Missing or unclear does not keep that heuristic as a confirmed id.
   const storeId=storeReceiptId(result.merchant,ocr);
-  if(storeId?.value && !result.receiptReference)result.receiptReference=storeId.value;
+  if(storeId?.status==='found' && storeId.value) result.receiptReference=storeId.value;
+  else if(storeId && (storeId.status==='missing' || storeId.status==='unclear'))
+    result.receiptReference=storeId.status==='unclear' && storeId.value ? storeId.value : null;
   const reference=inspectReference(result,ocr);
-  if (reference.status==='found' && !result[reference.kind]) result[reference.kind]=reference.value;
+  if (reference.status==='found' && !result[reference.kind] && !(storeId && reference.kind==='receiptReference'))
+    result[reference.kind]=reference.value;
   result.imageQuality=ocr.confidence<.65?'poor':'unknown';
   result.model='On-device OCR'; result.cost=0;
   return applyZeroPriceExclusion(normalizeReading(result),ocr);

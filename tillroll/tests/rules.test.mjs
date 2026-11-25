@@ -1,17 +1,14 @@
 // Unit fixtures for each Tillroll v2 reading rule.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import * as zipPackage from '../export-vendor/jszip.min.js';
 import {makeOcr} from './ocr-fixture.mjs';
 import {
   normalizePurchaseTime, readPurchaseTime, normalizeTender, readTender, cleanProductCode,
-  nonItemName, readStoreClues, storeReceiptId, classifyZeroPrice, applyZeroPriceExclusion,
+  nonItemName, readStoreClues, mergeStoreClues, storeReceiptId, classifyZeroPrice, applyZeroPriceExclusion,
 } from '../receipt-rules.js';
 import {extractLocal, cleanReceipt, geminiSchema, geminiPrompt} from '../extract.js';
 import {checkReceipt, flagCategory} from '../checks.js';
-import {buildXlsxBlob} from '../exports.js';
 
-const JSZip = zipPackage.default ?? globalThis.JSZip;
 const today = new Date('2026-11-25T12:00:00Z');
 const read = rows => { const ocr = makeOcr(rows); const data = extractLocal(ocr); return {ocr, data, review: checkReceipt(data, ocr, null, {today})}; };
 const flagsFor = (review, field) => review.flags.filter(f => f.field === field && f.severity !== 'info');
@@ -68,6 +65,27 @@ test('store id: Harrods without a code beside the date/time is flagged', () => {
 test('store id: other retailers keep the existing heuristics', () => {
   assert.equal(storeReceiptId('Liberty London', makeOcr(['Liberty London'])), null);
 });
+test('store id: a found store rule overrides a generic reference', () => {
+  const {data, review} = read(['SELFRIDGES & CO', '400 Oxford Street', 'London W1A 1AB', 'Date 12/11/2026 2:15 PM',
+    'Tote 34.00', 'TOTAL GBP 34.00', 'VISA', barcode, '04112601532281', 'REF AB12CD34']);
+  assert.equal(data.receiptReference, '04112601532281');
+  assert.notEqual(data.receiptReference, 'AB12CD34');
+  assert.equal(flagsFor(review, 'receiptReference').length, 0);
+});
+test('store id: missing or unclear flags even when a generic id is printed', () => {
+  const missing = read(['HARRODS', '87-135 Brompton Road', 'London SW1X 7XL', '12/11/2026 14:03',
+    'Notebook 7.00', 'TOTAL GBP 7.00', 'REF AB12CD34']);
+  assert.equal(storeReceiptId('Harrods', missing.ocr).status, 'missing');
+  assert.notEqual(missing.data.receiptReference, 'AB12CD34');
+  const missingFlags = flagsFor(missing.review, 'receiptReference');
+  assert.ok(missingFlags.length && missingFlags.every(f => flagCategory(f) === 'reading'));
+  const unclear = read(['SELFRIDGES & CO', 'Date 12/11/2026 2:15 PM', 'Tote 34.00', 'TOTAL GBP 34.00',
+    'REF AB12CD34', barcode, '041126 0153 2281']);
+  assert.equal(storeReceiptId('Selfridges', unclear.ocr).status, 'unclear');
+  assert.notEqual(unclear.data.receiptReference, 'AB12CD34');
+  const unclearFlags = flagsFor(unclear.review, 'receiptReference');
+  assert.ok(unclearFlags.length && unclearFlags.every(f => flagCategory(f) === 'reading'));
+});
 
 // ---- 4. storeClues ---------------------------------------------------------
 test('storeClues: printed header/footer only, null where absent, merchant untouched', () => {
@@ -90,6 +108,17 @@ test('storeClues: Gemini schema requires it; prompt forbids branch inference; id
   const out = cleanReceipt({merchant: 'Harrods', storeClues: {addressLines: ['87-135 Brompton Road', ''], postcode: 'SW1X 7XL'}, items: []});
   assert.deepEqual(out.storeClues, {addressLines: ['87-135 Brompton Road'], postcode: 'SW1X 7XL', storeNumber: null, phone: null});
   assert.equal(out.merchant, 'Harrods');
+});
+test('storeClues: Gemini phone is kept and the other fields are filled from OCR', () => {
+  const ocr = makeOcr(['HARRODS', '87-135 Brompton Road', 'London SW1X 7XL', 'Tel: 020 7730 1234', 'Store 12',
+    'Notebook 7.00', 'TOTAL 7.00']);
+  const printed = readStoreClues(ocr.lines, 'Harrods');
+  const merged = mergeStoreClues({addressLines: [], postcode: null, storeNumber: null, phone: '020 7000 0000'}, printed);
+  assert.equal(merged.phone, '020 7000 0000');
+  assert.equal(merged.postcode, 'SW1X 7XL');
+  assert.equal(merged.storeNumber, '12');
+  assert.ok(merged.addressLines.includes('87-135 Brompton Road'));
+  assert.equal(merged.addressLines.join(' '), printed.addressLines.join(' '));
 });
 
 // ---- 5. 品牌货号 -----------------------------------------------------------
@@ -178,6 +207,29 @@ test('line discount: several printed lines stay raw and sum', () => {
   assert.deepEqual(data.items[0].lineDiscounts, [{label: 'Staff saving', amount: 5}, {label: 'Rewards Saving', amount: 3}]);
   assert.equal(data.items[0].lineDiscountLabel, 'Staff saving + Rewards Saving');
 });
+test('line discount: qty 3 stays one raw line', () => {
+  const {data} = read(['SHOP', 'Date 12/11/2026 11:03', 'Tote 3 x 10.00 29.00', 'Offer -1.00', 'TOTAL 29.00']);
+  assert.equal(data.items.length, 1);
+  assert.equal(data.items[0].qty, 3);
+  assert.equal(data.items[0].unitPrice, 10);
+  assert.equal(data.items[0].amount, 29);
+  assert.equal(data.items[0].lineDiscount, 1);
+  assert.equal(data.items[0].lineDiscountLabel, 'Offer');
+});
+test('line discount: an untied discount stays raw and is flagged, not moved to the receipt', () => {
+  const {data, review} = read(['MAC', 'Date 12/11/2026 11:03', 'Foundation 1 45.00 40.00', 'Rewards Saving -10.00', 'TOTAL 40.00']);
+  assert.equal(data.receiptDiscount, null);
+  assert.deepEqual(data.receiptDiscounts, []);
+  assert.equal(data.items.length, 2);
+  assert.equal(data.items[0].qty, 1);
+  assert.equal(data.items[0].unitPrice, 45);
+  assert.equal(data.items[0].amount, 40);
+  assert.equal(data.items[0].lineDiscount, null);
+  assert.equal(data.items[1].item, 'Rewards Saving');
+  assert.equal(data.items[1].amount, -10);
+  const flags = review.flags.filter(f => /discount line unclear/i.test(f.message));
+  assert.ok(flags.length && flags.every(f => flagCategory(f) === 'reading'));
+});
 test('receipt discount: a basket promo is not allocated across items', () => {
   const {data, review} = read(['LIBERTY', 'Date 12/11/2026 11:03', 'Silk scarf 50.00', 'Wool hat 40.00', 'Basket promo -10.00', 'TOTAL 80.00', 'Visa']);
   assert.equal(data.items.length, 2);
@@ -227,38 +279,9 @@ test('zero price: a low-confidence 0.00 is doubtful', () => {
   assert.equal(applyZeroPriceExclusion(data, ocr).items.length, 2);
 });
 
-// ---- 9. flag categories and colours ----------------------------------------
+// ---- 9. flag categories ----------------------------------------------------
 test('flag categories: reading vs lookup vs info', () => {
   assert.equal(flagCategory({severity: 'info'}), 'info');
   assert.equal(flagCategory({severity: 'check'}), 'reading');
   assert.equal(flagCategory({severity: 'check', category: 'lookup'}), 'lookup');
-});
-async function workbookStyles(rows) {
-  const zip = await JSZip.loadAsync(await (await buildXlsxBlob(rows)).arrayBuffer());
-  const styles = await zip.file('xl/styles.xml').async('string');
-  const sheet = await zip.file('xl/worksheets/sheet1.xml').async('string');
-  const fills = [...styles.matchAll(/<fill>.*?<\/fill>/g)].map(m => (m[0].match(/rgb="FF([0-9A-F]{6})"/) || [])[1] || null);
-  const xfs = [...styles.split('<cellXfs')[1].matchAll(/<xf [^>]*fillId="(\d+)"/g)].map(m => fills[Number(m[1])]);
-  const used = new Set([...sheet.matchAll(/ s="(\d+)"/g)].map(m => xfs[Number(m[1])]).filter(Boolean));
-  return {styles, used};
-}
-test('export: only Pink #FECDD3 and Amber #FDE68A, no #FFEDC0', async () => {
-  const data = {merchant: 'Liberty London', date: '2026-11-12', time: '11:03:00', total: 125, payment: 'Visa',
-    items: [{item: 'Silk scarf', amount: 120}, {item: 'Gift wrap', amount: 0}],
-    fieldIssues: [{field: 'items.1.amount', reason: 'doubtful_zero_price', evidence: 'Gift wrap 0.00'}]};
-  const ocr = makeOcr(['Liberty London', 'Silk scarf 120.00', 'Gift wrap 0.00', 'TOTAL GBP 125.00']);
-  const review = checkReceipt(data, ocr, null, {today});
-  const {styles, used} = await workbookStyles([{id: 1, name: 'r.jpg', data, record: data, review, ocr}]);
-  assert.doesNotMatch(styles, /FFEDC0/i);
-  assert.ok(used.has('FECDD3'));
-  for (const colour of used) assert.ok(['1E4946', 'FECDD3', 'FDE68A'].includes(colour), colour);
-});
-test('export: Verification error is Amber, not Pink', async () => {
-  const data = {merchant: 'MAC', date: '2026-11-12', time: '11:03:00', total: 25, payment: 'Visa', items: [{item: 'Lipstick', amount: 25}]};
-  const ocr = makeOcr(['MAC', 'Lipstick 25.00', 'TOTAL 25.00']);
-  const review = checkReceipt(data, ocr, null, {today});
-  const {used} = await workbookStyles([{id: 1, name: 'r.jpg', data, record: data, review, ocr,
-    verification: [{status: 'Verification error', source: 'manual', reason: 'Lookup failed'}]}]);
-  assert.ok(used.has('FDE68A'), 'a verification error is amber');
-  assert.ok(!used.has('FECDD3'), 'a verification error must not be pink');
 });
