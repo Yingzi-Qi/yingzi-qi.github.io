@@ -3,6 +3,7 @@
 // Excel Sync audit) and iterates until the audit converges. Only the final
 // agreed version leaves this module; the internal trail is stored in D1 only.
 import { canonicalBrand, brandSearchPhrases, CHANEL_FALLBACK_NOTE } from './brands.js';
+import { chooseItemId, isConcessionCode, matchesBrandItemId } from '../../../tillroll/brand-item-ids.js';
 import { lookup as defaultLookup, invalidate, priceFallbackIsTie, isExactOfficialIdPriceMatch } from './lookup.js';
 import { nowIso, sha256Hex } from './http.js';
 import { expandReceipt, joinPurchaseTime, supplierVisibleName } from '../../../tillroll/units.js';
@@ -347,6 +348,9 @@ function readerStage(receipt, rIndex, state, formatTable) {
     const sorted = sortItemFields({ brand: str(it.brand), name: str(it.item), itemId: str(it.itemId) }, { canonicalBrand, phrases: brandSearchPhrases() });
     const brandRaw = str(sorted.brand);
     const itemName = str(sorted.name);
+    const printedId = stripBrandFromItemId(it.itemId ?? it.sku, brandRaw);
+    const chosenId = chooseItemId({ brand: brandRaw, fields: { itemId: it.itemId, sku: it.sku, item: it.item, name: it.name, allowEan: true } });
+    const itemCell = chosenId || (printedId && !isConcessionCode(printedId) ? printedId : null);
     const unitCount = it.unitCount || (receipt.items || []).filter(x => (x.lineIndex ?? 0) === lineIndex).length || 1;
     const row = { rowId: it.rowId || `${receipt.receiptKey}:${lineIndex}:u${it.unitIndex ?? 0}`, receiptKey: receipt.receiptKey, lineIndex,
       unitIndex: it.unitIndex ?? 0, unitCount, discountKind: it.discountKind || 'none', estimated: it.estimated === true || it.discountKind === 'estimated',
@@ -366,6 +370,7 @@ function readerStage(receipt, rIndex, state, formatTable) {
     }
     const brandId = resolveBrandItemId({ item: it, brand: brandRaw, formatTable });
     applyBrandItemIdRecord(row, brandId);
+    row._readerChosenId = itemCell || null;
     if (!row.cells['品名'] || JUNK_NAME.test(row.cells['品名']) || sorted.junk || !sorted.nameHasNonBrandWord) {
       const why = sorted.codePlusBrand ? 'is only a product code plus the brand'
         : sorted.brandOnly || (sorted.junk && !row.cells['品名']) ? 'has no non-brand word'
@@ -419,7 +424,11 @@ async function verifierStage(rows, receipt, ctx) {
     if (ctx.mode === 'round2' && row.skipLookup) continue;
     if (!c['品牌货号'] && !c['品名']) continue;
     if (ctx.lookupsUsed >= MAX_LOOKUPS_PER_RUN) { addFlag(row, '品名', AMBER, 'Look-up deferred: per-run cap reached.'); continue; }
-    const req = { brand: c['品牌'], itemId: c['品牌货号'], name: c['品名'], style: row.raw.style, price: c['采购商品原价'], currency: row.raw.currency };
+    // PR #3: look up with the reader-chosen id (EAN when the printed code
+    // does not fit the brand table). The printed cell is not overwritten.
+    const printedFits = Boolean(c['品牌货号'] && matchesBrandItemId(c['品牌'], c['品牌货号']));
+    const lookupItemId = printedFits ? c['品牌货号'] : (row._readerChosenId || c['品牌货号']);
+    const req = { brand: c['品牌'], itemId: lookupItemId, name: c['品名'], style: row.raw.style, price: c['采购商品原价'], currency: row.raw.currency };
     const res = await ctx.callLookup(req);
     if (!res) continue;
     if (res.paused || res.unavailableReason) {
@@ -427,6 +436,7 @@ async function verifierStage(rows, receipt, ctx) {
     }
     const top = res.candidates?.[0];
     row.lookup = { cacheKey: res.cacheKey, matchType: top?.matchType || null, confidence: top?.confidence ?? null, sourceUrls: top?.sourceUrls || [] };
+
     if (!top) { addFlag(row, '品名', AMBER, 'No official match found; values kept as printed.'); continue; }
     if (top.matchType === 'multi-field') {
       const ties = res.candidates.filter(x => x.matchType === 'multi-field' && x.matchedFields.length === top.matchedFields.length && x.confidence === top.confidence);

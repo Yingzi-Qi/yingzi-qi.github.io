@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { makeEnv, mockFetch, CATALOGUE } from './helpers.mjs';
-import { runSanity, COLUMNS, PINK, AMBER, normaliseTimestamp, normaliseTender, chooseBrandItemId, resolveBrandItemId, TENDER_REASON, maybeApplyPr1BatchDateOutlierCheck, BRAND_ITEM_ID_FORMAT, setBrandItemIdFormat, getBrandItemIdFormat, fitsBrandItemIdFormat, extractChanelStyleRef, suggestedPrintedCodeAlternative, printedValueKeptReason } from '../functions/_lib/sanity.js';
+import { runSanity, COLUMNS, PINK, AMBER, normaliseTimestamp, normaliseTender, chooseBrandItemId, resolveBrandItemId, TENDER_REASON, maybeApplyPr1BatchDateOutlierCheck, BRAND_ITEM_ID_FORMAT, setBrandItemIdFormat, getBrandItemIdFormat, fitsBrandItemIdFormat, extractChanelStyleRef, suggestedPrintedCodeAlternative, printedValueKeptReason, officialSiteShowsReason } from '../functions/_lib/sanity.js';
 import { lookup } from '../functions/_lib/lookup.js';
 import { createRun, processRun, getRun } from '../functions/_lib/runs.js';
 const REPO = new URL('../../tillroll/', import.meta.url).pathname;
@@ -26,6 +26,31 @@ function checkInvariants(result) {
     for (const c of Object.values(row.flags)) assert.ok([PINK, AMBER].includes(c));
   }
 }
+
+test('an unfitting item code falls through to the official style ref, or the EAN', async () => {
+  const env = makeEnv();
+  const seen = [];
+  const lookupStub = async (_env, req) => {
+    seen.push(req.itemId);
+    if (req.name === 'Tote') {
+      return { candidates: [{ brand: 'Chanel', officialName: 'Synthetic Tote', itemId: 'AS44010', price: 100, currency: 'GBP', sourceUrls: ['https://www.chanel.com/gb/p/AS44010'], onOfficialSite: true, matchedFields: ['name'], confidence: 0.9, matchType: 'id' }] };
+    }
+    return { candidates: [] };
+  };
+  const { result } = await runSanity(env, { batchId: 'fit', mode: 'round1', receipts: [{
+    receiptKey: 'fit', merchant: 'Boutique', receiptReference: 'F1', date: '2026-11-20', time: '12:00', payment: 'Visa', currency: 'GBP',
+    items: [
+      { brand: 'Chanel', item: 'Tote', itemId: 'NOT-A-REF', sku: '3607670123456', qty: 1, unitPrice: 100, amount: 100 },
+      { brand: 'Chanel', item: 'Scarf', itemId: 'ALSO-NOT', sku: '3607670654321', qty: 1, unitPrice: 80, amount: 80 },
+    ],
+  }] }, { lookup: lookupStub });
+  // Printed unfitting codes stay in the cell (no auto-correct). The official
+  // style is recorded as the alternative. Look-up still uses the reader-chosen EAN.
+  assert.equal(result.agreedRows[0].cells['品牌货号'], 'NOT-A-REF');
+  assert.equal(result.agreedRows[0].brandItemIdReason, officialSiteShowsReason('AS44010'));
+  assert.equal(result.agreedRows[1].cells['品牌货号'], 'ALSO-NOT');
+  assert.deepEqual(seen, ['3607670123456', '3607670654321']);
+});
 
 test('timestamps: 24h, 00 seconds, am/pm converted', () => {
   assert.equal(normaliseTimestamp('2025-01-17', '7:20 pm'), '2025-01-17 19:20:00');

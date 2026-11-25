@@ -119,6 +119,9 @@ const stockOrAccount=/^(?:sku|ean|upc|item|style|stock|prod|serial|vat|auth|visa
 const totalLine=/\b(?:total|balance due|net [àa] payer)\b/i;
 const standaloneToken=/^[#<(\[]?([a-z\d]+(?:[-_/][a-z\d]+)*)[>)\]]?$/i;
 function plausibleBare(value) {
+  // An unlabelled 8-character hex token, such as a colour or a short hash, is not a receipt number.
+  // A letter prefix followed by digits, such as AB12345, still qualifies.
+  if (/^[0-9a-f]{8}$/i.test(value) && /[a-f]/i.test(value) && /\d/.test(value) && !/^[a-z]{2,}\d+$/i.test(value)) return false;
   return /^\d{5,12}$/.test(value) || (value.length>=5 && (value.match(/\d/g)||[]).length>=3 && /[a-z_/-]/i.test(value));
 }
 

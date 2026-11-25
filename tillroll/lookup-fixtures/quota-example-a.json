@@ -1,0 +1,24 @@
+{
+  "cacheHit": false,
+  "cacheKey": "item:chanel:a01234",
+  "sourcesQueried": ["gemini"],
+  "candidates": [
+    {
+      "brand": "Chanel",
+      "officialName": "Quilted Flap Bag",
+      "itemId": "A01234",
+      "price": 150,
+      "currency": "GBP",
+      "matchType": "id",
+      "sourceUrls": ["https://www.chanel.com/gb/fashion/p/A01234/quilted-flap-bag"],
+      "mismatches": []
+    }
+  ],
+  "mismatches": [],
+  "flag": "#FDE68A",
+  "printedItemId": "A01234",
+  "canonicalBrand": "Chanel",
+  "paused": true,
+  "unavailableReason": "Brave Search monthly guard reached (950).",
+  "quotaGuard": ["Brave Search monthly guard reached (950)."]
+}

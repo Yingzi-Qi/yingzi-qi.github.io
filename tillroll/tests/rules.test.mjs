@@ -3,12 +3,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {makeOcr} from './ocr-fixture.mjs';
 import {
-  normalizePurchaseTime, readPurchaseTime, normalizeTender, readTender, toPaymentMethod, dropCardDigits, brandItemIdCandidate, readPrintedStyleRef, cleanProductCode,
+  normalizePurchaseTime, readPurchaseTime, normalizeTender, readTender, toPaymentMethod, dropCardDigits, brandItemIdCandidate, readPrintedStyleRef, cleanProductCode, confusableDigitAlternative,
   nonItemName, readStoreClues, mergeStoreClues, storeReceiptId, confirmedStoreReceiptId, classifyZeroPrice, applyZeroPriceExclusion,
 } from '../receipt-rules.js';
 import {extractLocal, cleanReceipt, geminiSchema, geminiPrompt, prepareModelReading, reconcileReadings} from '../extract.js';
+import {inspectReference} from '../reference.js';
 import {sortItemFields} from '../field-sorter.js';
-import {identifierClasses} from '../item-identifiers.js';
+import {identifierClasses, itemCountCheck} from '../item-identifiers.js';
 import {checkReceipt, flagCategory, verifyImportedItemIds} from '../checks.js';
 
 const today = new Date('2026-11-25T12:00:00Z');
@@ -16,6 +17,16 @@ const read = rows => { const ocr = makeOcr(rows); const data = extractLocal(ocr)
 const flagsFor = (review, field) => review.flags.filter(f => f.field === field && f.severity !== 'info');
 
 // ---- 2. 采购时间 -----------------------------------------------------------
+test('receipt numbers keep O and I and offer the digit reading', () => {
+  const shop = read(['ATELIER', '15/11/2026 14:03', 'Wool hat 25.00', 'Receipt # AT-1O0I', 'TOTAL 25.00']);
+  assert.equal(shop.data.receiptReference, 'AT-1O0I');
+  assert.ok(shop.data.receiptReferenceAlternatives.includes('AT-1001'));
+  assert.equal(confusableDigitAlternative('IO-100'), null);
+  assert.equal(confusableDigitAlternative('OI-1O'), 'OI-10');
+  const prepared = prepareModelReading({merchant: 'ATELIER', receiptReference: 'AT-1O0I', items: []}, makeOcr(['ATELIER', 'Receipt # AT-1O0I']));
+  assert.equal(prepared.receiptReference, 'AT-1O0I');
+  assert.ok(prepared.receiptReferenceAlternatives.includes('AT-1001'));
+});
 test('time: 24-hour HH:MM:SS, seconds default to :00, am/pm converted', () => {
   assert.equal(normalizePurchaseTime('14:03'), '14:03:00');
   assert.equal(normalizePurchaseTime('9:05'), '09:05:00');
@@ -28,6 +39,25 @@ test('time: 24-hour HH:MM:SS, seconds default to :00, am/pm converted', () => {
   assert.equal(normalizePurchaseTime('25:10'), null);
   assert.equal(normalizePurchaseTime('13:10 pm'), null);
   assert.equal(normalizePurchaseTime(''), null);
+});
+test('a dotted clock ignores dates, amounts, and an existing colon time', () => {
+  assert.equal(readPurchaseTime('Date 15.11.26').time, null);
+  const clock = readPurchaseTime('15/11/2026 14:03 £14.50');
+  assert.equal(clock.time, '14:03:00');
+  assert.equal(clock.issue, null);
+  assert.equal(readPurchaseTime('Date 15/11/2026 Total 14.50').time, null);
+  const street = read(['12 Baker Street / London', '15/11/2026 14:03', 'Wool coat 80.00', 'TOTAL 80.00']);
+  assert.notEqual(street.data.merchant, '12 Baker Street');
+  const road = read(['High Street / London', '15/11/2026 14:03', 'Wool coat 80.00', 'TOTAL 80.00']);
+  assert.notEqual(road.data.merchant, 'High Street');
+});
+test('boutique header: brand before a city, dotted time, and receipt number', () => {
+  const shop = read(['THE ROW / PARIS', '15/11/2026 14.03', 'Wool coat 80.00', 'Receipt # TR-9', 'TOTAL 80.00']);
+  assert.equal(shop.data.merchant, 'THE ROW');
+  assert.equal(shop.data.time, '14:03:00');
+  assert.equal(shop.data.date, '2026-11-15');
+  assert.equal(shop.data.receiptReference, 'TR-9');
+  assert.equal(shop.data.items[0].item, 'Wool coat');
 });
 test('time: read from the dated line, not opening hours', () => {
   const {time} = readPurchaseTime('Open 10:00 - 21:00\nDate 12/11/2026 2:15 PM\nTOTAL 34.00');
@@ -500,6 +530,16 @@ test('brand item id: style ref, then brand code, then EAN; never a store code', 
   const model = read(['ATELIER', '12/11/2026 11:00', 'Linen shirt 40.00', 'Model: ZX-90', 'TOTAL 40.00']);
   assert.equal(model.data.items[0].styleRef, 'ZX-90');
   assert.equal(model.data.items[0].brandItemId, 'ZX-90');
+  const bare = read(['ATELIER', '12/11/2026 11:00', 'Wool coat 40.00', 'AB4401', 'TOTAL 40.00']);
+  assert.equal(bare.data.items[0].styleRef, 'AB4401');
+  assert.equal(bare.data.items[0].brandItemId, 'AB4401');
+  assert.equal(bare.data.items[0].brandItemIdCandidate.source, 'styleRef');
+});
+test('a standalone size line is not a style code', () => {
+  for (const size of ['EU36', 'UK10', 'IT38', 'S', 'M', 'L', 'S/M/L', '36.5']) {
+    const slip = read(['ATELIER', '12/11/2026 11:00', 'Wool coat 40.00', size, 'TOTAL 40.00']);
+    assert.equal(slip.data.items[0].styleRef ?? null, null);
+  }
 });
 test('field sorter: Dior description, brand-only line, Gucci style and a bad price', () => {
   const knit = read(['HARRODS', '12/11/2026 14:03 NT04567-111222',
@@ -566,6 +606,31 @@ test('residuals: noisy total, footer lines, zeros, phones, missing items and a b
   assert.equal(shop.data.items.length, 1);
   assert.equal(shop.data.items[0].qty, 1);
   assert.equal(shop.data.total, 40);
+});
+test('TOTAL (n items) matches purchased lines or purchased plus excluded zeros', () => {
+  const purchased = [{item: 'Scarf', amount: 18}];
+  const bag = [{item: 'Carrier bag', amount: 0}];
+  const purchasedOnly = itemCountCheck(makeOcr(['ATELIER', 'Scarf 18.00', 'Carrier bag 0.00', 'TOTAL (1 item) 18.00']).lines, purchased, bag);
+  assert.equal(purchasedOnly.purchased, 1);
+  assert.equal(purchasedOnly.withExcludedZeros, 2);
+  assert.equal(purchasedOnly.matches, true);
+  const withWrap = itemCountCheck(makeOcr(['ATELIER', 'Scarf 18.00', 'Gift wrap 0.00', 'TOTAL (2 items) 18.00']).lines, purchased, [{item: 'Gift wrap', amount: 0}]);
+  assert.equal(withWrap.matches, true);
+  const wrong = makeOcr(['ATELIER', 'Scarf 18.00', 'By Appointment 0.00', 'TOTAL (4 items) 18.00']);
+  const mismatch = itemCountCheck(wrong.lines, purchased, [{item: 'By Appointment', amount: 0}]);
+  assert.equal(mismatch.matches, false);
+  const flagged = checkReceipt({merchant: 'ATELIER', total: 18, items: purchased, excludedZeroItems: [{item: 'By Appointment', amount: 0}]}, wrong);
+  assert.ok(flagged.flags.some(flag => flag.message === 'item_count_mismatch' && flag.field === 'receipt' && flagCategory(flag) === 'reading'));
+  const accepted = checkReceipt({merchant: 'ATELIER', total: 18, items: purchased, excludedZeroItems: bag}, makeOcr(['ATELIER', 'Scarf 18.00', 'Carrier bag 0.00', 'TOTAL (1 item) 18.00']));
+  assert.equal(accepted.flags.some(flag => flag.message === 'item_count_mismatch'), false);
+});
+test('an unlabelled hex token is not a receipt reference', () => {
+  const ocr = makeOcr(['ATELIER', '12/11/2026 11:00', 'Wool hat 25.00', 'TOTAL 25.00', 'ab12cd34']);
+  const ref = inspectReference({merchant: 'Atelier', items: [{item: 'Wool hat', amount: 25}]}, ocr);
+  assert.equal(ref.value, null);
+  assert.equal((ref.candidates || []).some(entry => entry.value === 'ab12cd34'), false);
+  const labelled = read(['ATELIER', '12/11/2026 11:00', 'Wool hat 25.00', 'Receipt # AB12345', 'TOTAL 25.00']);
+  assert.equal(labelled.data.receiptReference, 'AB12345');
 });
 test('identifiers: labels, priority, masks, count and untrusted text', () => {
   assert.equal(new Set(identifierClasses).size, identifierClasses.length);
@@ -648,6 +713,10 @@ test('addendum: brand description, savings, footer amount, zero lines, merchant 
   assert.equal(sortItemFields({item: 'YCA Necklace', amount: 10}).item.brand, 'Van Cleef & Arpels');
   assert.equal(sortItemFields({item: 'VCA Necklace', amount: 10}).item.item, 'Necklace');
   assert.equal(sortItemFields({item: 'Bulgari Ring', amount: 10}).item.brand, 'Bulgari');
+  assert.equal(sortItemFields({item: 'Salesperson: Alex', amount: 10}).item.item, null);
+  assert.equal(sortItemFields({item: 'Visa Tendered 18.00', amount: 18}).item.item, null);
+  assert.equal(sortItemFields({item: 'CHANEL', amount: 80}).item.item, null);
+  assert.equal(sortItemFields({item: 'Cashmere cardigan', amount: 40}).item.item, 'Cashmere cardigan');
 });
 test('Gemini reading: the store rule replaces a generic Harrods id', () => {
   const ocr = makeOcr(['HARRODS', '12/11/2026 14:03 NT01234-567890', 'Scarf 20.00', 'TOTAL GBP 20.00']);

@@ -7,6 +7,7 @@
 // Move printed brand words and codes into their own fields.
 // A brand word that sits inside a product name, followed by a real noun, stays in the name.
 import {isGtin} from './product-code.js';
+import {nonItemName} from './receipt-rules.js';
 
 const clean = value => String(value ?? '').trim();
 const escapeReg = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -120,6 +121,12 @@ function sortPrintedItemFields(item) {
   if (!row.styleRef && typeof row.itemId === 'string' && /^[A-Za-z]{1,6}\d{2,}[A-Za-z0-9-]*$/.test(row.itemId))
     row.styleRef = row.itemId;
   const original = clean(row.item);
+  const blocked = nonItemName(original);
+  if (blocked) {
+    row.item = null;
+    issues.push({field: 'item', reason: 'item_name_missing', evidence: blocked});
+    return {item: row, issues};
+  }
   const tokens = takeCodes(original.split(/\s+/).filter(Boolean), row);
   let name = tokens.join(' ');
   const found = edgeBrand(name);
