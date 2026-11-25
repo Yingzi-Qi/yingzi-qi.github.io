@@ -162,6 +162,16 @@ test('tender: channel terms are rejected and flagged', () => {
   assert.ok(out.fieldIssues.some(f => f.field === 'payment' && f.reason === 'channel_not_tender'));
   assert.match(geminiPrompt, /tender/i);
 });
+test('bare Debit or Credit is Card with no flag', () => {
+  for (const word of ['Debit', 'Credit']) {
+    assert.equal(readTender(word), 'Card');
+    assert.equal(toPaymentMethod(word).method, 'Card');
+    assert.equal(toPaymentMethod(word).reason, null);
+    const slip = read(['ATELIER', '12/11/2026 11:00', 'Wool hat 25.00', 'TOTAL 25.00', word]);
+    assert.equal(slip.data.paymentMethod, 'Card');
+    assert.equal(slip.review.flags.some(flag => flag.field === 'payment' && flag.severity !== 'info'), false);
+  }
+});
 test('payment method: four exact values, UnionPay before card, other tenders are pink', () => {
   for (const [value, method] of Object.entries({
     'Visa': 'Card', 'VISA DEBIT': 'Card', 'Mastercard': 'Card', 'Maestro': 'Card', 'Amex': 'Card',
