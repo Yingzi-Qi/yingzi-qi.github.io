@@ -648,6 +648,10 @@ test('addendum: brand description, savings, footer amount, zero lines, merchant 
   assert.equal(sortItemFields({item: 'YCA Necklace', amount: 10}).item.brand, 'Van Cleef & Arpels');
   assert.equal(sortItemFields({item: 'VCA Necklace', amount: 10}).item.item, 'Necklace');
   assert.equal(sortItemFields({item: 'Bulgari Ring', amount: 10}).item.brand, 'Bulgari');
+  assert.equal(sortItemFields({item: 'Salesperson: Alex', amount: 10}).item.item, null);
+  assert.equal(sortItemFields({item: 'Visa Tendered 18.00', amount: 18}).item.item, null);
+  assert.equal(sortItemFields({item: 'CHANEL', amount: 80}).item.item, null);
+  assert.equal(sortItemFields({item: 'Cashmere cardigan', amount: 40}).item.item, 'Cashmere cardigan');
 });
 test('Gemini reading: the store rule replaces a generic Harrods id', () => {
   const ocr = makeOcr(['HARRODS', '12/11/2026 14:03 NT01234-567890', 'Scarf 20.00', 'TOTAL GBP 20.00']);
