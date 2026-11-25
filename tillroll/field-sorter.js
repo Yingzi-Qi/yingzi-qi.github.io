@@ -92,7 +92,7 @@ function edgeBrand(text) {
     if (!match) continue;
     const before = source.slice(0, match.index).trim();
     const after = source.slice(match.index + match[0].length).trim();
-    // Inside the name and followed by a noun: "Mini Acme Widget" stays whole.
+    // Letters on both sides of a brand keep it in the name. "Mini Acme Widget" stays whole.
     if (before && after && /\p{L}/u.test(after)) continue;
     if (before && after) continue;
     return {brand, raw: match[0], before, after};

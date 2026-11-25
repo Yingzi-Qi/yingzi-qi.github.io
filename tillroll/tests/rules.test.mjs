@@ -532,6 +532,7 @@ test('field sorter: Dior description, brand-only line, Gucci style and a bad pri
   const priceFlags = checkReceipt(priced, makeOcr(['Shop', 'Belt']), null, {today}).flags.filter(flag => flag.field === 'items.0.amount');
   assert.ok(priceFlags.some(flag => /not a number/i.test(flag.message) && flagCategory(flag) === 'reading'));
   assert.equal(sortItemFields({item: 'Mini Acme Widget', amount: 1200}).item.item, 'Mini Acme Widget');
+  assert.equal(sortItemFields({item: 'Travel Chanel Pouch', amount: 1200}).item.item, 'Travel Chanel Pouch');
 });
 test('residuals: noisy total, footer lines, zeros, phones, missing items and a boutique slip', () => {
   const noisy = read(['HARRODS', '12/11/2026 14:15 NT04567-222333', 'Silk scarf 18.00',
