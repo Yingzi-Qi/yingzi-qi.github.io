@@ -220,9 +220,12 @@ async function openWorkbooks() {
 }
 // ONE Reading History screen: the v2 server-backed /api/history dialog.
 // The browser-only reading-history.js dialog is an offline fallback only,
-// used when the API call fails or is unreachable.
-export async function openReadingHistory({ fetchImpl, openLocal } = {}) {
+// used when the API is unreachable or returns a 5xx. A 401 / locked
+// response opens the existing passcode dialog and retries after unlock;
+// cancelling unlock shows nothing extra.
+export async function openReadingHistory({ fetchImpl, openLocal, unlockImpl } = {}) {
   const fetchFn = fetchImpl || (typeof fetch === 'function' ? fetch.bind(globalThis) : null);
+  const doUnlock = unlockImpl || unlock;
   const showLocal = () => {
     const v2 = document.getElementById('v2-history-dialog');
     if (v2?.open) v2.close();
@@ -230,11 +233,7 @@ export async function openReadingHistory({ fetchImpl, openLocal } = {}) {
     if (typeof fallback === 'function') fallback();
     return 'local';
   };
-  try {
-    if (typeof fetchFn !== 'function') return showLocal();
-    const r = await fetchFn('/api/history?limit=100', { credentials: 'same-origin' });
-    if (!r || !r.ok) return showLocal();
-    const data = await r.json().catch(() => ({}));
+  const showV2 = (data) => {
     const entries = Array.isArray(data.entries) ? data.entries : [];
     const list = document.getElementById('v2-history-list');
     if (list) {
@@ -247,6 +246,19 @@ export async function openReadingHistory({ fetchImpl, openLocal } = {}) {
     const v2 = document.getElementById('v2-history-dialog');
     if (v2 && !v2.open) v2.showModal();
     return 'v2';
+  };
+  try {
+    if (typeof fetchFn !== 'function') return showLocal();
+    const r = await fetchFn('/api/history?limit=100', { credentials: 'same-origin' });
+    if (!r || r.status >= 500) return showLocal();
+    const data = await r.json().catch(() => ({}));
+    if (r.status === 401 || data.code === 'locked') {
+      const unlocked = await doUnlock();
+      if (unlocked) return openReadingHistory({ fetchImpl, openLocal, unlockImpl });
+      return 'cancelled';
+    }
+    if (!r.ok) return 'error';
+    return showV2(data);
   } catch {
     return showLocal();
   }

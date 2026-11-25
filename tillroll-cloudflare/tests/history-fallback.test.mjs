@@ -121,3 +121,49 @@ test('openReadingHistory: unreachable API (network throw) uses the local fallbac
     assert.equal(v2.open, false);
   } finally { restore(); }
 });
+
+test('openReadingHistory: 401 / locked opens the unlock dialog and does not show the local fallback', async () => {
+  const { v2, local, restore } = installDom();
+  let localOpened = 0;
+  let unlockOpened = 0;
+  try {
+    const source = await openReadingHistory({
+      fetchImpl: async () => jsonResponse(false, { error: 'Unlock Tillroll first.', code: 'locked' }, 401),
+      openLocal: () => { localOpened += 1; local.showModal(); },
+      unlockImpl: async () => { unlockOpened += 1; return false; },
+    });
+    assert.equal(source, 'cancelled');
+    assert.equal(unlockOpened, 1, 'existing passcode/unlock dialog must be opened');
+    assert.equal(localOpened, 0, 'fallback must not be shown when unlock is cancelled');
+    assert.equal(local.open, false);
+    assert.equal(v2.open, false, 'v2 history dialog must stay closed if unlock is cancelled');
+  } finally { restore(); }
+});
+
+test('openReadingHistory: 401 then unlock success retries and shows only the v2 dialog', async () => {
+  const { v2, local, list, restore } = installDom();
+  let localOpened = 0;
+  let unlockOpened = 0;
+  let historyCalls = 0;
+  try {
+    const source = await openReadingHistory({
+      fetchImpl: async (url) => {
+        assert.match(String(url), /\/api\/history/);
+        historyCalls += 1;
+        if (historyCalls === 1) return jsonResponse(false, { error: 'Unlock Tillroll first.', code: 'locked' }, 401);
+        return jsonResponse(true, {
+          entries: [{ kind: 'sanity-run', summary: 'after unlock', created_at: '2026-11-25T19:00:00.000Z', batch_id: 'b_retry' }],
+        });
+      },
+      openLocal: () => { localOpened += 1; local.showModal(); },
+      unlockImpl: async () => { unlockOpened += 1; return true; },
+    });
+    assert.equal(source, 'v2');
+    assert.equal(unlockOpened, 1);
+    assert.equal(historyCalls, 2, 'history fetch must be retried after a successful unlock');
+    assert.equal(v2.open, true, 'v2 history dialog should be open after unlock');
+    assert.equal(local.open, false);
+    assert.equal(localOpened, 0);
+    assert.match(list.innerHTML, /after unlock/);
+  } finally { restore(); }
+});
