@@ -67,7 +67,9 @@ test("upload with default reader mode 'local' makes zero /api/* fetches", () => 
   const ocrFetch = extract.match(/const viaServer = apiKey\.trim\(\)==='__server__';\s*const response = viaServer\s*\? await fetch\('\/api\/ocr'/s);
   assert.ok(ocrFetch, '/api/ocr must be gated on the Tillroll-server key, not called for on-device OCR');
 
-  // No /api/* fetch in app.js itself, nor in any module other than extract.js (/api/ocr) and v2.js (explicit user actions + page-load session/quota).
+  // No /api/* fetch in app.js itself. extract.js calls /api/ocr only for the server reader.
+  // v2.js calls /api on explicit clicks and page-load session/quota. v2-excel.js calls
+  // /api only from Export Excel, 中文 Excel and workbook refresh, never from upload.
   const jsFiles = readdirSync(tillroll).filter(n => extname(n) === '.js');
   const apiByFile = {};
   for (const name of jsFiles) {
@@ -75,7 +77,9 @@ test("upload with default reader mode 'local' makes zero /api/* fetches", () => 
     const hits = [...src.matchAll(/['"`](\/api\/[^'"`]*)['"`]/g)].map(m => m[1]);
     if (hits.length) apiByFile[name] = hits;
   }
-  assert.deepEqual(Object.keys(apiByFile).sort(), ['extract.js', 'v2.js']);
+  assert.deepEqual(Object.keys(apiByFile).sort(), ['extract.js', 'v2-excel.js', 'v2.js']);
+  assert.match(app, /import\('\.\/v2-excel\.js'\)/);
+  assert.doesNotMatch(app.slice(app.indexOf('function fileSelection'), app.indexOf('function fileSelection') + 400), /v2-excel|\/api\//);
   assert.deepEqual(apiByFile['extract.js'], ['/api/ocr']);
 
   // v2.js /api calls are not on the upload path: init() only refreshes quota/session;

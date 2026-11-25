@@ -1,6 +1,6 @@
 // Update / Refresh: streams the current workbook bytes from Drive so the browser
-// (Excel Sync & History Manager's reader) can diff values + fills, then posts
-// cleared fills to /api/locks and edited rows to /api/sanity-run (mode round2).
+// (tillroll/v2-excel.js) can diff values + OOXML fills, then posts cleared fills
+// to /api/locks and the per-unit rows to /api/sanity-run (mode round2).
 import { error, nowIso } from '../../../_lib/http.js';
 import { loadSession, googleAccessToken } from '../../../_lib/session.js';
 import { googleDrive } from '../../../_lib/storage/google-drive.js';
