@@ -216,9 +216,9 @@ export function resolveBrandItemId({ item = {}, brand, officialItemId, exactOffi
   // value and any official/OCR alternative stay in the reason only.
   if (styleLike) {
     const rawPrinted = styleLike.printed || styleLike.value;
-    const alternative = suggestedPrintedCodeAlternative(rawPrinted, brand, table)
+    const alternative = usableOfficial
+      || suggestedPrintedCodeAlternative(rawPrinted, brand, table)
       || suggestedPrintedCodeAlternative(styleLike.value, brand, table)
-      || usableOfficial
       || null;
     return {
       brandItemId: null,

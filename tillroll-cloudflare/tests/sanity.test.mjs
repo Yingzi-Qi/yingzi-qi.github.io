@@ -501,24 +501,24 @@ test('brandItemId: style ref / brand product code, EAN (Amber), empty + Pink, an
 test('BRAND_ITEM_ID_FORMAT is empty by default, injectable, and only fitting printed codes count as style refs', async () => {
   assert.deepEqual(BRAND_ITEM_ID_FORMAT, {});
   assert.equal(Object.keys(getBrandItemIdFormat()).length, 0);
-  const table = { Synthetic: /^AB\d{4}$/ };
+  const table = { Synthetic: /^ZZ\d{4}$/ };
   setBrandItemIdFormat(table);
   try {
     assert.deepEqual(BRAND_ITEM_ID_FORMAT, {});
-    assert.equal(fitsBrandItemIdFormat('Synthetic', 'AB1375'), true);
-    assert.equal(fitsBrandItemIdFormat('Synthetic', 'ABl375'), false);
-    const fitting = resolveBrandItemId({ item: { styleRef: 'AB1375' }, brand: 'Synthetic' });
-    assert.equal(fitting.brandItemId, 'AB1375');
+    assert.equal(fitsBrandItemIdFormat('Synthetic', 'ZZ9999'), true);
+    assert.equal(fitsBrandItemIdFormat('Synthetic', 'ZZ999l'), false);
+    const fitting = resolveBrandItemId({ item: { styleRef: 'ZZ9999' }, brand: 'Synthetic' });
+    assert.equal(fitting.brandItemId, 'ZZ9999');
     assert.equal(fitting.brandItemIdSource, 'styleRef');
     assert.equal(fitting.flag, null);
     // #20: a non-fitting printed code does not occupy 品牌货号. The official / I→1
     // alternative is recorded in the reason only, never written as the item id.
-    const nonFitting = resolveBrandItemId({ item: { styleRef: 'ABl375' }, brand: 'Synthetic', officialItemId: 'AB1375' });
+    const nonFitting = resolveBrandItemId({ item: { styleRef: 'ZZ999l' }, brand: 'Synthetic', officialItemId: 'ZZ9999' });
     assert.equal(nonFitting.brandItemId, null);
-    assert.notEqual(nonFitting.brandItemId, 'AB1375');
+    assert.notEqual(nonFitting.brandItemId, 'ZZ9999');
     assert.equal(nonFitting.flag, PINK);
-    assert.match(nonFitting.reason, /AB1375/);
-    assert.equal(nonFitting.printedValue, 'ABl375');
+    assert.match(nonFitting.reason, /ZZ9999/);
+    assert.equal(nonFitting.printedValue, 'ZZ999l');
   } finally {
     setBrandItemIdFormat(null);
   }
@@ -527,7 +527,7 @@ test('BRAND_ITEM_ID_FORMAT is empty by default, injectable, and only fitting pri
     receiptKey: 'fmt-inj', merchant: 'Test', date: '2026-04-03', time: '14:00:00',
     payment: 'Visa', currency: 'GBP',
     items: [{ brand: 'Synthetic', item: 'Tote bag', styleRef: 'XY9999', qty: 1, unitPrice: 100, amount: 100 }],
-  }] }, { brandItemIdFormat: { Synthetic: /^AB\d{4}$/ } });
+  }] }, { brandItemIdFormat: { Synthetic: /^ZZ\d{4}$/ } });
   assert.deepEqual(BRAND_ITEM_ID_FORMAT, {});
   assert.equal(result.agreedRows[0].cells['品牌货号'] || '', '');
   assert.equal(result.agreedRows[0].exportMeta.brandItemId || '', '');
@@ -560,30 +560,33 @@ test('Chanel optional season prefix: 24P AS1234 yields style ref AS1234', async 
 });
 
 test('unconfirmed printed brand code is not auto-corrected into the cell; alternative stays in the comment', async () => {
-  const table = { Synthetic: /^AB\d{4}$/ };
-  assert.equal(suggestedPrintedCodeAlternative('ABl375', 'Synthetic', table), 'AB1375');
-  const rec = resolveBrandItemId({ item: { itemId: 'ABl375' }, brand: 'Synthetic', formatTable: table });
-  // #20 empties the cell; printed-value-kept keeps AB1375 out of the item id.
+  const table = { Synthetic: /^ZZ\d{4}$/ };
+  // l→1 is the OCR guess (ZZ9991). The official/format-fitting code is ZZ9999.
+  assert.equal(suggestedPrintedCodeAlternative('ZZ999l', 'Synthetic', table), 'ZZ9991');
+  const rec = resolveBrandItemId({ item: { itemId: 'ZZ999l' }, brand: 'Synthetic', formatTable: table });
+  // #20 empties the cell; printed-value-kept keeps the official/OCR alternative out of the item id.
   assert.equal(rec.brandItemId, null);
-  assert.notEqual(rec.brandItemId, 'AB1375');
+  assert.notEqual(rec.brandItemId, 'ZZ9999');
+  assert.notEqual(rec.brandItemId, 'ZZ9991');
   assert.equal(rec.flag, PINK);
-  assert.equal(rec.reason, printedValueKeptReason('AB1375'));
-  assert.match(rec.reason, /AB1375/);
-  assert.equal(rec.printedValue, 'ABl375');
+  assert.equal(rec.reason, printedValueKeptReason('ZZ9991'));
+  assert.match(rec.reason, /ZZ9991/);
+  assert.equal(rec.printedValue, 'ZZ999l');
   const { result } = await runSanity(makeEnv(), { receipts: [{
     receiptKey: 'ocr-keep', merchant: 'Test', date: '2026-04-03', time: '14:00:00',
     payment: 'Visa', currency: 'GBP',
-    items: [{ brand: 'Synthetic', item: 'Tote bag', itemId: 'ABl375', qty: 1, unitPrice: 100, amount: 100 }],
+    items: [{ brand: 'Synthetic', item: 'Tote bag', itemId: 'ZZ999l', qty: 1, unitPrice: 100, amount: 100 }],
   }] }, { brandItemIdFormat: table });
   const row = result.agreedRows[0];
   assert.equal(row.cells['品牌货号'] || '', '');
-  assert.notEqual(row.cells['品牌货号'], 'AB1375');
-  assert.notEqual(row.cells['品牌货号'], 'ABl375');
+  assert.notEqual(row.cells['品牌货号'], 'ZZ9999');
+  assert.notEqual(row.cells['品牌货号'], 'ZZ999l');
+  assert.notEqual(row.cells['品牌货号'], 'ZZ9991');
   assert.equal(row.exportMeta.brandItemId || '', '');
   assert.equal(row.flags['品牌货号'], PINK);
-  assert.ok(result.readingErrors.some(e => e.col === '品牌货号' && e.reason === printedValueKeptReason('AB1375')));
-  assert.match(row.exportMeta.comments['品牌货号'] || '', /AB1375|ABl375/);
-  assert.match(row.exportMeta.brandItemIdReason, /AB1375/);
+  assert.ok(result.readingErrors.some(e => e.col === '品牌货号' && e.reason === printedValueKeptReason('ZZ9991')));
+  assert.match(row.exportMeta.comments['品牌货号'] || '', /ZZ9991|ZZ999l/);
+  assert.match(row.exportMeta.brandItemIdReason, /ZZ9991/);
 });
 
 test('PR #1 checkBatchDateOutliers hook applies Pink and does not overwrite human_verified_unflagged locks', async () => {
