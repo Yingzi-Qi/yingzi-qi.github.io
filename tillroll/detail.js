@@ -321,6 +321,8 @@ function showEditor(panel, r, act, focusPath) {
       input.autocomplete='off';
       if (key==='orderNumber' || key==='orderId' || key==='sku' || key==='card') input.spellcheck=false;
       input.name=path+key;
+      const qtyFlag = (r.review?.flags || []).find(f => f.field === path+key && String(f.message).startsWith('qty>1:'));
+      if (qtyFlag) { input.style.background = '#FDE68A'; input.title = qtyFlag.message; }
       input.addEventListener('input',()=>{dirty=true;});
       fields.set(input.name,input);
       holder.append(input); grid.append(holder);

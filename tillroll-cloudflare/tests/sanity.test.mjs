@@ -119,6 +119,25 @@ test('round 2: edited 品牌货号 invalidates cache and re-looks-up; changes ar
   assert.ok(row2.round2Changed.includes('品名') && row2.round2Changed.includes('品牌货号'));
 });
 
+test('qty > 1 flags 采购商品原价 Amber until unit price vs line total is decided', async () => {
+  const env = makeEnv();
+  const receipt = { receiptKey: 'qty', merchant: 'Boots', receiptReference: 'R1', date: '2024-10-31', time: '18:13', payment: 'Card', currency: 'GBP',
+    items: [
+      { brand: 'Boots', item: 'Soap', itemId: '111', qty: 2, unitPrice: 3.5, amount: 7 },
+      { brand: 'Boots', item: 'Single', itemId: '222', qty: 1, unitPrice: 3.5, amount: 3.5 },
+      { brand: 'Boots', item: 'Uncounted', itemId: '333', unitPrice: 4, amount: 4 },
+    ] };
+  const { result } = await runSanity(env, { batchId: 'qty', mode: 'round1', receipts: [receipt] });
+  const [multi, single, missing] = result.agreedRows;
+  assert.equal(multi.flags['采购商品原价'], AMBER);
+  assert.equal(multi.cells['采购商品原价'], 3.5);
+  const hit = result.lookupUncertainties.find(u => u.rowId === multi.rowId && u.col === '采购商品原价');
+  assert.equal(hit?.reason, 'qty>1: unit price vs line total undecided');
+  assert.ok(!result.readingErrors.some(e => e.rowId === multi.rowId && e.reason.startsWith('qty>1')));
+  assert.ok(!result.lookupUncertainties.some(u => u.rowId === single.rowId && String(u.reason).startsWith('qty>1')));
+  assert.ok(!result.lookupUncertainties.some(u => u.rowId === missing.rowId && String(u.reason).startsWith('qty>1')));
+});
+
 test('/api/sanity-run lifecycle: queued -> completed, returns only the agreed version', async () => {
   const env = makeEnv();
   const start = await createRun(env, { batchId: 'life', mode: 'round1', receipts: [{ merchant: 'Boots', date: '2024-10-31', time: '18:13', payment: 'Card', currency: 'GBP', items: [{ item: 'OPI', unitPrice: 24, amount: 24 }] }] });

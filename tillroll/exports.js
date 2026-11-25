@@ -102,6 +102,9 @@ function exportData(receipts,includeRefresh=false) {
         }
         const field = source === 'line' ? prefix+key : key;
         const fieldFlags=flags.filter(f=>f.field===field);
+        // Interim qty>1 rule: 采购商品原价 / Unit Price is Amber, not a reading-error fill.
+        if (source==='line' && key==='unitPrice' && fieldFlags.some(f => f.severity!=='fix' && String(f.message).startsWith('qty>1:')) && !fieldFlags.some(f => f.severity==='fix'))
+          return {value,numeric,style:type==='money' ? 7 : 6};
         if (imported && fieldFlags.length && (source==='receipt' || source==='line')) {
           const style=fieldFlags.some(f=>f.severity==='fix') ? 8 : 6;
           return {value,numeric,style:type==='money' ? style+1 : style};
