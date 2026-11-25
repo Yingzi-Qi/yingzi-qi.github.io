@@ -9,7 +9,7 @@ import {
 import {extractLocal, cleanReceipt, geminiSchema, geminiPrompt, prepareModelReading, reconcileReadings} from '../extract.js';
 import {inspectReference} from '../reference.js';
 import {sortItemFields} from '../field-sorter.js';
-import {identifierClasses} from '../item-identifiers.js';
+import {identifierClasses, itemCountCheck} from '../item-identifiers.js';
 import {checkReceipt, flagCategory, verifyImportedItemIds} from '../checks.js';
 
 const today = new Date('2026-11-25T12:00:00Z');
@@ -577,6 +577,23 @@ test('residuals: noisy total, footer lines, zeros, phones, missing items and a b
   assert.equal(shop.data.items.length, 1);
   assert.equal(shop.data.items[0].qty, 1);
   assert.equal(shop.data.total, 40);
+});
+test('TOTAL (n items) matches purchased lines or purchased plus excluded zeros', () => {
+  const purchased = [{item: 'Scarf', amount: 18}];
+  const bag = [{item: 'Carrier bag', amount: 0}];
+  const purchasedOnly = itemCountCheck(makeOcr(['ATELIER', 'Scarf 18.00', 'Carrier bag 0.00', 'TOTAL (1 item) 18.00']).lines, purchased, bag);
+  assert.equal(purchasedOnly.purchased, 1);
+  assert.equal(purchasedOnly.withExcludedZeros, 2);
+  assert.equal(purchasedOnly.matches, true);
+  const withWrap = itemCountCheck(makeOcr(['ATELIER', 'Scarf 18.00', 'Gift wrap 0.00', 'TOTAL (2 items) 18.00']).lines, purchased, [{item: 'Gift wrap', amount: 0}]);
+  assert.equal(withWrap.matches, true);
+  const wrong = makeOcr(['ATELIER', 'Scarf 18.00', 'By Appointment 0.00', 'TOTAL (4 items) 18.00']);
+  const mismatch = itemCountCheck(wrong.lines, purchased, [{item: 'By Appointment', amount: 0}]);
+  assert.equal(mismatch.matches, false);
+  const flagged = checkReceipt({merchant: 'ATELIER', total: 18, items: purchased, excludedZeroItems: [{item: 'By Appointment', amount: 0}]}, wrong);
+  assert.ok(flagged.flags.some(flag => flag.message === 'item_count_mismatch' && flag.field === 'receipt' && flagCategory(flag) === 'reading'));
+  const accepted = checkReceipt({merchant: 'ATELIER', total: 18, items: purchased, excludedZeroItems: bag}, makeOcr(['ATELIER', 'Scarf 18.00', 'Carrier bag 0.00', 'TOTAL (1 item) 18.00']));
+  assert.equal(accepted.flags.some(flag => flag.message === 'item_count_mismatch'), false);
 });
 test('an unlabelled hex token is not a receipt reference', () => {
   const ocr = makeOcr(['ATELIER', '12/11/2026 11:00', 'Wool hat 25.00', 'TOTAL 25.00', 'ab12cd34']);

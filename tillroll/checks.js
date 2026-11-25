@@ -4,6 +4,7 @@ import {referenceFormat} from './retail-rules.js?v=6';
 import {validCalendarDate} from './purchase-date.js?v=6';
 import {inspectReference} from './reference.js?v=6';
 import {normalizeTender,cleanProductCode,nonItemName,storeReceiptId} from './receipt-rules.js?v=1';
+import {itemCountCheck} from './item-identifiers.js';
 // Geometry is normalized to the upright photo, with the origin at its top left.
 const PHOTO_CONFIDENCE = 0.8;
 const ID_LABEL = /^order\s+i\.?d\.?\s*[:#]?$/i;
@@ -567,6 +568,8 @@ export function checkReceipt(data, ocr, previous = null, {independentPhoto = fal
       flags.push(flag);
     }
   };
+  const counted = itemCountCheck(ocr?.lines || [], items, data.excludedZeroItems || []);
+  if (counted.matches === false) add('receipt', 'item_count_mismatch', 'check');
   if (!items.length) add('receipt','No line items were read.', 'fix');
   if (!items.length && number(data.total) !== null) add('receipt','items-missing', 'check');
   if (!text(data.merchant)) add('merchant','Retailer is missing.', 'fix');

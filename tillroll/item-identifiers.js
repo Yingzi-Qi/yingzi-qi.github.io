@@ -235,13 +235,16 @@ export function printedItemCount(lines) {
   return null;
 }
 
-export function itemCountCheck(lines, items) {
+export function itemCountCheck(lines, items, excludedZeroItems = []) {
   const printed = printedItemCount(lines);
-  const counted = (items || []).length;
+  const purchased = (items || []).length;
+  const withExcludedZeros = purchased + (excludedZeroItems || []).length;
   return {
     printed,
-    counted,
-    matches: printed == null ? null : printed === counted,
+    counted: purchased,
+    purchased,
+    withExcludedZeros,
+    matches: printed == null ? null : printed === purchased || printed === withExcludedZeros,
     evidence: printed == null ? 'No TOTAL (n items) heading was printed.' : 'TOTAL (' + printed + (printed === 1 ? ' item' : ' items') + ')',
   };
 }
@@ -339,7 +342,7 @@ export function applyItemIdentifiers(data, ocr) {
     return {...item, brandItemIdCandidate: candidate, brandItemId: candidate?.value ?? null};
   });
   source.identifiers = identifiers.concat(extra);
-  source.itemCountCheck = itemCountCheck(lines, source.items);
+  source.itemCountCheck = itemCountCheck(lines, source.items, source.excludedZeroItems);
   if (source.card) source.card = maskCardField(source.card);
   return source;
 }
