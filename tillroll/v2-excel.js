@@ -123,17 +123,59 @@ function receiptToRows(receipt) {
 function metaOf(row) {
   return row.exportMeta || row.meta || {};
 }
+export function normaliseConfidence(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const s = String(value).trim().toLowerCase();
+  if (s === 'low' || s === 'medium' || s === 'high') return s;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : String(value).trim();
+}
+export function sourceUrlList(value) {
+  if (Array.isArray(value)) return value.map(v => String(v).trim()).filter(Boolean);
+  if (value === null || value === undefined || value === '') return [];
+  return String(value).split(/\s*\|\s*/).map(s => s.trim()).filter(Boolean);
+}
 function baselineFor(row, exportKey) {
   const meta = metaOf(row);
+  const reasons = meta.flagReasons || row.flagReasons || {};
   return {
-    v: 1, exportKey, rowId: row.rowId, receiptKey: row.receiptKey || null,
-    currency: meta.currency || row.currency || null,
+    v: 2, exportKey, rowId: row.rowId, receiptKey: row.receiptKey || null,
+    currency: meta.currency || row.currency || 'GBP',
     discountKind: meta.discountKind || 'none',
     cells: Object.fromEntries(VISIBLE_COLUMNS.map(c => [c, row.cells?.[c] ?? null])),
-    flags: Object.fromEntries(Object.entries(row.flags || {}).filter(([, colour]) => colour === PINK || colour === AMBER)),
+    // Explicit null means the cell was unflagged. Round 2 keeps this unless the cell is cleared, edited, or re-looked-up.
+    flags: Object.fromEntries(VISIBLE_COLUMNS.map(c => [c, row.flags?.[c] === PINK || row.flags?.[c] === AMBER ? row.flags[c] : null])),
+    flagReasons: Object.fromEntries(Object.entries(reasons).filter(([, reason]) => reason)),
+    storeClues: meta.storeClues || row.storeClues || null,
+    sourceUrls: sourceUrlList(meta.sourceUrls || row.lookup?.sourceUrls),
+    confidence: normaliseConfidence(meta.confidence ?? row.lookup?.confidence),
+    matchType: meta.matchType || row.lookup?.matchType || null,
     alternates: meta.alternates || {},
     comments: meta.comments || {},
   };
+}
+
+function sheetDocument(headers, dataRows, { hiddenFrom = Infinity, legacy = '' } = {}) {
+  const width = 22;
+  const all = [headers, ...dataRows];
+  const rowXml = (n, cells) => `<row r="${n}" ht="32" customHeight="1">${cells.map((cell, i) => cellXml(n, i + 1, cell)).join('')}</row>`;
+  const cols = headers.map((_, i) => `<col min="${i + 1}" max="${i + 1}" width="${width}" customWidth="1"${i >= hiddenFrom ? ' hidden="1"' : ''}/>`).join('');
+  const lastRow = Math.max(1, all.length);
+  const range = `A1:${colName(headers.length)}${lastRow}`;
+  const filter = `A1:${colName(Math.min(headers.length, hiddenFrom))}${lastRow}`;
+  return XML + `<worksheet xmlns="${MAIN}" xmlns:r="${REL}"><dimension ref="${range}"/>` +
+    `<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" state="frozen" topLeftCell="A2" activePane="bottomLeft"/>` +
+    `<selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews>` +
+    `<sheetFormatPr defaultRowHeight="32" defaultColWidth="${width}"/><cols>${cols}</cols><sheetData>` +
+    all.map((cells, i) => rowXml(i + 1, cells)).join('') +
+    `</sheetData><autoFilter ref="${filter}"/>${legacy}</worksheet>`;
+}
+function textCell(value, style = 0) {
+  return { value: value ?? '', numeric: false, style };
+}
+function moneyCell(value, colour) {
+  const numeric = typeof value === 'number';
+  return { value, numeric, style: styleIndex(numeric ? colour : null, numeric) };
 }
 
 export async function buildV2XlsxBlob(input, { exportKey = (globalThis.crypto?.randomUUID?.() || `exp-${Date.now()}`) } = {}) {
@@ -146,8 +188,8 @@ export async function buildV2XlsxBlob(input, { exportKey = (globalThis.crypto?.r
     const hidden = [
       row.rowId,
       row.receiptKey || '',
-      (meta.sourceUrls || row.lookup?.sourceUrls || []).join('\n'),
-      meta.confidence ?? row.lookup?.confidence ?? '',
+      sourceUrlList(meta.sourceUrls || row.lookup?.sourceUrls).join(' | '),
+      normaliseConfidence(meta.confidence ?? row.lookup?.confidence) ?? '',
       meta.matchType || row.lookup?.matchType || '',
       JSON.stringify(baseline),
       JSON.stringify(meta.candidates || row.priceFallbackCandidates || []),
@@ -163,25 +205,38 @@ export async function buildV2XlsxBlob(input, { exportKey = (globalThis.crypto?.r
     }).concat(hidden.map(value => ({ value, numeric: false, style: 0 })));
     return cells;
   });
-  const width = 22;
   const header = ALL_COLUMNS.map(title => ({ value: title, numeric: false, style: STYLE.header }));
-  const rowXml = (n, cells) => `<row r="${n}" ht="32" customHeight="1">${cells.map((cell, i) => cellXml(n, i + 1, cell)).join('')}</row>`;
-  const cols = ALL_COLUMNS.map((_, i) => `<col min="${i + 1}" max="${i + 1}" width="${width}" customWidth="1"${i >= VISIBLE_COLUMNS.length ? ' hidden="1"' : ''}/>`).join('');
-  const range = `A1:${colName(ALL_COLUMNS.length)}${rows.length + 1}`;
-  const filter = `A1:${colName(VISIBLE_COLUMNS.length)}${rows.length + 1}`;
   const legacy = comments.length ? `<legacyDrawing r:id="rIdVml"/>` : '';
-  const worksheet = XML + `<worksheet xmlns="${MAIN}" xmlns:r="${REL}"><dimension ref="${range}"/>` +
-    `<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" state="frozen" topLeftCell="A2" activePane="bottomLeft"/>` +
-    `<selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews>` +
-    `<sheetFormatPr defaultRowHeight="32" defaultColWidth="${width}"/><cols>${cols}</cols><sheetData>` +
-    rowXml(1, header) + body.map((cells, i) => rowXml(i + 2, cells)).join('') +
-    `</sheetData><autoFilter ref="${filter}"/>${legacy}</worksheet>`;
-
+  const worksheet = sheetDocument(header, body, { hiddenFrom: VISIBLE_COLUMNS.length, legacy });
+  const excluded = Array.isArray(input?.excludedZero) ? input.excludedZero : [];
+  const zeroHeaders = ['Tillroll receipt key', 'Line', '品名', 'Qty', '采购商品原价', '采购商品金额', 'Reason'].map(title => textCell(title, STYLE.header));
+  const zeroRows = excluded.map(z => [
+    textCell(z.receiptKey), textCell(z.lineIndex), textCell(z.name), textCell(z.qty),
+    moneyCell(z.unitPrice, null), moneyCell(z.amount, null), textCell(z.reason || 'Confirmed printed zero.'),
+  ]);
+  const flagHeaders = ['Tillroll row id', 'Tillroll receipt key', 'Column', 'Value', 'Flag', 'Reason'].map(title => textCell(title, STYLE.header));
+  const flagRows = [];
+  for (const row of rows) {
+    const reasons = metaOf(row).flagReasons || row.flagReasons || {};
+    for (const col of VISIBLE_COLUMNS) {
+      const colour = row.flags?.[col];
+      if (colour !== PINK && colour !== AMBER) continue;
+      const value = row.cells?.[col];
+      flagRows.push([
+        textCell(row.rowId), textCell(row.receiptKey), textCell(col),
+        MONEY_COLUMNS.has(col) ? moneyCell(value, colour) : textCell(value, styleIndex(colour, false)),
+        textCell(colour, styleIndex(colour, false)),
+        textCell(reasons[col] || ''),
+      ]);
+    }
+  }
   const zip = new JSZip();
   const overrides = [
     ['/xl/workbook.xml', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml'],
     ['/xl/styles.xml', 'application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml'],
     ['/xl/worksheets/sheet1.xml', 'application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml'],
+    ['/xl/worksheets/sheet2.xml', 'application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml'],
+    ['/xl/worksheets/sheet3.xml', 'application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml'],
   ];
   if (comments.length) overrides.push(['/xl/comments1.xml', 'application/vnd.openxmlformats-officedocument.spreadsheetml.comments+xml']);
   zip.file('[Content_Types].xml', XML + `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">` +
@@ -190,8 +245,19 @@ export async function buildV2XlsxBlob(input, { exportKey = (globalThis.crypto?.r
     (comments.length ? `<Default Extension="vml" ContentType="application/vnd.openxmlformats-officedocument.vmlDrawing"/>` : '') +
     overrides.map(([part, type]) => `<Override PartName="${part}" ContentType="${type}"/>`).join('') + `</Types>`);
   zip.file('_rels/.rels', XML + `<Relationships xmlns="${PACKAGE}"><Relationship Id="rId1" Type="${REL}/officeDocument" Target="xl/workbook.xml"/></Relationships>`);
-  zip.file('xl/workbook.xml', XML + `<workbook xmlns="${MAIN}" xmlns:r="${REL}"><sheets><sheet name="Line items" sheetId="1" r:id="rId1"/></sheets></workbook>`);
-  zip.file('xl/_rels/workbook.xml.rels', XML + `<Relationships xmlns="${PACKAGE}"><Relationship Id="rId1" Type="${REL}/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="${REL}/styles" Target="styles.xml"/></Relationships>`);
+  zip.file('xl/workbook.xml', XML + `<workbook xmlns="${MAIN}" xmlns:r="${REL}"><sheets>` +
+    `<sheet name="Line items" sheetId="1" r:id="rId1"/>` +
+    `<sheet name="Excluded zero items" sheetId="2" r:id="rId3"/>` +
+    `<sheet name="Flags" sheetId="3" r:id="rId4"/>` +
+    `</sheets></workbook>`);
+  zip.file('xl/_rels/workbook.xml.rels', XML + `<Relationships xmlns="${PACKAGE}">` +
+    `<Relationship Id="rId1" Type="${REL}/worksheet" Target="worksheets/sheet1.xml"/>` +
+    `<Relationship Id="rId2" Type="${REL}/styles" Target="styles.xml"/>` +
+    `<Relationship Id="rId3" Type="${REL}/worksheet" Target="worksheets/sheet2.xml"/>` +
+    `<Relationship Id="rId4" Type="${REL}/worksheet" Target="worksheets/sheet3.xml"/>` +
+    `</Relationships>`);
+  zip.file('xl/worksheets/sheet2.xml', sheetDocument(zeroHeaders, zeroRows));
+  zip.file('xl/worksheets/sheet3.xml', sheetDocument(flagHeaders, flagRows));
   const sheetRels = comments.length
     ? XML + `<Relationships xmlns="${PACKAGE}"><Relationship Id="rIdComments" Type="${REL}/comments" Target="../comments1.xml"/><Relationship Id="rIdVml" Type="${REL}/vmlDrawing" Target="../drawings/vmlDrawing1.vml"/></Relationships>`
     : XML + `<Relationships xmlns="${PACKAGE}"/>`;
@@ -315,7 +381,9 @@ export async function readV2Workbook(file) {
           const n = Number(value);
           value = Number.isFinite(n) ? round2(n) : value;
         }
-      } else if (typeof value === 'string') value = value.trim() === '' ? null : value;
+      } else if (name === 'Tillroll confidence') value = normaliseConfidence(value);
+      else if (name === 'Tillroll source URLs') value = sourceUrlList(value).join(' | ') || null;
+      else if (typeof value === 'string') value = value.trim() === '' ? null : value;
       values[name] = value ?? null;
       if (cell?.style) fillsByCol[name] = cell.style;
       const ref = `${colName(index + 1)}${rowNumber}`;
@@ -328,7 +396,53 @@ export async function readV2Workbook(file) {
     parsed.push({ rowNumber, values, fills: fillsByCol, comments: commentsByCol, baseline, rowId: baseline.rowId || values['Tillroll row id'] });
   }
   if (!parsed.length) throw Object.assign(new Error('The workbook has no receipt rows to refresh.'), { v2: true });
-  return { kind: 'v2', exportKey: parsed[0].baseline.exportKey || null, ...planRefresh(parsed) };
+  const excludedZero = await readExcludedZeros(zip);
+  const planned = planRefresh(parsed);
+  if (excludedZero.length) for (const receipt of planned.receipts) receipt.excludedZero = excludedZero.filter(z => !z.receiptKey || z.receiptKey === receipt.receiptKey);
+  return { kind: 'v2', exportKey: parsed[0].baseline.exportKey || null, excludedZero, ...planned };
+}
+
+async function sheetPath(zip, name) {
+  const book = await partText(zip, 'xl/workbook.xml');
+  const rels = await partText(zip, 'xl/_rels/workbook.xml.rels');
+  if (!book || !rels) return null;
+  const sheet = blocks(book, 'sheet').find(s => s.attrs.name === name);
+  if (!sheet) return null;
+  const rid = sheet.attrs['r:id'];
+  const rel = blocks(rels, 'Relationship').find(r => r.attrs.Id === rid);
+  if (!rel?.attrs.Target) return null;
+  const target = rel.attrs.Target.replace(/^\//, '');
+  return target.startsWith('xl/') ? target : `xl/${target}`;
+}
+async function readExcludedZeros(zip) {
+  const path = await sheetPath(zip, 'Excluded zero items');
+  const xml = path ? await partText(zip, path) : null;
+  if (!xml) return [];
+  const sheetData = xml.match(/<sheetData\b[^>]*>([\s\S]*?)<\/sheetData>/)?.[1] || '';
+  const rows = [...sheetData.matchAll(/<row\b([^>]*?)>([\s\S]*?)<\/row>/g)];
+  if (rows.length < 2) return [];
+  const headers = [...rows[0][2].matchAll(/<c\b[\s\S]*?(?:\/>|<\/c>)/g)].map(m => cellOf(m[0], [], []));
+  const col = title => headers.find(h => h.value === title)?.col;
+  const at = (cells, title) => {
+    const i = col(title);
+    return i === undefined ? null : (cells.find(c => c.col === i)?.value ?? null);
+  };
+  const out = [];
+  for (const row of rows.slice(1)) {
+    const cells = [...row[2].matchAll(/<c\b[\s\S]*?(?:\/>|<\/c>)/g)].map(m => cellOf(m[0], [], []));
+    const name = at(cells, '品名');
+    if (!name && at(cells, 'Tillroll receipt key') == null) continue;
+    const unit = at(cells, '采购商品原价'), amount = at(cells, '采购商品金额'), qty = at(cells, 'Qty');
+    out.push({
+      receiptKey: at(cells, 'Tillroll receipt key'),
+      lineIndex: Number(at(cells, 'Line')),
+      name, qty: qty === null || qty === '' ? null : Number(qty),
+      unitPrice: unit === null || unit === '' ? null : Number(unit),
+      amount: amount === null || amount === '' ? null : Number(amount),
+      reason: at(cells, 'Reason') || 'Confirmed printed zero.',
+    });
+  }
+  return out;
 }
 
 function sameValue(column, a, b) {
@@ -361,7 +475,7 @@ export function planRefresh(parsedRows) {
       rowNumber: row.rowNumber,
       rowId: row.rowId,
       receiptKey: row.baseline.receiptKey || row.values['Tillroll receipt key'] || null,
-      currency: row.baseline.currency || null,
+      currency: row.baseline.currency || 'GBP',
       discountKind: row.baseline.discountKind || 'none',
       values: row.values,
       fills: row.fills,
@@ -369,6 +483,7 @@ export function planRefresh(parsedRows) {
       previousCells: baseCells,
       previousItemId: baseCells['品牌货号'] ?? null,
       comments: row.comments,
+      baseline: row.baseline,
     });
   }
   const byReceipt = new Map();
@@ -378,33 +493,45 @@ export function planRefresh(parsedRows) {
     byReceipt.get(key).push(row);
   }
   const receipts = [...byReceipt].map(([receiptKey, group]) => {
-    const first = group[0].values;
+    const first = group[0];
+    const storeClues = group.map(row => row.baseline.storeClues).find(v => v && typeof v === 'object') || null;
     return {
       receiptKey,
-      merchant: first['供应商'],
-      receiptReference: first['采购小票id'],
-      date: first['采购时间'],
+      merchant: first.values['供应商'],
+      receiptReference: first.values['采购小票id'],
+      date: first.values['采购时间'],
       time: null,
-      payment: first['采购商品方法'],
-      currency: group[0].currency,
-      items: group.map(row => ({
-        rowId: row.rowId,
-        unitSettled: true,
-        qty: 1,
-        brand: row.values['品牌'],
-        item: row.values['品名'],
-        itemId: row.values['品牌货号'],
-        unitPrice: row.values['采购商品原价'],
-        amount: row.values['采购商品金额'],
-        discountKind: row.discountKind,
-        discount: typeof row.values['采购商品原价'] === 'number' && typeof row.values['采购商品金额'] === 'number'
-          ? round2(row.values['采购商品原价'] - row.values['采购商品金额']) : 0,
-        editedCols: row.editedCols,
-        clearedCols: row.clearedCols,
-        flaggedCols: row.flaggedCols,
-        previousItemId: row.editedCols.includes('品牌货号') ? row.previousItemId : null,
-        previousCells: row.previousCells,
-      })),
+      payment: first.values['采购商品方法'],
+      currency: first.currency || 'GBP',
+      storeClues,
+      items: group.map(row => {
+        const baseFlags = row.baseline.flags || {};
+        const readingFlags = VISIBLE_COLUMNS.filter(col => baseFlags[col] === PINK && !row.clearedCols.includes(col) && !row.editedCols.includes(col));
+        return {
+          rowId: row.rowId,
+          unitSettled: true,
+          qty: 1,
+          brand: row.values['品牌'],
+          item: row.values['品名'],
+          itemId: row.values['品牌货号'],
+          unitPrice: row.values['采购商品原价'],
+          amount: row.values['采购商品金额'],
+          discountKind: row.discountKind,
+          discount: typeof row.values['采购商品原价'] === 'number' && typeof row.values['采购商品金额'] === 'number'
+            ? round2(row.values['采购商品原价'] - row.values['采购商品金额']) : 0,
+          editedCols: row.editedCols,
+          clearedCols: row.clearedCols,
+          flaggedCols: row.flaggedCols,
+          readingFlags,
+          baselineFlags: baseFlags,
+          baselineFlagReasons: row.baseline.flagReasons || {},
+          baselineConfidence: normaliseConfidence(row.baseline.confidence ?? row.values['Tillroll confidence']),
+          baselineSourceUrls: sourceUrlList(row.baseline.sourceUrls?.length ? row.baseline.sourceUrls : row.values['Tillroll source URLs']),
+          baselineMatchType: row.baseline.matchType || row.values['Tillroll match type'] || null,
+          previousItemId: row.editedCols.includes('品牌货号') ? row.previousItemId : null,
+          previousCells: row.previousCells,
+        };
+      }),
     };
   });
   return { rows, locks, receipts };

@@ -6,7 +6,7 @@ import { runSanity, PINK, AMBER } from '../functions/_lib/sanity.js';
 import { lookup } from '../functions/_lib/lookup.js';
 import { keys } from '../functions/_lib/cache.js';
 import { allocateProportional, expandReceipt, fromPence, supplierVisibleName } from '../../tillroll/units.js';
-import { buildV2XlsxBlob, readV2Workbook, VISIBLE_COLUMNS, HIDDEN_COLUMNS, STYLE } from '../../tillroll/v2-excel.js';
+import { buildV2XlsxBlob, readV2Workbook, round2Body, VISIBLE_COLUMNS, HIDDEN_COLUMNS, MONEY_COLUMNS, STYLE, normaliseConfidence, sourceUrlList } from '../../tillroll/v2-excel.js';
 
 const SAMPLES = JSON.parse(readFileSync(new URL('../../tillroll/real-samples/index.json', import.meta.url), 'utf8'));
 const sample = name => SAMPLES.find(e => e.filename === name);
@@ -226,4 +226,118 @@ test('edited 品牌货号 invalidates the 2dp price-fallback key and re-looks-up
   assert.equal(role.flags['供应商'], AMBER);
   assert.equal(paused.result.lookupsPaused, true);
   assert.equal(role.flags['品名'], AMBER);
+});
+
+test('header fill is the dark green, never a flag colour; money format and autoFilter stay', async () => {
+  const blob = await buildV2XlsxBlob({ agreedRows: [{
+    rowId: 'hdr', receiptKey: 'hdr',
+    cells: Object.fromEntries(VISIBLE_COLUMNS.map(c => [c, MONEY_COLUMNS.has(c) ? 12.5 : 'synthetic'])),
+    flags: {},
+  }] });
+  const { sheet, styles, zip } = await sheetXml(blob);
+  assert.match(styles, /FF1E4946/);
+  assert.match(styles, /numFmtId="4"/);
+  const headerFill = styles.match(/<fill><patternFill patternType="solid"><fgColor rgb="([^"]+)"/);
+  assert.equal(headerFill[1], 'FF1E4946');
+  assert.equal(headerFill[1] === 'FFFECDD3' || headerFill[1] === 'FFFDE68A', false);
+  const headerRow = sheet.match(/<row r="1"[\s\S]*?<\/row>/)[0];
+  assert.equal(/s="[3456]"/.test(headerRow), false);
+  assert.match(sheet, /<autoFilter /);
+  const book = await zip.file('xl/workbook.xml').async('string');
+  assert.match(book, /name="Excluded zero items"/);
+  assert.match(book, /name="Flags"/);
+  assert.equal(normaliseConfidence('high'), 'high');
+  assert.equal(normaliseConfidence('0.5'), 0.5);
+  assert.deepEqual(sourceUrlList('https://a.test | https://b.test'), ['https://a.test', 'https://b.test']);
+});
+
+test('flags persist on an untouched Refresh, and both renders write the extra sheets', async () => {
+  const env = makeEnv();
+  const reason = 'Synthetic reader could not confirm this item id.';
+  async function syntheticLookup(_env, body) {
+    if (body.supplier && !body.itemId && !body.name) {
+      const pc = String(body.storeClues?.postcode || '').replace(/\s+/g, '');
+      if (/rolex/i.test(body.supplier) && /^E14/i.test(pc)) return { candidates: [], branch: { officialStoreName: 'Rolex Canary Wharf', sourceUrls: ['https://synthetic.example/store'] } };
+      return { candidates: [], branch: null };
+    }
+    return {
+      candidates: [{
+        brand: body.brand || 'Synthetic', officialName: 'Official Synthetic Scarf', itemId: 'OFFICIAL-SYN',
+        price: body.price, currency: 'GBP', matchType: 'id', confidence: 'high',
+        sourceUrls: ['https://synthetic.example/a', 'https://synthetic.example/b'],
+        matchedFields: ['itemId'], onOfficialSite: true, weightGrams: null,
+      }],
+      cacheHit: false, cacheKey: 'lookup:test', sourcesQueried: ['brave'], flag: '#FDE68A', printedItemId: body.itemId, canonicalBrand: body.brand || null,
+    };
+  }
+  const round1 = await runSanity(env, { batchId: 'persist', mode: 'round1', receipts: [
+    {
+      receiptKey: 'syn-a', merchant: 'Synthetic Department Store', receiptReference: 'SYN-A',
+      date: '2026-04-04', time: '09:30', payment: 'Cash',
+      items: [
+        { brand: 'Synthetic', item: 'Scarf', itemId: 'SYN-PINK-1', qty: 1, unitPrice: 40, amount: 40, readingFlags: ['品牌货号'], flagReasons: { '品牌货号': reason } },
+        { brand: 'Synthetic', item: 'Notebook', itemId: 'SYN-OK-2', qty: 1, unitPrice: 12, amount: 12 },
+        { brand: 'Synthetic', item: 'Tissue', qty: 1, unitPrice: 0, amount: 0, zeroConfirmed: true },
+      ],
+    },
+    {
+      receiptKey: 'syn-b', merchant: 'Rolex', receiptReference: 'SYN-B',
+      date: '2026-04-04', time: '15:00', payment: 'Visa', currency: 'GBP',
+      storeClues: { postcode: 'E14 5AB', addressLines: ['1 Canada Square'] },
+      items: [{ brand: 'Rolex', item: 'Watch', itemId: 'SYN-W-3', qty: 1, unitPrice: 5000, amount: 5000 }],
+    },
+  ] }, { lookup: syntheticLookup });
+  const pink = round1.result.agreedRows.find(r => r.cells['品牌货号'] === 'SYN-PINK-1');
+  const other = round1.result.agreedRows.find(r => r.cells['品牌货号'] === 'SYN-OK-2');
+  const supplier = round1.result.agreedRows.find(r => r.cells['品牌货号'] === 'SYN-W-3');
+  assert.equal(pink.flags['品牌货号'], PINK);
+  assert.equal(supplier.cells['供应商'], 'Rolex Canary Wharf');
+  assert.equal(supplier.flags['供应商'], AMBER);
+  assert.equal(round1.result.excludedZero.some(z => z.name === 'Tissue'), true);
+
+  const blob1 = await buildV2XlsxBlob(round1.result, { exportKey: '00000000-0000-4000-8000-000000000010' });
+  const book1 = await (await sheetXml(blob1)).zip.file('xl/workbook.xml').async('string');
+  const flags1 = await (await sheetXml(blob1)).zip.file('xl/worksheets/sheet3.xml').async('string');
+  const zeros1 = await (await sheetXml(blob1)).zip.file('xl/worksheets/sheet2.xml').async('string');
+  assert.match(book1, /name="Excluded zero items"/);
+  assert.match(book1, /name="Flags"/);
+  assert.match(flags1, new RegExp(reason));
+  assert.match(flags1, /#FECDD3/);
+  assert.match(zeros1, /Tissue/);
+  assert.match(flags1, /FF1E4946|s="1"/);
+
+  const planned = await readV2Workbook(blob1);
+  const pinkItem = planned.receipts.flatMap(r => r.items).find(it => it.itemId === 'SYN-PINK-1');
+  assert.ok(pinkItem.readingFlags.includes('品牌货号'));
+  assert.equal(pinkItem.baselineFlags['品牌货号'], PINK);
+  assert.deepEqual(planned.receipts.find(r => r.receiptKey === 'syn-b').storeClues.postcode, 'E14 5AB');
+  assert.equal(planned.receipts[0].currency, 'GBP');
+  const looked = planned.receipts.flatMap(r => r.items).find(it => it.itemId === 'SYN-OK-2');
+  assert.equal(looked.baselineConfidence, 'high');
+  assert.deepEqual(looked.baselineSourceUrls, ['https://synthetic.example/a', 'https://synthetic.example/b']);
+
+  const round2 = await runSanity(env, round2Body(planned, 'persist'), { lookup: syntheticLookup });
+  const pink2 = round2.result.agreedRows.find(r => r.cells['品牌货号'] === 'SYN-PINK-1');
+  const other2 = round2.result.agreedRows.find(r => r.rowId === other.rowId);
+  const supplier2 = round2.result.agreedRows.find(r => r.rowId === supplier.rowId);
+  assert.equal(pink2.flags['品牌货号'], PINK);
+  assert.notEqual(pink2.flags['品牌货号'], AMBER);
+  assert.equal(pink2.flagReasons['品牌货号'], reason);
+  assert.equal(other2.cells['品名'], 'Official Synthetic Scarf');
+  assert.equal(supplier2.flags['供应商'], AMBER);
+  assert.equal(supplier2.cells['供应商'], 'Rolex Canary Wharf');
+  assert.equal(round2.result.excludedZero.some(z => z.name === 'Tissue'), true);
+
+  const blob2 = await buildV2XlsxBlob(round2.result);
+  const packed = await sheetXml(blob2);
+  const book2 = await packed.zip.file('xl/workbook.xml').async('string');
+  const flags2 = await packed.zip.file('xl/worksheets/sheet3.xml').async('string');
+  const zeros2 = await packed.zip.file('xl/worksheets/sheet2.xml').async('string');
+  assert.match(book2, /name="Excluded zero items"/);
+  assert.match(book2, /name="Flags"/);
+  assert.match(flags2, /SYN-PINK-1|品牌货号/);
+  assert.match(flags2, /#FECDD3/);
+  assert.match(zeros2, /Tissue/);
+  const header2 = (await packed.zip.file('xl/worksheets/sheet3.xml').async('string')).match(/<row r="1"[\s\S]*?<\/row>/)[0];
+  assert.equal(/s="[3456]"/.test(header2), false);
 });
