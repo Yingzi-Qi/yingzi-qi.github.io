@@ -2,7 +2,7 @@
 // Price fallback ranks only candidates the service already marked price-fallback,
 // and only after the item id matched nothing. It does not run on a paused or partial result.
 
-import { fold, normaliseItemId } from './brand-aliases.js';
+import { canonicalBrand, fold, normaliseItemId } from './brand-aliases.js';
 import { canonicalDisplayBrand, roundMoney } from './lookup-policy.js';
 
 export const CLOSE_GAP = { percent: 0.02, floor: 5 };
@@ -205,38 +205,74 @@ export function mergeMismatches(...groups) {
   return merged;
 }
 
+// Provisional. chanel.com answers 403 to bots, so a listed mirror can stand in for
+// the primary official domain. A mirror-only confirmation stays Amber.
+export const DEFAULT_OFFICIAL_MIRRORS = { Chanel: ['chanel.cn'] };
+const PRIMARY_DOMAINS = { Chanel: ['chanel.com'] };
+
+function hostOf(url) {
+  try { return new URL(url).hostname.toLowerCase().replace(/^www\./, ''); }
+  catch { return ''; }
+}
+
+function matchesDomain(host, domain) {
+  const bare = String(domain || '').toLowerCase().replace(/^www\./, '');
+  if (!host || !bare) return false;
+  return host === bare || host.endsWith('.' + bare);
+}
+
+export function officialSource(candidate, brand, mirrors = DEFAULT_OFFICIAL_MIRRORS) {
+  const name = canonicalBrand(brand) || String(brand || '').trim();
+  const hosts = (candidate?.sourceUrls || []).map(hostOf).filter(Boolean);
+  const primary = PRIMARY_DOMAINS[name] || [];
+  const listed = mirrors?.[name] || [];
+  const onPrimary = hosts.some(host => primary.some(domain => matchesDomain(host, domain)));
+  const mirrorDomains = listed.filter(domain => hosts.some(host => matchesDomain(host, domain)));
+  const mirrorOnly = mirrorDomains.length > 0 && !onPrimary;
+  return {
+    acceptable: candidate?.onOfficialSite === true || mirrorOnly,
+    mirrorOnly,
+    mirrorNote: mirrorOnly ? mirrorDomains.map(domain => `official mirror ${domain}`).join(' ') : '',
+  };
+}
+
 function idMatch(candidate, itemId) {
   if (!itemId) return false;
   if (sameId(candidate.itemId, itemId)) return true;
   return candidate.matchType === 'id' && (candidate.matchedFields || []).includes('itemId') && sameId(candidate.itemId, itemId);
 }
 
-export function selectCandidate(candidates, query, { partial = false, closeGap = CLOSE_GAP } = {}) {
-  const official = (candidates || []).filter(candidate => candidate.onOfficialSite === true);
-  const corroboration = (candidates || []).filter(candidate => candidate.onOfficialSite !== true);
+function describeSelection(ranked, extra) {
+  const source = ranked.winner ? officialSource(ranked.winner, extra.brand, extra.mirrors) : { mirrorOnly: false, mirrorNote: '' };
+  return { ...ranked, mirrorOnly: source.mirrorOnly, mirrorNote: source.mirrorNote, ...extra.rest };
+}
+
+export function selectCandidate(candidates, query, { partial = false, closeGap = CLOSE_GAP, officialMirrors = DEFAULT_OFFICIAL_MIRRORS } = {}) {
+  const judged = (candidates || []).map(candidate => ({ candidate, ...officialSource(candidate, query.brand, officialMirrors) }));
+  const official = judged.filter(item => item.acceptable).map(item => item.candidate);
+  const corroboration = judged.filter(item => !item.acceptable).map(item => item.candidate);
   const idMatches = query.itemId ? official.filter(candidate => idMatch(candidate, query.itemId)) : [];
+  const attach = (ranked, rest) => describeSelection(ranked, { brand: query.brand, mirrors: officialMirrors, rest });
   if (idMatches.length) {
     const ranked = rankByFields(idMatches);
-    return { ...ranked, matchType: ranked.winner ? 'id' : null, fallback: false, corroboration, considered: idMatches };
+    return attach(ranked, { matchType: ranked.winner ? 'id' : null, fallback: false, corroboration, considered: idMatches });
   }
   const multi = official.filter(candidate => candidate.matchType !== 'price-fallback');
   const fallbackPool = official.filter(candidate => candidate.matchType === 'price-fallback');
   if (!query.itemId && multi.length) {
     const ranked = rankByFields(multi);
-    return { ...ranked, matchType: ranked.winner ? (ranked.winner.matchType || 'multi-field') : null, fallback: false, corroboration, considered: multi };
+    return attach(ranked, { matchType: ranked.winner ? (ranked.winner.matchType || 'multi-field') : null, fallback: false, corroboration, considered: multi });
   }
   if (partial || !fallbackPool.length) {
-    return { winner: null, tie: false, matchType: null, fallback: false, corroboration, considered: fallbackPool, weightUnresolved: false };
+    return attach({ winner: null, tie: false }, { matchType: null, fallback: false, corroboration, considered: fallbackPool, weightUnresolved: false });
   }
   const ranked = rankPriceFallback(fallbackPool, query, closeGap);
-  return {
-    winner: ranked.winner,
-    tie: ranked.tie,
+  return attach(ranked, {
     matchType: ranked.winner ? 'price-fallback' : null,
     fallbackTier: ranked.tier,
     fallback: true,
     weightUnresolved: ranked.weightUnresolved,
     corroboration,
     considered: fallbackPool,
-  };
+  });
 }

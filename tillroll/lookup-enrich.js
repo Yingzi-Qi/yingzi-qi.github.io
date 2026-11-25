@@ -61,6 +61,7 @@ function baseFields(row, colour) {
 
 function noteFor(result) {
   const parts = [];
+  if (result.mirrorNote) parts.push(result.mirrorNote);
   if (result.reason) parts.push(result.reason);
   for (const mismatch of result.mismatches) {
     parts.push(`${mismatch.field}: receipt “${mismatch.receiptValue}”, official “${mismatch.officialValue}”.`);
@@ -95,10 +96,11 @@ function finish(result, row, { response = null, selection = null, orders = null,
     storeClues: row.storeClues,
     branch: response?.branch || null,
   });
-  const forceName = Boolean(selection?.fallback) || result.flag === 'amber' && !accepted && result.queried;
+  const mirrorOnly = Boolean(selection?.mirrorOnly);
+  const forceName = Boolean(selection?.fallback) || mirrorOnly || result.flag === 'amber' && !accepted && result.queried;
   const fields = {
     '供应商': cell('供应商', row.supplier, supplier.supplier, { locked: fieldLocked(row.locks, '供应商'), colour }),
-    '品牌': cell('品牌', row.brand, officialBrand, { locked: fieldLocked(row.locks, '品牌'), colour }),
+    '品牌': cell('品牌', row.brand, officialBrand, { locked: fieldLocked(row.locks, '品牌'), colour, forceAmber: mirrorOnly && !fieldLocked(row.locks, '品牌') }),
     '品名': cell('品名', row.name, officialName, { locked: fieldLocked(row.locks, '品名'), colour, forceAmber: forceName && !fieldLocked(row.locks, '品名') }),
     '品牌货号': cell('品牌货号', row.itemId, officialId, {
       locked: fieldLocked(row.locks, '品牌货号'), colour, keepReceipt: true,
@@ -140,9 +142,10 @@ function finish(result, row, { response = null, selection = null, orders = null,
   result.weightUnresolved = Boolean(selection?.weightUnresolved);
   result.fallbackTier = selection?.fallbackTier || null;
   result.matchType = selection?.matchType || null;
-  if (selection?.fallback || result.mismatches.length || Object.values(fields).some(entry => entry.flag === 'amber') || forceName) {
+  result.mirrorNote = selection?.mirrorNote || '';
+  if (mirrorOnly || selection?.fallback || result.mismatches.length || Object.values(fields).some(entry => entry.flag === 'amber') || forceName) {
     if (!(lockedSkip)) {
-      const anyAmber = forceName || result.mismatches.some(entry => !fieldLocked(row.locks, entry.field)) || Object.values(fields).some(entry => entry.flag === 'amber');
+      const anyAmber = mirrorOnly || forceName || result.mismatches.some(entry => !fieldLocked(row.locks, entry.field)) || Object.values(fields).some(entry => entry.flag === 'amber');
       if (anyAmber) {
         result.flag = 'amber';
         result.flagColour = colour;
@@ -219,6 +222,7 @@ export async function enrichLines({
   editedItemIds = {},
   priceFieldOrder,
   closeGap = CLOSE_GAP,
+  officialMirrors,
 } = {}) {
   const prepared = prepareUnitRows(items, {
     currency, merchant, storeClues, ocrText, priceFieldOrder, reading, locks, editedItemIds,
@@ -322,7 +326,7 @@ export async function enrichLines({
     const partial = Array.isArray(response?.quotaGuard) && response.quotaGuard.length > 0;
     let selection = null;
     if (!failed && !pausedNow) {
-      selection = selectCandidate(response.candidates, primary, { partial, closeGap });
+      selection = selectCandidate(response.candidates, primary, { partial, closeGap, officialMirrors });
     }
     indexes.forEach((index, offset) => {
       const result = results[index];

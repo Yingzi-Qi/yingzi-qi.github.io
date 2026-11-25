@@ -195,6 +195,65 @@ describe('official-site acceptance', () => {
     assert.equal(selected.fallback, false);
   });
 
+  it('accepts a Chanel page on chanel.cn and keeps that confirmation Amber', async () => {
+    const { result } = trackingClient(() => json({
+      ...miniFixture,
+      flag: null,
+      candidates: [{
+        ...miniFixture.candidates[0],
+        onOfficialSite: false,
+        sourceUrls: ['https://www.chanel.cn/gb/fashion/p/A01112/mini-flap-bag'],
+      }],
+    }));
+    const enriched = await enrichLines({ items: [line()], currency: 'GBP', client: result });
+    const row = enriched.unitRows[0];
+    assert.equal(row.accepted.officialName, 'Mini Flap Bag');
+    assert.equal(row.flag, 'amber');
+    assert.equal(row.flagColour, '#FDE68A');
+    assert.equal(row.fields['品名'].flag, 'amber');
+    assert.equal(row.fields['品牌'].flag, 'amber');
+    assert.match(row.reviewNote, /official mirror chanel\.cn/);
+    const blocked = selectCandidate(enriched.unitRows[0].candidates, { brand: 'Chanel', itemId: 'A01112', name: 'Mini Flap Bag', price: 5200, currency: 'GBP' }, { officialMirrors: {} });
+    assert.equal(blocked.winner, null);
+  });
+
+  it('does not force Amber when the primary official domain also confirms the candidate', async () => {
+    const { result } = trackingClient(() => json({
+      ...miniFixture,
+      flag: null,
+      candidates: [{
+        ...miniFixture.candidates[0],
+        onOfficialSite: true,
+        sourceUrls: [
+          'https://www.chanel.com/gb/fashion/p/A01112/mini-flap-bag',
+          'https://www.chanel.cn/gb/fashion/p/A01112/mini-flap-bag',
+        ],
+      }],
+    }));
+    const enriched = await enrichLines({ items: [line()], currency: 'GBP', client: result });
+    const row = enriched.unitRows[0];
+    assert.equal(row.accepted.officialName, 'Mini Flap Bag');
+    assert.equal(row.flag, null);
+    assert.equal(row.fields['品名'].flag, null);
+    assert.doesNotMatch(row.reviewNote, /official mirror/);
+  });
+
+  it('rejects a domain that is neither the primary site nor a listed mirror', async () => {
+    const { result } = trackingClient(() => json({
+      ...miniFixture,
+      flag: null,
+      candidates: [{
+        ...miniFixture.candidates[0],
+        onOfficialSite: false,
+        sourceUrls: ['https://www.chanel.example/gb/fashion/p/A01112/mini-flap-bag'],
+      }],
+    }));
+    const enriched = await enrichLines({ items: [line()], currency: 'GBP', client: result });
+    assert.equal(enriched.unitRows[0].accepted, null);
+    assert.equal(enriched.unitRows[0].flag, null);
+    assert.doesNotMatch(enriched.unitRows[0].reviewNote, /official mirror/);
+  });
+
   it('does not invent a price fallback when the item id was not confirmed as a miss', () => {
     const selected = selectCandidate([
       { brand: 'Chanel', officialName: 'Other', itemId: 'OTHER', price: 5200, currency: 'GBP', onOfficialSite: true, matchType: 'multi-field', matchedFields: ['price'] },
