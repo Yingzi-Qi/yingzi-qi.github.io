@@ -546,8 +546,6 @@ export function checkReceipt(data, ocr, previous = null, {independentPhoto = fal
     const amount = number(item.amount), qty = number(item.qty), unit = number(item.unitPrice);
     if (amount === null) add(path+'amount','Line amount is missing or unreadable.', 'fix');
     else if (qty !== null && unit !== null && !near(qty*unit-includedLineDiscount(item), amount)) add(path+'amount','Quantity multiplied by unit price differs from the line amount.', 'fix');
-    // Interim (owner, 25 Nov 2026). Amber look-up flag, not a reading error, so it does not escalate.
-    if (qty !== null && qty > 1) add(path+'unitPrice', 'qty>1: unit price vs line total undecided', 'check', false);
   });
   arithmetic(data, items, add, repeats);
   for (const issue of Array.isArray(data.fieldIssues) ? data.fieldIssues : []) {

@@ -104,8 +104,6 @@ function readerStage(receipt, rIndex, state) {
     if (unit === null && amount === null) addFlag(row, '采购商品原价', PINK, 'No price read.');
     else if (unit === null) addFlag(row, '采购商品原价', PINK, 'Unit price not printed; derived from line amount.');
     if ((zeroUnit || zeroAmt) && row.flags['采购商品原价'] !== PINK) addFlag(row, '采购商品原价', PINK, 'Doubtful 0 price: may be an OCR miss.');
-    // Interim (owner, 25 Nov 2026): do not choose unit price vs line total while qty > 1.
-    if (qty > 1) addFlag(row, '采购商品原价', AMBER, 'qty>1: unit price vs line total undecided');
     if (amount === null) addFlag(row, '采购商品金额', PINK, 'Line amount not read.');
     else if (unit !== null && Math.abs(qty * unit - discount - amount) > 0.02 && Math.abs(qty * unit - amount) > 0.02) addFlag(row, '采购商品金额', PINK, `qty × unit price − discount (${round2(qty * unit - discount)}) does not match amount (${amount}).`);
     for (const col of it.readingFlags || []) if (COLUMNS.includes(col)) addFlag(row, col, PINK, 'Flagged by the reader.');

@@ -33,8 +33,7 @@ Request `{brand,itemId,name,style,price,currency,storeClues:{addressLines,postco
 Response `{cacheHit,cacheKey,sourcesQueried,candidates:[{brand,officialName,itemId,price,currency,weightGrams,sourceUrls,onOfficialSite,matchedFields,confidence,matchType}]}`.
 Keys (30-day TTL): `lookup:v2:item:{brand}:{itemId}`, `lookup:v2:mf:{brand}:{name}:{style}`, `lookup:v2:pf:{brand}:{currency}:{price.toFixed(2)}` (only when itemId matched nothing), `lookup:v2:branch:{supplier}:{postcode|addressLine1|storeNumber}`.
 Brand given ⇒ only `onOfficialSite` candidates (verified against the brand's official domain by code, not by the model). Retailers only corroborate.
-Additive fields (approved by the owner, 25 Nov 2026 16:38): `supplier` (request), `branch`, `printedItemId`, `canonicalBrand`, `flag`, `paused`, `unavailableReason`, `quotaGuard` (response). Price fallback runs only after a confirmed item-ID no-match.
-Interim, still open: a line with quantity > 1 flags `采购商品原价` Amber (`qty>1: unit price vs line total undecided`) until the owner chooses unit price or line total.
+Additive fields (proposed, see PR): `supplier` (request), `branch`, `printedItemId`, `canonicalBrand`, `flag`, `paused`, `unavailableReason`, `quotaGuard` (response).
 
 ## Free-tier guards
 - Brave < 1,000/month (default guard 950), Gemini grounding < 5,000/month (4,800) and < 1,500/day (1,450). Env can lower but never raise past 999/4,999/1,499. Counters reserved atomically in D1 before each call; guard hit ⇒ look-ups pause, Amber `#FDE68A`.
