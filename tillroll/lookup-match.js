@@ -1,10 +1,13 @@
 // Accept an official-site candidate, then compare it with the receipt.
 // Price fallback ranks only candidates the service already marked price-fallback,
 // and only after the item id matched nothing. It does not run on a paused or partial result.
+// Candidates within max(2% of the printed price, £5) of the best gap are close.
+// That band is decided.
 
 import { canonicalBrand, fold, normaliseItemId } from './brand-aliases.js';
 import { canonicalDisplayBrand, roundMoney } from './lookup-policy.js';
 
+// Decided close band: max(2% of the printed price, £5).
 export const CLOSE_GAP = { percent: 0.02, floor: 5 };
 
 const FIELD_NAMES = {
