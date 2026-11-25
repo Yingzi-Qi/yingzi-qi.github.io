@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { makeEnv, mockFetch, CATALOGUE } from './helpers.mjs';
-import { runSanity, COLUMNS, PINK, AMBER, normaliseTimestamp } from '../functions/_lib/sanity.js';
+import { runSanity, COLUMNS, PINK, AMBER, normaliseTimestamp, normaliseTender, chooseBrandItemId, resolveBrandItemId, TENDER_REASON, maybeApplyPr1BatchDateOutlierCheck, BRAND_ITEM_ID_FORMAT, setBrandItemIdFormat, getBrandItemIdFormat, fitsBrandItemIdFormat, extractChanelStyleRef, suggestedPrintedCodeAlternative, printedValueKeptReason, officialSiteShowsReason } from '../functions/_lib/sanity.js';
 import { lookup } from '../functions/_lib/lookup.js';
 import { createRun, processRun, getRun } from '../functions/_lib/runs.js';
 const REPO = new URL('../../tillroll/', import.meta.url).pathname;
@@ -44,8 +44,14 @@ test('an unfitting item code falls through to the official style ref, or the EAN
       { brand: 'Chanel', item: 'Scarf', itemId: 'ALSO-NOT', ean: '4000000000020', qty: 1, unitPrice: 80, amount: 80 },
     ],
   }] }, { lookup: lookupStub });
-  assert.equal(result.agreedRows[0].cells['品牌货号'], 'AS44010');
-  assert.equal(result.agreedRows[1].cells['品牌货号'], '4000000000020');
+// An unfitting printed token never occupies 品牌货号. A labelled EAN is what the
+// look-up receives; an official style reference may replace it afterwards.
+  const first = result.agreedRows[0].cells['品牌货号'];
+  const second = result.agreedRows[1].cells['品牌货号'];
+  assert.notEqual(first, 'NOT-A-REF');
+  assert.notEqual(second, 'ALSO-NOT');
+  assert.equal(first, 'AS44010');
+  assert.equal(second, '4000000000020');
   assert.deepEqual(seen, ['4000000000013', '4000000000020']);
 });
 
@@ -56,6 +62,15 @@ test('timestamps: 24h, 00 seconds, am/pm converted', () => {
   assert.equal(normaliseTimestamp('17/01/2025', null), '2025-01-17 00:00:00');
   assert.equal(normaliseTimestamp('03/04/2026', null), '2026-04-03 00:00:00');
   assert.equal(normaliseTimestamp('2025-13-40', '10:00'), null);
+});
+
+test('P7: unclear UK dates are DD/MM; 03/04/2026 is 3 April and there is no MM/DD fallback', () => {
+  assert.equal(normaliseTimestamp('03/04/2026', null), '2026-04-03 00:00:00');
+  assert.equal(normaliseTimestamp('03/04/2026', '9:15 am'), '2026-04-03 09:15:00');
+  assert.equal(normaliseTimestamp('3/4/2026', null), '2026-04-03 00:00:00');
+  assert.equal(normaliseTimestamp('03.04.2026', null), '2026-04-03 00:00:00');
+  // 13 is not a month under DD/MM; do not reinterpret as 13 April (US MM/DD).
+  assert.equal(normaliseTimestamp('04/13/2026', null), null);
 });
 
 test('all stored sample readings (real-samples + featured) pass the export invariants, no keys', async () => {
@@ -104,7 +119,14 @@ test('look-ups enrich rows (Amber) without overwriting printed prices or item ID
   assert.equal(vca.cells['品牌'], 'Van Cleef & Arpels');
   assert.equal(vca.cells['品牌货号'], '0012345');
   assert.equal(vca.cells['采购商品原价'], 3700); // printed price wins over official 3600
-  assert.equal(gucci.cells['品牌货号'], '000001'); // printed ID kept on fallback
+  // Receipt is the source of truth: printed ref 000001 is kept; official ID is only in the Amber reason.
+  assert.equal(gucci.cells['品牌货号'], '000001');
+  assert.equal(gucci.brandItemId, '000001');
+  assert.equal(gucci.brandItemIdSource, 'brandProductCode');
+  assert.equal(gucci.brandItemIdFlag, AMBER);
+  assert.equal(gucci.brandItemIdReason, 'official site shows 658574');
+  assert.equal(gucci.exportMeta.brandItemId, '000001');
+  assert.equal(gucci.exportMeta.brandItemIdReason, 'official site shows 658574');
   assert.equal(gucci.cells['品名'], 'Horsebit 1955 mini bag');
   assert.equal(gucci.lookup.matchType, 'price-fallback');
   assert.equal(dior.cells['品名'], 'Handbag'); // ambiguous, weightless: not guessed
@@ -252,4 +274,349 @@ test('printed per-item discount is exact; a shared receipt discount is Amber and
   assert.equal(Math.round(rows.reduce((s, r) => s + r.cells['采购商品金额'], 0) * 100) / 100, 89.98);
   assert.equal(rows[0].cells['采购小票id'], rows[1].cells['采购小票id']);
   assert.equal(rows[0].cells['采购时间'], rows[1].cells['采购时间']);
+});
+
+test('official match with no official price flags Amber official price unavailable and keeps the printed price', async () => {
+  const env = makeEnv(KEYS);
+  const f = mockFetch([{
+    brand: 'Chanel', officialName: 'Mini classic handbag', itemId: 'A69900', price: null,
+    url: 'https://www.chanel.com/gb/fashion/p/A69900/',
+    title: 'Mini classic handbag | Chanel',
+    description: 'A69900. Discover the collection.',
+  }], { brave: 0, gemini: 0 }, {
+    geminiCandidates: [{ brand: 'Chanel', officialName: 'Mini classic handbag', itemId: 'A69900', price: null, sourceUrls: ['https://www.chanel.com/gb/fashion/p/A69900/'] }],
+  });
+  const { result } = await runSanity(env, { batchId: 'np', mode: 'round1', receipts: [{
+    receiptKey: 'np', merchant: 'Chanel', receiptReference: 'N1', date: '2026-11-20', time: '12:00', payment: 'Visa', currency: 'GBP',
+    items: [{ brand: 'Chanel', item: 'Classic Flap Mini Bag', itemId: 'A69900', qty: 1, unitPrice: 4950, amount: 4950 }],
+  }] }, { fetchImpl: f, lookup });
+  const row = result.agreedRows[0];
+  assert.equal(row.cells['采购商品原价'], 4950);
+  assert.equal(row.flags['采购商品原价'], AMBER);
+  assert.ok(row.mismatches.some(m => m.field === 'price' && m.reason === 'official price unavailable' && m.officialValue === null && m.receiptValue === 4950));
+  assert.ok(JSON.stringify(row).includes('official price unavailable'));
+});
+
+
+// P4 — 采购商品方法 must normalise to UnionPay, Card, Alipay or WeChat.
+test('P4: card schemes and wallets (with or without a scheme) map to Card', () => {
+  assert.equal(normaliseTender('VISA CONTACTLESS'), 'Card');
+  assert.equal(normaliseTender('Mastercard'), 'Card');
+  assert.equal(normaliseTender('American Express'), 'Card');
+  assert.equal(normaliseTender('Amex'), 'Card');
+  assert.equal(normaliseTender('Maestro'), 'Card');
+  assert.equal(normaliseTender('Carte Bancaire'), 'Card');
+  assert.equal(normaliseTender('debit'), 'Card');
+  assert.equal(normaliseTender('credit card'), 'Card');
+  assert.equal(normaliseTender('UnionPay'), 'UnionPay');
+  assert.equal(normaliseTender('银联'), 'UnionPay');
+  assert.equal(normaliseTender('Alipay'), 'Alipay');
+  assert.equal(normaliseTender('WeChat Pay'), 'WeChat');
+  assert.equal(normaliseTender('Apple Pay'), 'Card');
+  assert.equal(normaliseTender('Google Pay'), 'Card');
+  assert.equal(normaliseTender('Samsung Pay'), 'Card');
+  assert.equal(normaliseTender('Garmin Pay'), 'Card');
+  assert.equal(normaliseTender('wallet'), 'Card');
+  assert.equal(normaliseTender('VISA CONTACTLESS Apple Pay'), 'Card');
+  assert.equal(normaliseTender('Apple Pay Mastercard'), 'Card');
+  assert.equal(normaliseTender('Cash'), 'Cash');
+  assert.equal(normaliseTender('PayPal'), 'PayPal');
+  assert.equal(normaliseTender('Klarna'), 'Klarna');
+  assert.equal(normaliseTender('gift card'), 'gift card');
+  assert.equal(normaliseTender(''), null);
+  assert.equal(normaliseTender(null), null);
+});
+
+test('P4: wallets are Card with no flag; cash, PayPal, Klarna, gift card and empty are Pink with the allowed-list reason', async () => {
+  const env = makeEnv();
+  const item = { brand: 'Chanel', item: 'Flap bag', itemId: 'A111', qty: 1, unitPrice: 890, amount: 890 };
+  const rec = (key, payment) => ({
+    receiptKey: key, merchant: 'Selfridges', receiptReference: key.toUpperCase(), date: '2026-11-20', time: '12:00',
+    payment, currency: 'GBP', items: [{ ...item, itemId: key }],
+  });
+  const { result } = await runSanity(env, { mode: 'round1', receipts: [
+    rec('p4-apple', 'Apple Pay'),
+    rec('p4-google', 'Google Pay'),
+    rec('p4-samsung', 'Samsung Pay'),
+    rec('p4-garmin', 'Garmin Pay'),
+    rec('p4-wallet', 'wallet'),
+    rec('p4-scheme', 'VISA CONTACTLESS Apple Pay'),
+    rec('p4-visa', 'Visa'),
+    rec('p4-cash', 'Cash'),
+    rec('p4-paypal', 'PayPal'),
+    rec('p4-klarna', 'Klarna'),
+    rec('p4-gift', 'gift card'),
+    rec('p4-empty', ''),
+  ] });
+  const byKey = Object.fromEntries(result.agreedRows.map(r => [r.receiptKey, r]));
+  for (const key of ['p4-apple', 'p4-google', 'p4-samsung', 'p4-garmin', 'p4-wallet', 'p4-scheme', 'p4-visa']) {
+    assert.equal(byKey[key].cells['采购商品方法'], 'Card', key);
+    assert.equal(byKey[key].flags['采购商品方法'], undefined, key);
+  }
+  for (const [key, printed] of [['p4-cash', 'Cash'], ['p4-paypal', 'PayPal'], ['p4-klarna', 'Klarna'], ['p4-gift', 'gift card'], ['p4-empty', null]]) {
+    assert.equal(byKey[key].cells['采购商品方法'], printed, key);
+    assert.equal(byKey[key].flags['采购商品方法'], PINK, key);
+    assert.ok(result.readingErrors.some(e => e.rowId === byKey[key].rowId && e.col === '采购商品方法' && e.reason === TENDER_REASON), key);
+  }
+});
+
+
+// P1 — 品牌货号 is the brand's own item ID: prefer style ref, never a concession / store code.
+test('P1: chooseBrandItemId prefers styleRef over EAN and skips concession codes', () => {
+  assert.equal(chooseBrandItemId({ styleRef: 'A69900', itemId: '3145892123459', ean: '3145892123459' }, 'Chanel'), 'A69900');
+  assert.equal(chooseBrandItemId({ sku: 'A69900', itemId: '3145892123459' }, 'Chanel'), 'A69900');
+  assert.equal(chooseBrandItemId({ itemId: 'A69900', barcode: '3145892123459' }, 'Chanel'), 'A69900');
+  assert.equal(chooseBrandItemId({ itemId: '1234567890', styleRef: 'A69900' }, 'Chanel'), 'A69900'); // 10-digit store-internal
+  assert.equal(chooseBrandItemId({ itemId: '99999991234', style: 'A69900' }, 'Chanel'), 'A69900');
+  assert.equal(chooseBrandItemId({ itemId: 'HARRODS-12345', styleRef: 'A69900' }, 'Chanel'), 'A69900');
+  assert.equal(chooseBrandItemId({ itemId: '1234567890' }, 'Chanel'), null);
+  assert.equal(chooseBrandItemId({ itemId: 'A69900' }, 'Chanel'), 'A69900');
+});
+
+test('P1: 品牌货号 on the row is the style, not a concession or barcode, and Pink when only a store code is present', async () => {
+  const env = makeEnv();
+  const mixed = {
+    receiptKey: 'p1-mixed', merchant: 'Selfridges', receiptReference: 'M1', date: '2026-11-20', time: '12:00',
+    payment: 'Visa', currency: 'GBP',
+    items: [{ brand: 'Chanel', item: 'Flap bag', itemId: '3145892123459', styleRef: 'A69900', qty: 1, unitPrice: 4950, amount: 4950 }],
+  };
+  const onlyStore = {
+    receiptKey: 'p1-store', merchant: 'Selfridges', receiptReference: 'M2', date: '2026-11-20', time: '12:00',
+    payment: 'Visa', currency: 'GBP',
+    items: [{ brand: 'Chanel', item: 'Flap bag', itemId: '1234567890', qty: 1, unitPrice: 4950, amount: 4950 }],
+  };
+  const { result } = await runSanity(env, { receipts: [mixed, onlyStore], mode: 'round1' });
+  const withStyle = result.agreedRows.find(r => r.cells['品牌货号'] === 'A69900');
+  const storeRow = result.agreedRows.find(r => r.receiptKey === 'p1-store' || r.source?.receiptKey === 'p1-store');
+  assert.ok(withStyle, 'style ref should be written as 品牌货号');
+  assert.notEqual(withStyle.cells['品牌货号'], '3145892123459');
+  const store = storeRow || result.agreedRows.find(r => r.cells['品牌货号'] !== 'A69900');
+  assert.ok(store, 'store-code-only row missing');
+  assert.equal(store.cells['品牌货号'] || '', '');
+  assert.equal(store.flags['品牌货号'], PINK);
+});
+
+test('brandItemId: printed style is kept; official ID is used only when none is printed', async () => {
+  const env = makeEnv(KEYS);
+  const f = mockFetch(CATALOGUE);
+  const exact = {
+    receiptKey: 'bid-p5', merchant: 'Selfridges', receiptReference: 'B1', date: '2026-11-20', time: '12:00',
+    payment: 'Visa', currency: 'GBP',
+    items: [{ brand: 'Chanel', item: 'Classic Flap Mini Bag', itemId: 'A69900', qty: 1, unitPrice: 4950, amount: 4950 }],
+  };
+  const idMatchPriceDiff = {
+    receiptKey: 'bid-idmatch', merchant: 'Selfridges', receiptReference: 'B2', date: '2026-11-20', time: '12:00',
+    payment: 'Visa', currency: 'GBP',
+    items: [{ brand: 'VCA', item: 'Vintage Laurel pendant', itemId: '0012345', qty: 1, unitPrice: 3700, amount: 3700 }],
+  };
+  const { result } = await runSanity(env, { mode: 'round1', receipts: [exact, idMatchPriceDiff] }, { fetchImpl: f, lookup });
+  const p5 = result.agreedRows.find(r => r.receiptKey === 'bid-p5');
+  const sameId = result.agreedRows.find(r => r.receiptKey === 'bid-idmatch');
+  assert.equal(p5.brandItemId, 'A69900');
+  assert.equal(p5.brandItemIdSource, 'brandProductCode');
+  assert.equal(p5.brandItemIdFlag, null);
+  assert.equal(p5.cells['品牌货号'], 'A69900');
+  assert.equal(p5.exportMeta.brandItemId, 'A69900');
+  // Official ID matches the printed code, so 品牌货号 stays unflagged even if the price differs.
+  assert.equal(sameId.brandItemId, '0012345');
+  assert.equal(sameId.brandItemIdSource, 'brandProductCode');
+  assert.equal(sameId.brandItemIdFlag, null);
+
+  // No printed style / brand code (EAN only): official ID is used, Amber unless P5.
+  const eanOnlyLookup = async () => ({
+    candidates: [{ brand: 'Chanel', officialName: 'Classic Flap Mini Bag', itemId: 'A69900', price: 4950, currency: 'GBP', matchType: 'id', confidence: 0.9, onOfficialSite: true, sourceUrls: ['https://www.chanel.com/p/A69900'], matchedFields: ['itemId', 'price'] }],
+    cacheHit: false, cacheKey: 'ean', sourcesQueried: ['brave'], printedItemId: '3145892123459', canonicalBrand: 'Chanel', flag: '#FDE68A',
+  });
+  const eanOnly = {
+    receiptKey: 'bid-official-only', merchant: 'Selfridges', receiptReference: 'B3', date: '2026-11-20', time: '12:00',
+    payment: 'Visa', currency: 'GBP',
+    items: [{ brand: 'Chanel', item: 'Classic Flap Mini Bag', ean: '3145892123459', qty: 1, unitPrice: 10, amount: 10 }],
+  };
+  const { result: r2 } = await runSanity(makeEnv(KEYS), { mode: 'round1', receipts: [eanOnly] }, { lookup: eanOnlyLookup });
+  const off = r2.agreedRows[0];
+  assert.equal(off.brandItemId, 'A69900');
+  assert.equal(off.brandItemIdSource, 'official');
+  assert.equal(off.cells['品牌货号'], 'A69900');
+  assert.equal(off.exportMeta.brandItemIdSource, 'official');
+});
+
+test('brandItemId: Gucci printed ref 000001 is kept, Amber official site shows 658574', async () => {
+  const env = makeEnv(KEYS); const f = mockFetch(CATALOGUE);
+  const { result } = await runSanity(env, { batchId: 'gucci-ref', mode: 'round1', receipts: [{
+    receiptKey: 'gucci-ref', merchant: 'Selfridges', receiptReference: 'G-REF', date: '2026-11-20', time: '3:15 pm',
+    payment: 'Visa', currency: 'GBP',
+    items: [{ brand: 'Gucci', item: 'Handbag', itemId: '000001', qty: 1, unitPrice: 1350, amount: 1350 }],
+  }] }, { fetchImpl: f, lookup });
+  const row = result.agreedRows[0];
+  assert.equal(row.cells['品牌货号'], '000001');
+  assert.equal(row.brandItemId, '000001');
+  assert.equal(row.brandItemIdSource, 'brandProductCode');
+  assert.equal(row.brandItemIdFlag, AMBER);
+  assert.equal(row.brandItemIdReason, 'official site shows 658574');
+  assert.equal(row.flags['品牌货号'], AMBER);
+  assert.equal(row.exportMeta.brandItemId, '000001');
+  assert.equal(row.exportMeta.brandItemIdReason, 'official site shows 658574');
+  assert.ok(result.lookupUncertainties.some(u => u.rowId === row.rowId && u.col === '品牌货号' && u.reason === 'official site shows 658574'));
+});
+
+test('brandItemId: style ref / brand product code, EAN (Amber), empty + Pink, and forbidden concession labels', async () => {
+  const env = makeEnv();
+  const base = { merchant: 'Selfridges', date: '2026-11-20', time: '12:00', payment: 'Visa', currency: 'GBP' };
+  const rec = (key, items) => ({ ...base, receiptKey: key, receiptReference: key, items });
+  const { result } = await runSanity(env, { mode: 'round1', receipts: [
+    rec('bid-style', [{ brand: 'Chanel', item: 'Flap bag', styleRef: 'A69900', itemId: '3145892123459', ean: '3145892123459', qty: 1, unitPrice: 10, amount: 10 }]),
+    rec('bid-sku', [{ brand: 'Chanel', item: 'Flap bag', sku: 'A69900', itemId: '3145892123459', qty: 1, unitPrice: 10, amount: 10 }]),
+    rec('bid-code', [{ brand: 'Chanel', item: 'Flap bag', itemId: 'A69900', qty: 1, unitPrice: 10, amount: 10 }]),
+    rec('bid-ean', [{ brand: 'Chanel', item: 'Flap bag', ean: '3145892123459', qty: 1, unitPrice: 10, amount: 10 }]),
+    rec('bid-empty', [{ brand: 'Chanel', item: 'Flap bag', qty: 1, unitPrice: 10, amount: 10 }]),
+    rec('bid-conc4', [{ brand: 'Chanel', item: 'Flap bag', styleRef: '1234', sku: '1234', qty: 1, unitPrice: 10, amount: 10 }]),
+    rec('bid-999', [{ brand: 'Chanel', item: 'Flap bag', style: '99999991234', sku: '99999991234', qty: 1, unitPrice: 10, amount: 10 }]),
+  ] });
+  const by = Object.fromEntries(result.agreedRows.map(r => [r.receiptKey, r]));
+  assert.equal(by['bid-style'].brandItemId, 'A69900');
+  assert.equal(by['bid-style'].brandItemIdSource, 'styleRef');
+  assert.equal(by['bid-style'].brandItemIdFlag, null);
+  assert.equal(by['bid-sku'].brandItemId, 'A69900');
+  assert.equal(by['bid-sku'].brandItemIdSource, 'styleRef');
+  assert.equal(by['bid-code'].brandItemId, 'A69900');
+  assert.equal(by['bid-code'].brandItemIdSource, 'brandProductCode');
+  assert.equal(by['bid-ean'].brandItemId, '3145892123459');
+  assert.equal(by['bid-ean'].brandItemIdSource, 'ean');
+  assert.equal(by['bid-ean'].brandItemIdFlag, AMBER);
+  assert.equal(by['bid-empty'].brandItemId, null);
+  assert.equal(by['bid-empty'].brandItemIdSource, null);
+  assert.equal(by['bid-empty'].brandItemIdFlag, PINK);
+  assert.equal(by['bid-empty'].cells['品牌货号'], null);
+  // 4-digit concession and 9999999xxx are never used, even when labelled style/sku.
+  assert.equal(by['bid-conc4'].brandItemId, null);
+  assert.equal(by['bid-conc4'].brandItemIdFlag, PINK);
+  assert.equal(by['bid-999'].brandItemId, null);
+  assert.equal(by['bid-999'].brandItemIdFlag, PINK);
+  assert.equal(resolveBrandItemId({ item: { itemId: '1234', styleRef: '1234' }, brand: 'Chanel' }).brandItemId, null);
+  assert.equal(resolveBrandItemId({ item: { sku: '99999991234', style: '99999991234' }, brand: 'Chanel' }).brandItemId, null);
+});
+
+
+test('BRAND_ITEM_ID_FORMAT is empty by default, injectable, and only fitting printed codes count as style refs', async () => {
+  assert.deepEqual(BRAND_ITEM_ID_FORMAT, {});
+  assert.equal(Object.keys(getBrandItemIdFormat()).length, 0);
+  const table = { Synthetic: /^ZZ\d{4}$/ };
+  setBrandItemIdFormat(table);
+  try {
+    assert.deepEqual(BRAND_ITEM_ID_FORMAT, {});
+    assert.equal(fitsBrandItemIdFormat('Synthetic', 'ZZ9999'), true);
+    assert.equal(fitsBrandItemIdFormat('Synthetic', 'ZZ999l'), false);
+    const fitting = resolveBrandItemId({ item: { styleRef: 'ZZ9999' }, brand: 'Synthetic' });
+    assert.equal(fitting.brandItemId, 'ZZ9999');
+    assert.equal(fitting.brandItemIdSource, 'styleRef');
+    assert.equal(fitting.flag, null);
+    // #20: a non-fitting printed code does not occupy 品牌货号. The official / I→1
+    // alternative is recorded in the reason only, never written as the item id.
+    const nonFitting = resolveBrandItemId({ item: { styleRef: 'ZZ999l' }, brand: 'Synthetic', officialItemId: 'ZZ9999' });
+    assert.equal(nonFitting.brandItemId, null);
+    assert.notEqual(nonFitting.brandItemId, 'ZZ9999');
+    assert.equal(nonFitting.flag, PINK);
+    assert.match(nonFitting.reason, /ZZ9999/);
+    assert.equal(nonFitting.printedValue, 'ZZ999l');
+  } finally {
+    setBrandItemIdFormat(null);
+  }
+  // Injection via deps.brandItemIdFormat, without mutating the exported empty default.
+  const { result } = await runSanity(makeEnv(), { receipts: [{
+    receiptKey: 'fmt-inj', merchant: 'Test', date: '2026-04-03', time: '14:00:00',
+    payment: 'Visa', currency: 'GBP',
+    items: [{ brand: 'Synthetic', item: 'Tote bag', styleRef: 'XY9999', qty: 1, unitPrice: 100, amount: 100 }],
+  }] }, { brandItemIdFormat: { Synthetic: /^ZZ\d{4}$/ } });
+  assert.deepEqual(BRAND_ITEM_ID_FORMAT, {});
+  assert.equal(result.agreedRows[0].cells['品牌货号'] || '', '');
+  assert.equal(result.agreedRows[0].exportMeta.brandItemId || '', '');
+  assert.notEqual(result.agreedRows[0].cells['品牌货号'], 'XY9999');
+  assert.equal(result.agreedRows[0].flags['品牌货号'], PINK);
+  assert.ok(
+    result.readingErrors.some(e => e.col === '品牌货号' && (/Printed value kept|store\/internal code not used|not a recognised style code/.test(e.reason)))
+    || /XY9999/.test(result.agreedRows[0].exportMeta.comments?.['品牌货号'] || ''),
+    'rejected printed XY9999 should be in the reason or comment, not the cell',
+  );
+});
+
+test('Chanel optional season prefix: 24P AS1234 yields style ref AS1234', async () => {
+  assert.equal(extractChanelStyleRef('24P AS1234'), 'AS1234');
+  assert.equal(extractChanelStyleRef('AS1234'), 'AS1234');
+  const rec = resolveBrandItemId({ item: { styleRef: '24P AS1234' }, brand: 'Chanel' });
+  assert.equal(rec.brandItemId, 'AS1234');
+  assert.equal(rec.brandItemIdSource, 'styleRef');
+  assert.equal(rec.flag, null);
+  const viaItemId = resolveBrandItemId({ item: { itemId: '24P AS1234' }, brand: 'Chanel' });
+  assert.equal(viaItemId.brandItemId, 'AS1234');
+  const { result } = await runSanity(makeEnv(), { receipts: [{
+    receiptKey: 'chanel-season', merchant: 'Chanel', date: '2026-04-03', time: '14:00:00',
+    payment: 'Visa', currency: 'GBP',
+    items: [{ brand: 'Chanel', item: 'Flap bag', styleRef: '24P AS1234', qty: 1, unitPrice: 100, amount: 100 }],
+  }] });
+  assert.equal(result.agreedRows[0].cells['品牌货号'], 'AS1234');
+  assert.equal(result.agreedRows[0].exportMeta.brandItemId, 'AS1234');
+  assert.equal(result.agreedRows[0].exportMeta.brandItemIdSource, 'styleRef');
+});
+
+test('unconfirmed printed brand code is not auto-corrected into the cell; alternative stays in the comment', async () => {
+  const table = { Synthetic: /^ZZ\d{4}$/ };
+  // l→1 is the OCR guess (ZZ9991). The official/format-fitting code is ZZ9999.
+  assert.equal(suggestedPrintedCodeAlternative('ZZ999l', 'Synthetic', table), 'ZZ9991');
+  const rec = resolveBrandItemId({ item: { itemId: 'ZZ999l' }, brand: 'Synthetic', formatTable: table });
+  // #20 empties the cell; printed-value-kept keeps the official/OCR alternative out of the item id.
+  assert.equal(rec.brandItemId, null);
+  assert.notEqual(rec.brandItemId, 'ZZ9999');
+  assert.notEqual(rec.brandItemId, 'ZZ9991');
+  assert.equal(rec.flag, PINK);
+  assert.equal(rec.reason, printedValueKeptReason('ZZ9991'));
+  assert.match(rec.reason, /ZZ9991/);
+  assert.equal(rec.printedValue, 'ZZ999l');
+  const { result } = await runSanity(makeEnv(), { receipts: [{
+    receiptKey: 'ocr-keep', merchant: 'Test', date: '2026-04-03', time: '14:00:00',
+    payment: 'Visa', currency: 'GBP',
+    items: [{ brand: 'Synthetic', item: 'Tote bag', itemId: 'ZZ999l', qty: 1, unitPrice: 100, amount: 100 }],
+  }] }, { brandItemIdFormat: table });
+  const row = result.agreedRows[0];
+  assert.equal(row.cells['品牌货号'] || '', '');
+  assert.notEqual(row.cells['品牌货号'], 'ZZ9999');
+  assert.notEqual(row.cells['品牌货号'], 'ZZ999l');
+  assert.notEqual(row.cells['品牌货号'], 'ZZ9991');
+  assert.equal(row.exportMeta.brandItemId || '', '');
+  assert.equal(row.flags['品牌货号'], PINK);
+  assert.ok(result.readingErrors.some(e => e.col === '品牌货号' && e.reason === printedValueKeptReason('ZZ9991')));
+  assert.match(row.exportMeta.comments['品牌货号'] || '', /ZZ9991|ZZ999l/);
+  assert.match(row.exportMeta.brandItemIdReason, /ZZ9991/);
+});
+
+test('PR #1 checkBatchDateOutliers hook applies Pink and does not overwrite human_verified_unflagged locks', async () => {
+  const item = { brand: 'Chanel', item: 'Flap bag', itemId: 'A111', qty: 1, unitPrice: 10, amount: 10 };
+  const rec = (key) => ({
+    receiptKey: key, merchant: 'Selfridges', receiptReference: key.toUpperCase(), date: '2026-11-20', time: '12:00',
+    payment: 'Visa', currency: 'GBP', items: [{ ...item }],
+  });
+  const idle = await runSanity(makeEnv(), { mode: 'round1', receipts: [rec('date-idle')] });
+  assert.ok((idle.audit.trail || []).some(s => s.stage === 'pr1-batch-date-outlier' && s.applied === false));
+  assert.equal(idle.result.agreedRows[0].flags['采购时间'], undefined);
+
+  const env = makeEnv();
+  const lockedId = 'date-locked:0:u0';
+  await env.DB.prepare('INSERT OR IGNORE INTO human_verified_unflagged (row_id, col_key, verified_at) VALUES (?,?,?)')
+    .bind(lockedId, '采购时间', new Date().toISOString()).run();
+  const called = [];
+  const checkBatchDateOutliers = (units, { now } = {}) => {
+    assert.ok(Array.isArray(units));
+    assert.ok(now instanceof Date);
+    called.push(...units.map(u => u.rowId));
+    return units.map(u => ({ rowId: u.rowId, field: '采购时间', flag: '#FECDD3', reason: 'date outlier' }));
+  };
+  const hooked = await runSanity(env, { mode: 'round1', receipts: [rec('date-open'), rec('date-locked')] }, { checkBatchDateOutliers });
+  assert.ok(called.includes('date-open:0:u0') && called.includes('date-locked:0:u0'));
+  assert.ok((hooked.audit.trail || []).some(s => s.stage === 'pr1-batch-date-outlier' && s.applied === true && s.name === 'checkBatchDateOutliers'));
+  const open = hooked.result.agreedRows.find(r => r.receiptKey === 'date-open');
+  const locked = hooked.result.agreedRows.find(r => r.receiptKey === 'date-locked');
+  assert.equal(open.flags['采购时间'], PINK);
+  assert.ok(hooked.result.readingErrors.some(e => e.rowId === open.rowId && e.col === '采购时间' && e.reason === 'date outlier'));
+  assert.equal(locked.flags['采购时间'], undefined);
+  assert.ok(!hooked.result.readingErrors.some(e => e.rowId === locked.rowId && e.col === '采购时间'));
+  assert.equal(typeof maybeApplyPr1BatchDateOutlierCheck, 'function');
 });

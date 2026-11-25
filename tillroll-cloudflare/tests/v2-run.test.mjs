@@ -39,7 +39,7 @@ test('#v2-run is in the workspace actions row and v2.js binds it', () => {
   assert.deepEqual(hideRules, ['.v2-static .v2-only{display:none!important}']);
   const v2 = read('v2.js');
   assert.match(v2, /function init\(\) \{\s*\$\('#v2-run'\)\?\.addEventListener\('click',\s*runSanity\);/s);
-  assert.match(v2, /if \(location\.protocol\.startsWith\('http'\) && !location\.hostname\.endsWith\('github\.io'\)\) init\(\);\s*else document\.documentElement\.classList\.add\('v2-static'\);/);
+  assert.match(v2, /if \(hasDom && location\.protocol\.startsWith\('http'\) && !location\.hostname\.endsWith\('github\.io'\)\) init\(\);\s*else if \(hasDom\) document\.documentElement\.classList\.add\('v2-static'\);/);
   assert.equal(/tillroll-v2\.pages\.dev/.test('tillroll-v2.pages.dev') && !'tillroll-v2.pages.dev'.endsWith('github.io'), true);
   // The button lives only in the workspace heading actions, not a buried panel.
   assert.equal(workspace.includes('id="v2-run"'), true);
@@ -64,8 +64,10 @@ test("upload with default reader mode 'local' makes zero /api/* fetches", () => 
   assert.match(app, /modelEnabled\?extractAI\(r\.file,chosenKey,1,\[\]\):Promise\.resolve\(null\)/);
   assert.match(app, /if\(r\.usedAI\)\{\s*next=prepareModelReading\(recoverPhotoItemIds\(await extractAI\(r\.file,chosenKey,2,r\.reasons\),r\.ocr\),r\.ocr\);/);
 
-  const ocrFetch = extract.match(/const viaServer = apiKey\.trim\(\)==='__server__';\s*const response = viaServer\s*\? await fetch\('\/api\/ocr'/s);
+  const ocrFetch = extract.match(/const viaServer = shouldCallServerOcr\(apiKey\);\s*const response = viaServer\s*\? await fetch\('\/api\/ocr'/s);
   assert.ok(ocrFetch, '/api/ocr must be gated on the Tillroll-server key, not called for on-device OCR');
+  assert.match(extract, /export function shouldCallServerOcr/);
+
 
   // No /api/* fetch in app.js itself. extract.js calls /api/ocr only for the server reader.
   // v2.js calls /api on explicit clicks and page-load session/quota. v2-excel.js calls
@@ -91,7 +93,7 @@ test("upload with default reader mode 'local' makes zero /api/* fetches", () => 
   const runSanity = v2.slice(v2.indexOf('async function runSanity()'), v2.indexOf('function renderResult'));
   assert.match(runSanity, /api\('\/api\/batches'/);
   assert.match(runSanity, /api\('\/api\/sanity-run'/);
-  const init = v2.slice(v2.indexOf('function init()'), v2.indexOf('if (location.protocol'));
+  const init = v2.slice(v2.indexOf('function init()'), v2.indexOf('const hasDom'));
   assert.match(init, /refreshQuota\(\); refreshDrive\(\);/);
   assert.equal(init.includes('/api/sanity-run'), false);
   assert.equal(init.includes('/api/lookup'), false);

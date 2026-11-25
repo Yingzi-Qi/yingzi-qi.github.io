@@ -1,21 +1,28 @@
 import { runSanity, validateInput } from './sanity.js';
+import { sanitiseRunInput } from './sanitise-run-input.js';
 import { nowIso, randomId } from './http.js';
 const STALE_MS = 90_000;
+// Live (unsanitised) inputs for processRun in the same isolate as createRun.
+// D1 only stores the redacted clone; a later retry of a stale run falls back to input_json.
+const liveInputs = new Map();
 export async function createRun(env, body) {
   const input = validateInput(body);
+  const stored = sanitiseRunInput(input);
   const runId = randomId('run_');
   const t = nowIso();
   await env.DB.batch([
-    env.DB.prepare('INSERT INTO sanity_runs (run_id, batch_id, mode, status, input_json, created_at, updated_at) VALUES (?,?,?,?,?,?,?)').bind(runId, input.batchId, input.mode, 'queued', JSON.stringify(input), t, t),
+    env.DB.prepare('INSERT INTO sanity_runs (run_id, batch_id, mode, status, input_json, created_at, updated_at) VALUES (?,?,?,?,?,?,?)').bind(runId, input.batchId, input.mode, 'queued', JSON.stringify(stored), t, t),
     env.DB.prepare('INSERT INTO batches (batch_id, created_at, state, receipt_count) VALUES (?,?,?,?) ON CONFLICT(batch_id) DO UPDATE SET state=excluded.state, receipt_count=excluded.receipt_count').bind(input.batchId, t, input.mode === 'round1' ? 'Reading & Sanity' : 'Round 2 Look-up', input.receipts.length),
   ]);
+  liveInputs.set(runId, input);
   return { runId, batchId: input.batchId, status: 'queued', pollAfterMs: 1500 };
 }
-export async function processRun(env, runId, deps) {
+export async function processRun(env, runId, deps, liveInput) {
   const claimed = await env.DB.prepare(`UPDATE sanity_runs SET status='running', updated_at=? WHERE run_id=? AND (status='queued' OR (status='running' AND updated_at < ?)) RETURNING input_json`)
     .bind(nowIso(), runId, new Date(Date.now() - STALE_MS).toISOString()).first();
   if (!claimed) return;
-  const input = JSON.parse(claimed.input_json);
+  const input = liveInput ?? liveInputs.get(runId) ?? JSON.parse(claimed.input_json);
+  liveInputs.delete(runId);
   try {
     const { result, audit } = await runSanity(env, input, deps);
     const t = nowIso();
