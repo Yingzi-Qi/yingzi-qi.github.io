@@ -192,8 +192,12 @@ async function verifierStage(rows, receipt, ctx) {
         if (!row._skipOfficialName) { row.previousName = c['品名']; c['品名'] = m.officialValue; }
         addFlag(row, '品名', AMBER, `Receipt name "${m.receiptValue ?? ''}" vs official "${m.officialValue}".`, { confidence: top.confidence, sourceUrls: top.sourceUrls, mismatches });
       } else if (m.field === 'price' && !ctx.locked(row.rowId, '采购商品原价')) {
-        noteMismatch(row, '采购商品原价', m.receiptValue, m.officialValue, 'receipt');
-        addFlag(row, '采购商品原价', AMBER, `Receipt price ${m.receiptValue} vs official ${m.officialValue}; receipt value kept.`, { confidence: top.confidence, sourceUrls: top.sourceUrls, mismatches });
+        if (m.reason === 'official price unavailable' || m.officialValue === null || m.officialValue === undefined) {
+          addFlag(row, '采购商品原价', AMBER, 'official price unavailable', { confidence: top.confidence, sourceUrls: top.sourceUrls, mismatches });
+        } else {
+          noteMismatch(row, '采购商品原价', m.receiptValue, m.officialValue, 'receipt');
+          addFlag(row, '采购商品原价', AMBER, `Receipt price ${m.receiptValue} vs official ${m.officialValue}; receipt value kept.`, { confidence: top.confidence, sourceUrls: top.sourceUrls, mismatches });
+        }
       } else if (m.field === 'itemId' && !ctx.locked(row.rowId, '品牌货号')) {
         noteMismatch(row, '品牌货号', m.receiptValue, m.officialValue, 'receipt');
         addFlag(row, '品牌货号', AMBER, `Receipt item ID "${m.receiptValue}" vs official "${m.officialValue}"; receipt value kept.`, { confidence: top.confidence, sourceUrls: top.sourceUrls, mismatches });

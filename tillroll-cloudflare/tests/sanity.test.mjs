@@ -229,3 +229,24 @@ test('printed per-item discount is exact; a shared receipt discount is Amber and
   assert.equal(rows[0].cells['采购小票id'], rows[1].cells['采购小票id']);
   assert.equal(rows[0].cells['采购时间'], rows[1].cells['采购时间']);
 });
+
+test('official match with no official price flags Amber official price unavailable and keeps the printed price', async () => {
+  const env = makeEnv(KEYS);
+  const f = mockFetch([{
+    brand: 'Chanel', officialName: 'Mini classic handbag', itemId: 'A69900', price: null,
+    url: 'https://www.chanel.com/gb/fashion/p/A69900/',
+    title: 'Mini classic handbag | Chanel',
+    description: 'A69900. Discover the collection.',
+  }], { brave: 0, gemini: 0 }, {
+    geminiCandidates: [{ brand: 'Chanel', officialName: 'Mini classic handbag', itemId: 'A69900', price: null, sourceUrls: ['https://www.chanel.com/gb/fashion/p/A69900/'] }],
+  });
+  const { result } = await runSanity(env, { batchId: 'np', mode: 'round1', receipts: [{
+    receiptKey: 'np', merchant: 'Chanel', receiptReference: 'N1', date: '2026-11-20', time: '12:00', payment: 'Visa', currency: 'GBP',
+    items: [{ brand: 'Chanel', item: 'Classic Flap Mini Bag', itemId: 'A69900', qty: 1, unitPrice: 4950, amount: 4950 }],
+  }] }, { fetchImpl: f, lookup });
+  const row = result.agreedRows[0];
+  assert.equal(row.cells['采购商品原价'], 4950);
+  assert.equal(row.flags['采购商品原价'], AMBER);
+  assert.ok(row.mismatches.some(m => m.field === 'price' && m.reason === 'official price unavailable' && m.officialValue === null && m.receiptValue === 4950));
+  assert.ok(JSON.stringify(row).includes('official price unavailable'));
+});

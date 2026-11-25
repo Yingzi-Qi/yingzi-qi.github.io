@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { makeEnv, mockFetch, CATALOGUE } from './helpers.mjs';
-import { lookup, invalidate, officialMismatches, rankPriceFallback, priceFallbackGapBand } from '../functions/_lib/lookup.js';
+import { lookup, invalidate, officialMismatches, rankPriceFallback, priceFallbackGapBand, parsePrice } from '../functions/_lib/lookup.js';
 import { keys } from '../functions/_lib/cache.js';
 import { status } from '../functions/_lib/quota.js';
 const KEYS = { BRAVE_API_KEY: 'test-brave', GEMINI_API_KEY: 'test-gemini' };
@@ -256,4 +256,129 @@ test('any paused source sets paused: true and unavailableReason, even if the oth
   assert.ok(r.unavailableReason);
   assert.ok(Array.isArray(r.quotaGuard) && r.quotaGuard.length);
   assert.equal(r.flag, '#FDE68A');
+});
+
+
+test('parsePrice handles common official-site formats including From and European decimals', () => {
+  const cases = [
+    ['£1,234.00', 1234, 'GBP'],
+    ['From £1,234.00', 1234, 'GBP'],
+    ['from: £ 4950', 4950, 'GBP'],
+    ['£4950', 4950, 'GBP'],
+    ['GBP 1,234.00', 1234, 'GBP'],
+    ['1,234.00 GBP', 1234, 'GBP'],
+    ['€1.234,00', 1234, 'EUR'],
+    ['EUR 1.234,00', 1234, 'EUR'],
+    ['1.234,00 €', 1234, 'EUR'],
+    ['From €1.234,00', 1234, 'EUR'],
+    ['$1,234.00', 1234, 'USD'],
+    ['USD 1234', 1234, 'USD'],
+    ['From $99.50', 99.5, 'USD'],
+  ];
+  for (const [text, price, currency] of cases) {
+    const got = parsePrice(text);
+    assert.deepEqual(got, { price, currency }, text);
+  }
+  assert.deepEqual(parsePrice('1.234,00', 'EUR', { allowBare: true }), { price: 1234, currency: 'EUR' });
+  assert.deepEqual(parsePrice(4950, 'GBP'), { price: 4950, currency: 'GBP' });
+  assert.equal(parsePrice('Mini classic handbag A69900 — Fashion'), null);
+});
+
+test('official page snippet and grounded result populate the candidate official price and currency', async () => {
+  const env = makeEnv(KEYS);
+  // Gemini returns no numeric price; Brave title shows "From £4,950.00".
+  const f = mockFetch([{
+    brand: 'Chanel', officialName: 'Classic Flap Mini Bag', itemId: 'A69900', price: null, currency: 'GBP',
+    url: 'https://www.chanel.com/gb/fashion/p/A69900/',
+    title: 'Classic Flap Mini Bag | From £4,950.00',
+    description: 'A69900. Discover the collection.',
+  }], { brave: 0, gemini: 0 }, {
+    geminiCandidates: [{ brand: 'Chanel', officialName: 'Classic Flap Mini Bag', itemId: 'A69900', price: null, currency: null, sourceUrls: ['https://www.chanel.com/gb/fashion/p/A69900/'] }],
+  });
+  const r = await lookup(env, { brand: 'Chanel', itemId: 'A69900', name: 'Classic Flap Mini Bag', price: 4950, currency: 'GBP' }, { fetchImpl: f });
+  assert.equal(r.candidates[0].price, 4950);
+  assert.equal(r.candidates[0].currency, 'GBP');
+  assert.equal(r.candidates[0].onOfficialSite, true);
+  assert.ok(!r.mismatches.some(m => m.reason === 'official price unavailable'));
+
+  const env2 = makeEnv(KEYS);
+  const f2 = mockFetch([{
+    brand: 'Chanel', officialName: 'Classic Flap Mini Bag', itemId: 'A69900',
+    url: 'https://www.chanel.com/gb/fashion/p/A69900/',
+    title: 'Classic Flap Mini Bag | Chanel',
+    description: 'A69900 in denim.',
+  }], { brave: 0, gemini: 0 }, {
+    geminiCandidates: [{ brand: 'Chanel', officialName: 'Classic Flap Mini Bag', itemId: 'A69900', price: '€1.234,00', sourceUrls: ['https://www.chanel.com/gb/fashion/p/A69900/'] }],
+  });
+  const r2 = await lookup(env2, { brand: 'Chanel', itemId: 'A69900' }, { fetchImpl: f2 });
+  assert.equal(r2.candidates[0].price, 1234);
+  assert.equal(r2.candidates[0].currency, 'EUR');
+});
+
+test('sourcesQueried lists every source actually called, consistent with quota counters, even if Gemini errors', async () => {
+  const env = makeEnv(KEYS);
+  const f = mockFetch(CATALOGUE, { brave: 0, gemini: 0 }, { geminiStatus: 500 });
+  const r = await lookup(env, { brand: 'Chanel', itemId: 'A69900', price: 4950, currency: 'GBP' }, { fetchImpl: f });
+  assert.equal(f.calls.brave, 1);
+  assert.equal(f.calls.gemini, 1);
+  assert.deepEqual(r.sourcesQueried, ['brave', 'gemini-grounding']);
+  const s = await status(env);
+  assert.equal(s.brave.used, 1);
+  assert.equal(s.geminiGroundingDaily.used, 1);
+  assert.equal(s.geminiGroundingMonthly.used, 1);
+  assert.ok(r.candidates.length, 'Brave can still return an official match');
+  assert.equal(r.candidates[0].itemId, 'A69900');
+  assert.equal(r.candidates[0].price, 4950);
+});
+
+test('official match with a null official price is Amber with official price unavailable, never a silent pass', async () => {
+  const env = makeEnv(KEYS);
+  const f = mockFetch([{
+    brand: 'Chanel',
+    officialName: 'Mini classic handbag, Denim & gold metal, dark blue & orange — Fashion',
+    itemId: 'A69900',
+    price: null,
+    currency: 'GBP',
+    url: 'https://www.chanel.com/gb/fashion/p/A69900/',
+    title: 'Mini classic handbag, Denim & gold metal, dark blue & orange — Fashion',
+    description: 'A69900. Discover the CHANEL collection.',
+  }], { brave: 0, gemini: 0 }, {
+    geminiCandidates: [{
+      brand: 'Chanel',
+      officialName: 'Mini classic handbag, Denim & gold metal, dark blue & orange — Fashion',
+      itemId: 'A69900',
+      price: null,
+      currency: 'GBP',
+      sourceUrls: ['https://www.chanel.com/gb/fashion/p/A69900/'],
+    }],
+  });
+  const r = await lookup(env, { brand: 'Chanel', itemId: 'A69900', name: 'Classic Flap Mini Bag', price: 4950, currency: 'GBP' }, { fetchImpl: f });
+  assert.equal(r.candidates[0].onOfficialSite, true);
+  assert.equal(r.candidates[0].matchType, 'id');
+  assert.equal(r.candidates[0].price, null);
+  assert.equal(r.flag, '#FDE68A');
+  assert.equal(r.flagReason, 'official price unavailable');
+  const m = (r.mismatches || []).find(x => x.field === 'price');
+  assert.ok(m, 'price mismatch present');
+  assert.equal(m.reason, 'official price unavailable');
+  assert.equal(m.officialValue, null);
+  assert.equal(m.receiptValue, 4950);
+  assert.deepEqual(r.candidates[0].mismatches.find(x => x.field === 'price'), m);
+
+  const env2 = makeEnv(KEYS);
+  const f2 = mockFetch([{
+    brand: 'Chanel', officialName: 'Classic Flap Mini Bag', itemId: 'A69900', price: null,
+    url: 'https://www.chanel.com/gb/fashion/p/A69900/',
+    title: 'Classic Flap Mini Bag | Chanel',
+    description: 'A69900 official page.',
+  }], { brave: 0, gemini: 0 }, {
+    geminiCandidates: [{ brand: 'Chanel', officialName: 'Classic Flap Mini Bag', itemId: 'A69900', price: null, sourceUrls: ['https://www.chanel.com/gb/fashion/p/A69900/'] }],
+  });
+  const r2 = await lookup(env2, { brand: 'Chanel', itemId: 'A69900' }, { fetchImpl: f2 });
+  const m2 = r2.mismatches.find(x => x.field === 'price');
+  assert.equal(r2.flag, '#FDE68A');
+  assert.equal(r2.flagReason, 'official price unavailable');
+  assert.equal(m2.reason, 'official price unavailable');
+  assert.equal(m2.officialValue, null);
+  assert.ok(!('receiptValue' in m2), 'never emit receiptValue null for an unprinted field');
 });

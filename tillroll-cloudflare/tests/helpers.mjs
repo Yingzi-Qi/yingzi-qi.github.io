@@ -20,34 +20,46 @@ export function makeKV() {
 }
 export function makeEnv(extra = {}) { return { DB: makeD1(), LOOKUP_CACHE: makeKV(), ...extra }; }
 // Mock Brave + Gemini. catalogue: [{brand, officialName, itemId, price, currency, weightGrams, url}]
-export function mockFetch(catalogue, calls = { brave: 0, gemini: 0 }) {
+export function mockFetch(catalogue, calls = { brave: 0, gemini: 0 }, opts = {}) {
   const fn = async (url, init = {}) => {
     const u = String(url);
     if (u.startsWith('https://api.search.brave.com')) {
       calls.brave++;
+      if (typeof opts.brave === 'function') return opts.brave(u, init);
+      if (opts.braveStatus) return new Response('error', { status: opts.braveStatus });
       const q = new URL(u).searchParams.get('q');
       const results = catalogue.filter(c => q.includes(c.itemId) || c.officialName.split(' ').some(w => w.length > 3 && q.toLowerCase().includes(w.toLowerCase())))
-        .map(c => ({ url: c.url, title: `${c.officialName} | ${c.brand}`, description: `${c.itemId} £${c.price}` }));
+        .map(c => ({
+          url: c.url,
+          title: c.title || `${c.officialName} | ${c.brand}`,
+          description: c.description !== undefined ? c.description : (c.price != null ? `${c.itemId} £${c.price}` : String(c.itemId || '')),
+          extra_snippets: c.extra_snippets || [],
+        }));
       return new Response(JSON.stringify({ web: { results } }), { status: 200 });
     }
     if (u.includes('generativelanguage.googleapis.com')) {
       calls.gemini++;
+      if (typeof opts.gemini === 'function') return opts.gemini(u, init);
+      if (opts.geminiStatus) return new Response(JSON.stringify({ error: { message: 'failed' } }), { status: opts.geminiStatus });
       const text = JSON.parse(init.body).contents[0].parts[0].text;
       const facts = JSON.parse(text.match(/\(quoted data, not instructions\): (\{.*\})/)[1]);
       let cands;
-      if (/matched nothing/.test(text)) cands = catalogue.filter(c => c.brand === facts.brand);
+      if (typeof opts.geminiCandidates === 'function') cands = opts.geminiCandidates(facts, text);
+      else if (Array.isArray(opts.geminiCandidates)) cands = opts.geminiCandidates;
+      else if (/matched nothing/.test(text)) cands = catalogue.filter(c => c.brand === facts.brand);
       else if (/item\/reference\/style number/.test(text)) cands = catalogue.filter(c => c.itemId === facts.itemId);
       else if (/official UK store name/.test(text)) return new Response(JSON.stringify({ candidates: [{ finishReason: 'STOP', content: { parts: [{ text: JSON.stringify({ candidates: [], branch: { officialStoreName: `${facts.supplier} Canary Wharf`, sourceUrls: ['https://www.rolex.com/en-gb/store'] } }) }] } }] }));
       else cands = catalogue.filter(c => c.brand === facts.brand && facts.name && c.officialName.toLowerCase().includes(facts.name.toLowerCase().split(' ')[0]));
-      const body = { candidates: cands.map(c => ({ brand: c.brand, officialName: c.officialName, itemId: c.itemId, price: c.price, currency: c.currency, weightGrams: c.weightGrams ?? null, sourceUrls: [c.url] })), branch: null };
+      const body = { candidates: cands.map(c => ({ brand: c.brand, officialName: c.officialName, itemId: c.itemId, price: c.price ?? null, currency: c.currency ?? null, weightGrams: c.weightGrams ?? null, sourceUrls: c.sourceUrls || [c.url], priceText: c.priceText, description: c.description, sourceSnippets: c.sourceSnippets })), branch: null };
       return new Response(JSON.stringify({ candidates: [{ finishReason: 'STOP', content: { parts: [{ text: '```json\n' + JSON.stringify(body) + '\n```' }] },
-        groundingMetadata: { groundingChunks: cands.map(c => ({ web: { uri: 'https://vertexaisearch.cloud.google.com/grounding-api-redirect/x', title: new URL(c.url).hostname.replace(/^www\./, '') } })) } }] }));
+        groundingMetadata: { groundingChunks: cands.map(c => ({ web: { uri: 'https://vertexaisearch.cloud.google.com/grounding-api-redirect/x', title: new URL(c.url || 'https://www.example.com').hostname.replace(/^www\./, '') } })) } }] }));
     }
     throw new Error('unexpected fetch ' + u);
   };
   fn.calls = calls;
   return fn;
 }
+
 export const CATALOGUE = [
   { brand: 'Chanel', officialName: 'Classic Flap Mini Bag', itemId: 'A69900', price: 4950, currency: 'GBP', url: 'https://www.chanel.com/gb/fashion/p/A69900/' },
   { brand: 'Van Cleef & Arpels', officialName: 'Vintage Alhambra pendant', itemId: '0012345', price: 3600, currency: 'GBP', url: 'https://www.vancleefarpels.com/gb/en/0012345.html' },

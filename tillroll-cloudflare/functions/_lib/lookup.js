@@ -122,11 +122,80 @@ export function rankPriceFallback(req, candidates) {
   return out;
 }
 
-function priceFromText(text, currency) {
-  const sym = { GBP: '£', EUR: '€', USD: '$' }[currency || 'GBP'] || '£';
-  const re = new RegExp(`\\${sym}\\s?([0-9]{1,3}(?:[,][0-9]{3})*(?:\\.[0-9]{2})?|[0-9]+(?:\\.[0-9]{2})?)`);
-  const m = String(text || '').match(re);
-  return m ? Number(m[1].replace(/,/g, '')) : null;
+const AMOUNT = '([0-9]{1,3}(?:[.,][0-9]{3})+(?:[.,][0-9]{1,2})?|[0-9]+(?:[.,][0-9]{1,2})?)(?![0-9])';
+
+function parseAmount(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return null;
+  const lastComma = s.lastIndexOf(','), lastDot = s.lastIndexOf('.');
+  let normalised;
+  if (lastComma !== -1 && lastDot !== -1) {
+    normalised = lastComma > lastDot ? s.replace(/\./g, '').replace(',', '.') : s.replace(/,/g, '');
+  } else if (lastComma !== -1) {
+    normalised = /^\d{1,3}(,\d{3})+$/.test(s) ? s.replace(/,/g, '') : s.replace(',', '.');
+  } else if (lastDot !== -1) {
+    normalised = /^\d{1,3}(\.\d{3})+$/.test(s) ? s.replace(/\./g, '') : s;
+  } else {
+    normalised = s;
+  }
+  const n = Number(normalised);
+  return Number.isFinite(n) ? n : null;
+}
+
+function currencyFromText(text, hint) {
+  const t = String(text || '');
+  if (/£|&pound;|&#163;|(?:^|[^A-Z])GBP(?:[^A-Z]|$)/i.test(t)) return 'GBP';
+  if (/€|&euro;|&#8364;|(?:^|[^A-Z])EUR(?:[^A-Z]|$)/i.test(t)) return 'EUR';
+  if (/\$|&dollar;|(?:^|[^A-Z])USD(?:[^A-Z]|$)/i.test(t)) return 'USD';
+  return hint ? String(hint).toUpperCase() : null;
+}
+
+// Parse a displayed official price. Handles £1,234.00, € / $, 1.234,00, and a leading 'From'.
+// For free text (snippets, titles) a currency marker, ISO code, or 'From' is required
+// so item IDs are not mistaken for prices. Dedicated price fields may be bare amounts.
+export function parsePrice(text, hintCurrency, { allowBare = false } = {}) {
+  if (text === null || text === undefined || text === '') return null;
+  if (typeof text === 'number') {
+    return Number.isFinite(text) ? { price: text, currency: hintCurrency ? String(hintCurrency).toUpperCase() : null } : null;
+  }
+  const t = String(text).replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+  const hint = hintCurrency ? String(hintCurrency).toUpperCase() : null;
+  const patterns = [
+    new RegExp(`(?:£|€|\\$|GBP|EUR|USD)\\s*${AMOUNT}`, 'i'),
+    new RegExp(`${AMOUNT}\\s*(?:£|€|\\$|GBP|EUR|USD)`, 'i'),
+    new RegExp(`\\bfrom\\b[:\\s-]*${AMOUNT}`, 'i'),
+  ];
+  for (const re of patterns) {
+    const m = t.match(re);
+    if (!m) continue;
+    const price = parseAmount(m[1]);
+    if (price === null) continue;
+    return { price, currency: currencyFromText(m[0], hint) };
+  }
+  if (allowBare) {
+    const m = t.match(new RegExp(`^${AMOUNT}$`));
+    if (m) {
+      const price = parseAmount(m[1]);
+      if (price !== null) return { price, currency: hint };
+    }
+  }
+  return null;
+}
+
+function priceFromField(value, hintCurrency) {
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value === 'number') return parsePrice(value, hintCurrency);
+  return parsePrice(value, hintCurrency, { allowBare: true });
+}
+
+function priceFromSourceText(text, hintCurrency) {
+  return parsePrice(text, hintCurrency);
+}
+
+function applyParsedPrice(target, parsed, fallbackCurrency) {
+  if (!parsed) return;
+  target.price = parsed.price;
+  target.currency = parsed.currency || target.currency || fallbackCurrency || null;
 }
 
 // Turn raw source output into contract candidates.
@@ -140,8 +209,10 @@ export function buildCandidates(req, stage, brave, gemini) {
     const brand = canonicalBrand(str(g.brand)) || req.brand;
     const officialUrl = urls.some(u => isOfficialUrl(u, brand));
     const braveOfficialHit = braveResults.some(r => isOfficialUrl(r.url, brand) && (g.itemId && compact(r.url + ' ' + r.title + ' ' + r.description).includes(compact(g.itemId))));
+    const hintCur = str(g.currency)?.toUpperCase() || req.currency;
+    const shown = priceFromField(g.price, hintCur) || priceFromSourceText([g.officialName, g.priceText, g.description, ...(Array.isArray(g.sourceSnippets) ? g.sourceSnippets : [])].filter(Boolean).join(' '), hintCur);
     list.push({
-      brand, officialName: str(g.officialName), itemId: str(g.itemId), price: num(g.price), currency: str(g.currency)?.toUpperCase() || req.currency,
+      brand, officialName: str(g.officialName), itemId: str(g.itemId), price: shown?.price ?? null, currency: shown?.currency || hintCur,
       weightGrams: num(g.weightGrams), sourceUrls: urls, onOfficialSite: Boolean((officialUrl && groundingOfficial) || braveOfficialHit), _sources: new Set(['gemini-grounding']),
     });
   }
@@ -152,9 +223,16 @@ export function buildCandidates(req, stage, brave, gemini) {
       if (!hay.includes(compact(req.itemId))) continue;
       const official = isOfficialUrl(r.url, req.brand);
       const existing = list.find(c => c.itemId && compact(c.itemId) === compact(req.itemId));
-      if (existing) { existing._sources.add('brave'); if (!existing.sourceUrls.includes(r.url)) existing.sourceUrls.push(r.url); if (official) existing.onOfficialSite = true; continue; }
+      const snippetPrice = priceFromSourceText(`${r.title || ''} ${r.description || ''} ${r.extra || ''}`, req.currency);
+      if (existing) {
+        existing._sources.add('brave');
+        if (!existing.sourceUrls.includes(r.url)) existing.sourceUrls.push(r.url);
+        if (official) existing.onOfficialSite = true;
+        if (existing.price === null || existing.price === undefined) applyParsedPrice(existing, snippetPrice, req.currency);
+        continue;
+      }
       if (!official && req.brand && officialDomains(req.brand).length) continue; // retailers only corroborate
-      list.push({ brand: req.brand, officialName: str(r.title?.split(/\s[|–-]\s/)[0]), itemId: req.itemId, price: priceFromText(`${r.description} ${r.extra}`, req.currency), currency: req.currency,
+      list.push({ brand: req.brand, officialName: str(r.title?.split(/\s[|–-]\s/)[0]), itemId: req.itemId, price: snippetPrice?.price ?? null, currency: snippetPrice?.currency || req.currency,
         weightGrams: null, sourceUrls: [r.url], onOfficialSite: official || (!req.brand && isUkRetailerUrl(r.url)), _sources: new Set(['brave']) });
     }
   } else {
@@ -204,16 +282,21 @@ async function runStage(env, req, stage, key, deps, trail) {
     braveSearch(env, braveQuery(req, stage), deps),
     geminiGrounded(env, req, stage, deps),
   ]);
+  // sourcesQueried lists every source that was actually called (quota reserved),
+  // including a later HTTP/parse error, so it stays consistent with the counters.
   const sourcesQueried = [];
-  if (brave.results) sourcesQueried.push('brave');
-  if (gemini.parsed !== undefined) sourcesQueried.push('gemini-grounding');
+  if (!brave.skipped && !brave.paused) sourcesQueried.push('brave');
+  if (!gemini.skipped && !gemini.paused) sourcesQueried.push('gemini-grounding');
   const problems = [brave, gemini].map(s => s.paused || s.error || s.skipped).filter(Boolean);
   const paused = [brave.paused, gemini.paused].filter(Boolean);
+  const braveAnswered = Array.isArray(brave.results);
+  const geminiAnswered = gemini.parsed !== undefined;
   if (!sourcesQueried.length) { trail.push({ stage, key, cache: false, problems }); return { cacheHit: false, sourcesQueried, candidates: [], unavailable: problems, paused }; }
   const candidates = buildCandidates(req, stage, brave, gemini);
   const value = { sourcesQueried, candidates, storedAt: nowIso() };
   // Only cache complete answers (both sources answered, or one answered with results).
-  if (candidates.length || sourcesQueried.length === 2) await cachePut(env, key, value, candidates.length ? TTL_SECONDS : NEGATIVE_TTL_SECONDS);
+  // "Answered" is not the same as "called": an error after reserve is called but not answered.
+  if (candidates.length || (braveAnswered && geminiAnswered)) await cachePut(env, key, value, candidates.length ? TTL_SECONDS : NEGATIVE_TTL_SECONDS);
   trail.push({ stage, key, cache: false, problems });
   return { ...value, cacheHit: false, unavailable: problems, paused };
 }
@@ -257,7 +340,12 @@ export function officialMismatches(req, candidate) {
     out.push({ field: 'itemId', receiptValue: receiptId, officialValue: officialId });
   }
   const receiptPrice = req.price, officialPrice = candidate.price;
-  if (officialPrice !== null && officialPrice !== undefined && receiptPrice !== null && receiptPrice !== undefined) {
+  const officialPriceMissing = candidate.onOfficialSite && (officialPrice === null || officialPrice === undefined);
+  if (officialPriceMissing) {
+    const m = { field: 'price', officialValue: null, reason: 'official price unavailable' };
+    if (receiptPrice !== null && receiptPrice !== undefined) m.receiptValue = receiptPrice;
+    out.push(m);
+  } else if (officialPrice !== null && officialPrice !== undefined && receiptPrice !== null && receiptPrice !== undefined) {
     const sameCurrency = !req.currency || !candidate.currency || req.currency === candidate.currency;
     if (!sameCurrency || Math.abs(Number(officialPrice) - Number(receiptPrice)) > 0.005) {
       out.push({ field: 'price', receiptValue: receiptPrice, officialValue: officialPrice });
@@ -301,6 +389,8 @@ export async function lookup(env, body, deps = {}) {
   // lookup actually came back with no match — never when that lookup was unavailable or paused.
   // A confirmed no-match is a cache hit (empty id results are only cached when both sources answered)
   // or a live answer from both sources with no pause, error or skip.
+  // sourcesQueried lists calls (quota reserved), so a post-reserve error still appears there;
+  // unavailable/paused are what confirm both sources actually answered.
   const idConfirmedNoMatch = Boolean(
     req.itemId && !idMatched && idResult && !idResult.candidates.length &&
     (idResult.cacheHit || ((idResult.sourcesQueried || []).length === 2 && !(idResult.paused || []).length && !(idResult.unavailable || []).length))
@@ -329,6 +419,8 @@ export async function lookup(env, body, deps = {}) {
   if (priceFallback || mismatches.length || (itemAttempted && !out.candidates.length) || out.paused || out.unavailableReason || out.quotaGuard?.length) {
     out.flag = '#FDE68A';
   }
+  const priceUnavailable = (out.mismatches || []).find(m => m.reason === 'official price unavailable');
+  if (priceUnavailable) out.flagReason = 'official price unavailable';
   if (env?.DB) {
     try {
       await env.DB.prepare('INSERT INTO lookup_audit (created_at, cache_key, cache_hit, sources_queried, request_json, candidate_count, top_match_type, paused_reason) VALUES (?,?,?,?,?,?,?,?)')

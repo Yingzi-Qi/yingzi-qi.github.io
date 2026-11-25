@@ -10,7 +10,12 @@ export async function braveSearch(env, query, { fetchImpl = fetch } = {}) {
   const q = await reserve(env, 'brave');
   if (!q.ok) return { paused: q.reason };
   const url = `${BRAVE_URL}?${new URLSearchParams({ q: query.slice(0, 380), count: '10', country: 'gb', search_lang: 'en', safesearch: 'moderate' })}`;
-  const res = await fetchImpl(url, { headers: { Accept: 'application/json', 'X-Subscription-Token': env.BRAVE_API_KEY } });
+  let res;
+  try {
+    res = await fetchImpl(url, { headers: { Accept: 'application/json', 'X-Subscription-Token': env.BRAVE_API_KEY } });
+  } catch {
+    return { error: 'Brave Search failed (network error).' };
+  }
   if (res.status === 429) return { error: 'Brave Search rate limit (429).', status: 429 };
   if (!res.ok) return { error: `Brave Search failed (${res.status}).`, status: res.status };
   const data = await res.json();
@@ -49,10 +54,14 @@ export async function geminiGrounded(env, req, mode, { fetchImpl = fetch } = {})
   const model = env.GEMINI_LOOKUP_MODEL || 'gemini-2.5-flash';
   const body = { contents: [{ role: 'user', parts: [{ text: buildGeminiPrompt(req, mode) }] }], tools: [{ google_search: {} }], generationConfig: { temperature: 0 } };
   let res;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    res = await fetchImpl(GEMINI_URL(model), { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY }, body: JSON.stringify(body) });
-    if (res.status !== 429 && res.status !== 503) break;
-    await new Promise(r => setTimeout(r, 800 * (attempt + 1)));
+  try {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      res = await fetchImpl(GEMINI_URL(model), { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY }, body: JSON.stringify(body) });
+      if (res.status !== 429 && res.status !== 503) break;
+      await new Promise(r => setTimeout(r, 800 * (attempt + 1)));
+    }
+  } catch {
+    return { error: 'Gemini grounding failed (network error).' };
   }
   if (res.status === 429) return { error: 'Gemini rate limit (429).', status: 429 };
   if (!res.ok) return { error: `Gemini grounding failed (${res.status}).`, status: res.status };
