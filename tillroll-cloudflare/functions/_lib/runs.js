@@ -1,8 +1,9 @@
 import { runSanity, validateInput } from './sanity.js';
+import { sanitiseRunInput } from './sanitise-run-input.js';
 import { nowIso, randomId } from './http.js';
 const STALE_MS = 90_000;
 export async function createRun(env, body) {
-  const input = validateInput(body);
+  const input = sanitiseRunInput(validateInput(body));
   const runId = randomId('run_');
   const t = nowIso();
   await env.DB.batch([
