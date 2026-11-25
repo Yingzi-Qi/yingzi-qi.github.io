@@ -17,12 +17,12 @@ function sha256(buf) {
   return execFileSync('sha256sum', { input: buf, encoding: 'utf8' }).split(/\s+/)[0];
 }
 
-test('reading-policy.html and receipt-policy.js are byte-identical to fdf6475', () => {
+test('reading-policy.html and receipt-policy.js are byte-identical to 344c524', () => {
   const repo = execFileSync('git', ['-C', root, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
   for (const rel of ['tillroll/reading-policy.html', 'tillroll/receipt-policy.js']) {
     const work = readFileSync(join(repo, rel));
-    const expected = execFileSync('git', ['-C', repo, 'show', `fdf6475:${rel}`]);
-    assert.equal(work.compare(expected), 0, `${rel} must be byte-identical to fdf6475`);
+    const expected = execFileSync('git', ['-C', repo, 'show', `344c524:${rel}`]);
+    assert.equal(work.compare(expected), 0, `${rel} must be byte-identical to 344c524`);
     assert.equal(sha256(work), sha256(expected));
   }
 });
