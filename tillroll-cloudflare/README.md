@@ -35,6 +35,20 @@ Keys (30-day TTL): `lookup:v2:item:{brand}:{itemId}`, `lookup:v2:mf:{brand}:{nam
 Brand given ⇒ only `onOfficialSite` candidates (verified against the brand's official domain by code, not by the model). Retailers only corroborate.
 Additive fields (proposed, see PR): `supplier` (request), `branch`, `printedItemId`, `canonicalBrand`, `flag`, `paused`, `unavailableReason`, `quotaGuard` (response).
 
+### Excel export and Update/Refresh (Excel Sync, 25 Nov 2026)
+The workbook is built in the browser (`tillroll/v2-excel.js` + `tillroll/units.js`). No new credentials.
+
+Visible columns, in order: `采购小票id`, `采购时间`, `供应商`, `品牌`, `品名`, `品牌货号`, `采购商品原价`, `采购商品金额`, `采购商品方法`, `销售金额`. `销售金额` is the number `round(原价 × 0.88, 2)`, never a formula. Fills are only Pink `#FECDD3` and Amber `#FDE68A` (header fill `#1E4946` is not a flag). Hidden columns: Tillroll row id, receipt key, source URLs, confidence, match type, original values (baseline JSON), price-fallback candidates, other values (receipt vs official).
+
+One receipt line with quantity N is N rows. Printed per-unit discounts are copied exactly. A line- or receipt-level discount is split in proportion to each unit's 原价 (pence, remainder on the last weighted row) and that paid cell is Amber. Department-store `供应商` is the store name; a brand boutique uses the official branch; a mall keeps the mall name.
+
+Refresh (the Linked Workbooks button, or a v2 `.xlsx` chosen in Refresh from Excel):
+
+1. `POST /api/workbooks/:id/refresh` streams the Drive file (existing). The browser reads cell values and OOXML fills.
+2. `POST /api/locks` `{locks:[{rowId,col}]}` for every cell that was Pink or Amber in the baseline and whose fill is now cleared. Those cells are never re-flagged.
+3. `POST /api/sanity-run` `{mode:"round2", batchId, receipts:[{items:[{rowId, editedCols, clearedCols, flaggedCols, previousItemId, previousCells, unitSettled:true, ...}]}]}`. Look-up is skipped when `品牌`, `品名` and `采购商品原价` are present and verified and `品牌货号` is unedited. An edited `品牌货号` deletes that row's cache (`lookup:v2:item:...` and, when price and currency are present, `lookup:v2:pf:...:price.toFixed(2)`).
+4. `POST /api/drive/upload?folder=exports&name=&batchId=&replaceId=` writes the updated workbook over the linked Drive file. A paused or unavailable look-up stays Amber.
+
 ## Free-tier guards
 - Brave < 1,000/month (default guard 950), Gemini grounding < 5,000/month (4,800) and < 1,500/day (1,450). Env can lower but never raise past 999/4,999/1,499. Counters reserved atomically in D1 before each call; guard hit ⇒ look-ups pause, Amber `#FDE68A`.
 - KV writes: counted per day; at 900 writes cache goes to D1 `lookup_cache`; invalidation while capped writes a D1 tombstone.

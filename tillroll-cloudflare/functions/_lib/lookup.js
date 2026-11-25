@@ -33,6 +33,13 @@ export function normaliseRequest(body) {
   return req;
 }
 
+// Final tolerance, approved 25 Nov 2026 18:12: max(2% of the receipt price, £5).
+export function priceTolerance(price) {
+  const n = Math.abs(Number(price));
+  if (!Number.isFinite(n)) return 5;
+  return Math.max(n * 0.02, 5);
+}
+
 export function matchedFields(req, c) {
   const out = [];
   if (req.itemId && c.itemId && compact(req.itemId) === compact(c.itemId)) out.push('itemId');
@@ -44,7 +51,7 @@ export function matchedFields(req, c) {
   }
   if (req.style && (compact(c.itemId || '') === compact(req.style) || String(c.officialName || '').toLowerCase().includes(req.style.toLowerCase()) || (c.style && compact(c.style) === compact(req.style)))) out.push('style');
   if (req.price !== null && c.price !== null && c.price !== undefined && (!req.currency || !c.currency || req.currency === c.currency)) {
-    if (Math.abs(Number(c.price) - req.price) <= Math.max(0.01, req.price * 0.005)) out.push('price');
+    if (Math.abs(Number(c.price) - req.price) <= priceTolerance(req.price)) out.push('price');
   }
   return out;
 }

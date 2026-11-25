@@ -4,7 +4,7 @@ import {readPhoto,secondReadPhoto,extractLocal,extractAI,reconcileReadings,photo
 import {checkReceipt,samePurchase,reviewForLine,verifyImportedItemIds} from './checks.js?v=discounts1';
 import {normalizePurchaseTime,confirmedStoreReceiptId} from './receipt-rules.js?v=1';
 import {batchDateFlags} from './date-sanity.js?v=1';
-import {exportExcel,exportChinaExcel,exportCSV,readOrderFile,readAchungWorkbook,readTillrollEdits} from './exports.js?v=history2';
+import {exportExcel,exportChinaExcel,exportCSV,readOrderFile,readAchungWorkbook,readTillrollEdits} from './exports.js?v=merge1';
 import {planWorkbookRefresh,restoreWorkbookReceipts,nextWorkbookBaseline,withLegacyWorkbookBaseline,nextLegacyWorkbookBaseline} from './workbook-refresh.js?v=history2';
 import {bindExcelRefresh} from './excel-refresh-ui.js?v=1';
 import {loadSamples} from './samples.js?v=curatedphotos1';
@@ -14,7 +14,8 @@ import {createLookupClient, enrichReceipt} from './lookup-enrich.js?v=lookup2';
 import {photoVerificationRows} from './verification-photo.js?v=curatedphotos1';
 import {captureLineWarnings,classifyVerification,hasVerificationMismatch} from './verification-history.js?v=history2';
 import {normalizeReceiptData,kindForFlag,kindForVerification,reviewKinds} from './receipt-policy.js?v=policy1';
-import {recordReading,recordExport,recordRefresh,historyEntries,clearHistory} from './reading-history.js?v=history1';
+import {recordReading,recordExport,recordRefresh} from './reading-history.js?v=history1';
+import {openHistory,renderHistory,refreshHistoryView,clearHistory} from './history-dialog.js?v=merge1';
 const $ = s=>document.querySelector(s);
 const escape = v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const paths={settings:'<path d="M4 7h5m4 0h7M4 17h9m4 0h3"/><circle cx="11" cy="7" r="2"/><circle cx="15" cy="17" r="2"/>',upload:'<path d="M12 15V3m-5 5 5-5 5 5M4 14v5a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5"/>',plus:'<path d="M12 5v14M5 12h14"/>',download:'<path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/>',search:'<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>',link:'<path d="m10 14 4-4m-4-3 2-2a5 5 0 0 1 7 7l-2 2m-3 3-2 2a5 5 0 0 1-7-7l2-2"/>',play:'<path d="m8 5 10 7-10 7z"/>'};
@@ -44,22 +45,6 @@ const notDone = r=>['queued','reading','checking','second'].includes(r.state);
 const isReview = r=>r.state==='error' || (!r.duplicateOf && r.data && (r.review.flags.some(x=>x.severity!=='info') || r.review.photo.some(x=>x.status==='Needs review') || r.orders?.some(orderNeedsReview) || r.verification?.some(hasVerificationMismatch)));
 function note(message){const n=$('#notice');clearTimeout(noticeTimer);n.hidden=!message;n.textContent=message;if(message)noticeTimer=setTimeout(()=>{n.hidden=true;},6500);}
 function historyRecordReading(r){try{recordReading(r);}catch{} }
-function formatHistoryTime(value){try{return new Intl.DateTimeFormat('en-GB',{dateStyle:'medium',timeStyle:'short'}).format(new Date(value));}catch{return value||'';}}
-function renderHistory(){
-  const list=$('#history-list');if(!list)return;
-  const entries=historyEntries();
-  if(!entries.length){list.innerHTML='<p class="history-empty">No reading or workbook history yet.</p>';return;}
-  list.innerHTML=entries.map(entry=>{
-    const events=(entry.events||[]).slice(0,12);
-    const lines=entry.reading?.lines||[];
-    const eventHtml=events.map(event=>`<li><span class="history-tag ${event.type==='manual-clear'||event.type==='lookup-change'?'change':event.type==='refresh'?'refresh':''}">${escape(event.type==='manual-clear'?'Manual correction':event.type==='refresh'?'Excel refresh':event.type==='lookup-change'?'Lookup change':event.type==='export'?'Export':'Reading')}</span> <time>${escape(formatHistoryTime(event.at))}</time> · ${escape(event.detail||'')}</li>`).join('');
-    const preview=lines.length?`<details class="history-preview"><summary>View ${lines.length} exported row${lines.length===1?'':'s'}</summary><div class="history-table"><div class="history-row history-head"><span>品牌</span><span>品名</span><span>品牌货号</span><span>采购商品金额</span></div>${lines.map(line=>`<div class="history-row"><span>${escape(line.brand||'—')}</span><span>${escape(line.item||'—')}</span><span>${escape(line.itemId||'—')}</span><span>${escape(line.amount??line.unitPrice??'—')}</span></div>`).join('')}</div></details>`:'';
-    return `<article class="history-entry"><strong>${escape(entry.filename||entry.merchant||'Receipt')}</strong><small>${escape(entry.merchant||'')}</small><div class="history-meta"><ul>${eventHtml}</ul></div>${preview}</article>`;
-  }).join('')||'<p class="history-empty">No reading or workbook history yet.</p>';
-}
-function showLocalHistory(){const fallback=$('#history-fallback');if(fallback)fallback.hidden=false;renderHistory();}
-function openHistory(){showLocalHistory();const dialog=$('#v2-history-dialog');if(dialog && !dialog.open)dialog.showModal();}
-window.tillrollV2Hooks.showLocalHistory=showLocalHistory;
 function importedPhotoChecks(r, fillMissing=false) {
   const passes=(r.itemIdReadings || []).map(ocr=>verifyImportedItemIds(r.data,ocr));
   if (!passes.length) return [];
@@ -567,7 +552,7 @@ for(const button of document.querySelectorAll('[data-sample-set]'))
 $('#more-samples').onclick=e=>addSampleSet(e.currentTarget.dataset.next);
 $('#filters').onclick=e=>{const b=e.target.closest('[data-filter]');if(b){filter=b.dataset.filter;render();}};
 $('#search').oninput=render;
-$('#history').onclick=openHistory;$('#landing-history').onclick=openHistory;$('#history-clear').onclick=()=>{clearHistory();renderHistory();};$('#history-refresh').onclick=()=>{const dialog=$('#v2-history-dialog');if(dialog?.open)dialog.close();$('#refresh-excel')?.click();};
+$('#history').onclick=()=>{openHistory().catch(err=>note(err.message));};$('#history-clear').onclick=()=>{clearHistory();renderHistory();};$('#history-refresh').onclick=()=>{const dialog=$('#history-dialog');if(dialog?.open)dialog.close();$('#refresh-excel')?.click();};
 $('#table').onclick=e=>{const b=e.target.closest('[data-id]');if(b)openDetail(b.dataset.id,b.dataset.path).catch(err=>note(err.message));};
 async function downloadBatch(exporter) {
   const current=generation;
@@ -578,7 +563,7 @@ async function downloadBatch(exporter) {
     if(current===generation) {
       receiptFileHashes.add(hash);
       recordExport(receipts,exporter===exportChinaExcel?'china':exporter===exportExcel?'detailed':'csv');
-      renderHistory();
+      refreshHistoryView();
     }
   } catch(e) { note('Export failed. '+e.message); }
 }
@@ -589,6 +574,11 @@ async function prepareExcelRefresh(file){
   const currentGeneration=generation;
   const [workbook,hash]=await Promise.all([readTillrollEdits(file),fingerprint(file)]);
   if(currentGeneration!==generation)throw new Error('The batch changed. Choose the workbook again.');
+  if(workbook.kind==='v2'){
+    const {applyV2Refresh}=await import('./v2-excel.js');
+    const outcome=await applyV2Refresh(workbook,{batchId:window.tillrollV2Hooks?.batchId?.()||null,replace:window.tillrollV2Hooks?.driveReplace?.()||null});
+    return {filename:file.name,hash,currentGeneration,v2Outcome:outcome};
+  }
   const previousLegacy=workbook.exportKey ? null : legacyBaselines.get(file.name);
   const parsed=previousLegacy ? withLegacyWorkbookBaseline(workbook,previousLegacy) : workbook;
   const previous=excelBaselines.get(parsed.exportKey);
@@ -608,7 +598,14 @@ async function prepareExcelRefresh(file){
   return prepared;
 }
 
-function finishExcelRefresh({filename,hash,parsed,currentGeneration,records,patches}){
+function finishExcelRefresh({filename,hash,parsed,currentGeneration,records,patches,v2Outcome}){
+  if(v2Outcome){
+    if(currentGeneration!==generation)throw new Error('The batch changed. Choose the workbook again.');
+    receiptFileHashes.add(hash);
+    note(v2Outcome.message);
+    if(v2Outcome.result)window.tillrollV2Hooks?.showResult?.(v2Outcome.result);
+    return;
+  }
   if(currentGeneration!==generation || (records && batch.length))throw new Error('The batch changed. Choose the workbook again.');
   const nextBaseline=parsed.exportKey ? nextWorkbookBaseline(parsed) : null;
   let nextLegacy=null;
@@ -664,7 +661,7 @@ function finishExcelRefresh({filename,hash,parsed,currentGeneration,records,patc
     const updated=drafts.get(receipt)||receipt;
     recordRefresh({receipt:updated,changedFields,clearedFields,lookupChanged:refreshLookupChanges.get(receipt)??false});
   });
-  renderHistory();
+  refreshHistoryView();
   const message=records ? `Opened ${n} receipt${n===1?'':'s'} from Excel.`
     : n ? `Updated ${n} receipt${n===1?'':'s'} from Excel. Checks refreshed.` : 'Already up to date.';
   note(message+(clearReference?' Select a separate file to compare orders.':''));
