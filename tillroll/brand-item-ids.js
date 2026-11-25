@@ -121,7 +121,12 @@ export function fallbackItemId(brand, raw) {
   return { itemId: text, rejected: false };
 }
 
-// GS1 check digit. Positions are counted from the right of the body, ×3 then ×1.
+/**
+ * GS1 check digit for a GTIN body, the code without its final digit.
+ * Weights alternate 3 then 1, counted from the right of the body.
+ * @param {string} body Digits only, without the check digit.
+ * @returns {number} The check digit, 0–9.
+ */
 export function gtinCheckDigit(body) {
   let sum = 0;
   const text = String(body ?? '');
@@ -131,12 +136,33 @@ export function gtinCheckDigit(body) {
   return (10 - (sum % 10)) % 10;
 }
 
-// A GTIN-8/12/13/14 with a valid check digit. A 10-digit store code is not one.
+/**
+ * A GTIN-8, GTIN-12, GTIN-13 or GTIN-14 with a valid check digit.
+ * A 4-digit or 10-digit store code is not a GTIN.
+ * @param {unknown} value
+ * @returns {string} The compact digits, or '' when the value is not a valid GTIN.
+ */
 export function validGtin(value) {
   const text = compact(value);
   if (!/^(?:\d{8}|\d{12}|\d{13}|\d{14})$/.test(text)) return '';
   if (isStoreCode(text)) return '';
   return gtinCheckDigit(text.slice(0, -1)) === Number(text[text.length - 1]) ? text : '';
+}
+
+/**
+ * An official style reference from a look-up candidate.
+ * When the brand has a format in this table, only a value that fits it is returned.
+ * A store code or a GTIN is not a style reference.
+ * @param {string} brand Printed or canonical brand.
+ * @param {unknown} value Candidate item id.
+ * @returns {string} The style reference, or ''.
+ */
+export function officialStyleRef(brand, value) {
+  const text = String(value ?? '').trim();
+  if (!text || isStoreCode(text) || isConcessionCode(text)) return '';
+  if (brandHasItemIdFormat(brand)) return matchesBrandItemId(brand, text) ? text : '';
+  if (validGtin(text)) return '';
+  return text;
 }
 
 function ruleFor(brand) {
@@ -192,9 +218,16 @@ export function chooseItemId({ brand, fields = {} } = {}) {
 
 const EAN_LABEL = /\b(?:EAN|Barcode|GTIN)\b[^0-9]{0,12}(\d{8}|\d{12}|\d{13}|\d{14})\b/gi;
 
-// fields.ean is the reader's labelled barcode. A label word next to the digits
-// in the item id, style, or name counts too. Other fields are not read.
-function labelledEan(fields) {
+/**
+ * The labelled EAN for one line.
+ * `fields.ean` is the reader's labelled barcode. A value is also labelled when
+ * the words EAN, Barcode or GTIN sit next to a valid GTIN in the item id, style
+ * or name. Card, auth, merchant, terminal and approval text are not read.
+ * A bare digit run returns ''.
+ * @param {{ ean?: unknown, itemId?: unknown, sku?: unknown, styleRef?: unknown, style?: unknown, item?: unknown, name?: unknown, codes?: unknown[] }} [fields]
+ * @returns {string} Compact GTIN digits, or ''.
+ */
+export function labelledEan(fields = {}) {
   const found = [];
   const add = value => {
     const code = validGtin(value);

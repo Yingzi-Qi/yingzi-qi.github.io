@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { brandInLine, canonicalBrand, knownBrand, normaliseItemId } from './brand-aliases.js';
-import { chooseItemId } from './brand-item-ids.js';
+import { chooseItemId, gtinCheckDigit, labelledEan, officialStyleRef, validGtin } from './brand-item-ids.js';
 import { resolveSupplier } from './uk-branches.js';
 import { branchClue, cacheKeys, createLookupClient, parseLookupResponse } from './lookup-client.js';
 import { flagColour, parseMismatches, primaryAccess, rankPriceFallback, selectCandidate } from './lookup-match.js';
@@ -205,6 +205,21 @@ describe('price fallback ranking', () => {
 });
 
 describe('brand item id', () => {
+  it('imports the labelled-EAN and official-style helpers', () => {
+    assert.equal(typeof gtinCheckDigit, 'function');
+    assert.equal(typeof validGtin, 'function');
+    assert.equal(typeof labelledEan, 'function');
+    assert.equal(typeof officialStyleRef, 'function');
+    assert.equal(gtinCheckDigit('400000000001'), 3);
+    assert.equal(validGtin('4000000000013'), '4000000000013');
+    assert.equal(validGtin('4000000000014'), '');
+    assert.equal(labelledEan({ ean: '4000000000013' }), '4000000000013');
+    assert.equal(labelledEan({ itemId: '4000000000013' }), '');
+    assert.equal(labelledEan({ itemId: 'GTIN 4000000000013' }), '4000000000013');
+    assert.equal(officialStyleRef('Chanel', 'AS10006'), 'AS10006');
+    assert.equal(officialStyleRef('Chanel', '4000000000013'), '');
+  });
+
   it('picks the Chanel style ref when a line also prints an EAN and a concession code', () => {
     assert.equal(chooseItemId({
       brand: 'Chanel',

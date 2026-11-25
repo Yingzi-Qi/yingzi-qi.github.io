@@ -6,11 +6,11 @@
 // fallback, is Amber, with both values kept on the row.
 
 import { canonicalBrand, fold, normaliseItemId } from './brand-aliases.js';
-import { ITEM_ID_GUARD_NOTE } from './brand-item-ids.js';
+import { ITEM_ID_GUARD_NOTE, officialStyleRef } from './brand-item-ids.js';
 import { resolveSupplier } from './uk-branches.js';
 import {
   AMBER, PINK, buildLookupRequest, canonicalDisplayBrand, distinctKey, fieldLocked,
-  officialStyleRef, prepareUnitRows, round2Changed, roundMoney, shouldLookup,
+  prepareUnitRows, round2Changed, roundMoney, shouldLookup,
 } from './lookup-policy.js';
 import {
   CLOSE_GAP, computeMismatches, flagColour, mergeMismatches, primaryAccess, selectCandidate,

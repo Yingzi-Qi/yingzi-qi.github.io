@@ -3,7 +3,7 @@
 // price and is matched first. 采购商品金额 (paid unit) is used only when 原价 is missing.
 
 import { brandInLine, canonicalBrand, fold, knownBrand, normaliseItemId, productWords } from './brand-aliases.js';
-import { brandHasItemIdFormat, chooseItemId, fallbackItemId, isConcessionCode, isEan, isStoreCode, matchesBrandItemId, stripProductCodes, validGtin } from './brand-item-ids.js';
+import { chooseItemId, fallbackItemId, isConcessionCode, isEan, isStoreCode, matchesBrandItemId, stripProductCodes, validGtin } from './brand-item-ids.js';
 import { extractStoreClues } from './uk-branches.js';
 
 export const AMBER = '#FDE68A';
@@ -94,14 +94,6 @@ function separateLine(item) {
 
 // The comment may quote a printed item id or style code. It never reads card,
 // authorisation, merchant, terminal or approval text.
-export function officialStyleRef(brand, value) {
-  const text = String(value ?? '').trim();
-  if (!text || isStoreCode(text) || isConcessionCode(text)) return '';
-  if (brandHasItemIdFormat(brand)) return matchesBrandItemId(brand, text) ? text : '';
-  if (validGtin(text)) return '';
-  return text;
-}
-
 function rejectedDigitComment(item, rawId) {
   const fromItem = pureDigitStoreCode(rawId);
   if (fromItem) return fromItem;
