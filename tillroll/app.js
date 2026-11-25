@@ -50,7 +50,9 @@ function renderHistory(){
     return `<article class="history-entry"><strong>${escape(entry.filename||entry.merchant||'Receipt')}</strong><small>${escape(entry.merchant||'')}</small><div class="history-meta"><ul>${eventHtml}</ul></div>${preview}</article>`;
   }).join('')||'<p class="history-empty">No reading or workbook history yet.</p>';
 }
-function openHistory(){renderHistory();const dialog=$('#history-dialog');if(dialog && !dialog.open)dialog.showModal();}
+function openLocalHistory(){renderHistory();const dialog=$('#history-dialog');if(dialog && !dialog.open)dialog.showModal();}
+window.tillrollLocalHistory={open:openLocalHistory,render:renderHistory};
+function openHistory(){if(typeof window.tillrollV2Hooks?.openReadingHistory==='function')return window.tillrollV2Hooks.openReadingHistory();openLocalHistory();}
 function importedPhotoChecks(r, fillMissing=false) {
   const passes=(r.itemIdReadings || []).map(ocr=>verifyImportedItemIds(r.data,ocr));
   if (!passes.length) return [];

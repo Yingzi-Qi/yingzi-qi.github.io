@@ -218,14 +218,40 @@ async function openWorkbooks() {
     window.tillrollV2Hooks?.refreshFromFile?.(file);
   };
 }
-async function openHistory() {
-  const d = $('#v2-history-dialog'), list = $('#v2-history-list');
-  list.innerHTML = '<p>Loading…</p>'; d.showModal();
-  const r = await api('/api/history?limit=100');
-  const data = await r.json().catch(() => ({}));
-  if (!r.ok) { list.innerHTML = `<p class="v2-error">${esc(data.error || 'Could not load history.')}</p>`; return; }
-  list.innerHTML = data.entries.length ? '<ul class="v2-list">' + data.entries.map(e => `<li><span><b>${esc(e.kind)}</b> · ${esc(e.summary)}<br><small>${esc(new Date(e.created_at).toLocaleString('en-GB', { timeZone: 'Europe/London' }))}${e.batch_id ? ' · ' + esc(e.batch_id) : ''}</small></span></li>`).join('') + '</ul>' : '<p>No history yet.</p>';
+// ONE Reading History screen: the v2 server-backed /api/history dialog.
+// The browser-only reading-history.js dialog is an offline fallback only,
+// used when the API call fails or is unreachable.
+export async function openReadingHistory({ fetchImpl, openLocal } = {}) {
+  const fetchFn = fetchImpl || (typeof fetch === 'function' ? fetch.bind(globalThis) : null);
+  const showLocal = () => {
+    const v2 = document.getElementById('v2-history-dialog');
+    if (v2?.open) v2.close();
+    const fallback = openLocal || (typeof window !== 'undefined' && window.tillrollLocalHistory?.open);
+    if (typeof fallback === 'function') fallback();
+    return 'local';
+  };
+  try {
+    if (typeof fetchFn !== 'function') return showLocal();
+    const r = await fetchFn('/api/history?limit=100', { credentials: 'same-origin' });
+    if (!r || !r.ok) return showLocal();
+    const data = await r.json().catch(() => ({}));
+    const entries = Array.isArray(data.entries) ? data.entries : [];
+    const list = document.getElementById('v2-history-list');
+    if (list) {
+      list.innerHTML = entries.length
+        ? '<ul class="v2-list">' + entries.map(e => `<li><span><b>${esc(e.kind)}</b> · ${esc(e.summary)}<br><small>${esc(new Date(e.created_at).toLocaleString('en-GB', { timeZone: 'Europe/London' }))}${e.batch_id ? ' · ' + esc(e.batch_id) : ''}</small></span></li>`).join('') + '</ul>'
+        : '<p>No history yet.</p>';
+    }
+    const local = document.getElementById('history-dialog');
+    if (local?.open) local.close();
+    const v2 = document.getElementById('v2-history-dialog');
+    if (v2 && !v2.open) v2.showModal();
+    return 'v2';
+  } catch {
+    return showLocal();
+  }
 }
+const openHistory = openReadingHistory;
 
 function onCheckChange(e) {
   const t = e.target;
@@ -246,6 +272,14 @@ function init() {
   $('#v2-run')?.addEventListener('click', runSanity);
   $('#v2-workbooks')?.addEventListener('click', openWorkbooks);
   $('#v2-history')?.addEventListener('click', openHistory);
+  // One visible history action: Yingzi's landing/workspace "Reading history"
+  // buttons open the v2 server-backed screen. Hide the extra v2-nav button.
+  const localHistoryBtns = [$('#landing-history'), $('#history')].filter(Boolean);
+  if (localHistoryBtns.length) {
+    const nav = $('#v2-history');
+    if (nav) nav.hidden = true;
+    for (const b of localHistoryBtns) b.onclick = ev => { ev?.preventDefault?.(); openReadingHistory(); };
+  }
   document.addEventListener('change', onCheckChange);
   for (const b of document.querySelectorAll('[data-v2-close]')) b.onclick = () => document.getElementById(b.dataset.v2Close).close();
   const p = new URLSearchParams(location.search).get('drive');
@@ -255,6 +289,7 @@ function init() {
     afterRender: syncRunButton,
     receiptCheckHtml,
     syncRunButton,
+    openReadingHistory,
   };
   syncRunButton();
   refreshQuota(); refreshDrive();
