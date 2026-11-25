@@ -19,11 +19,13 @@ const $ = s=>document.querySelector(s);
 const escape = v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const paths={settings:'<path d="M4 7h5m4 0h7M4 17h9m4 0h3"/><circle cx="11" cy="7" r="2"/><circle cx="15" cy="17" r="2"/>',upload:'<path d="M12 15V3m-5 5 5-5 5 5M4 14v5a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5"/>',plus:'<path d="M12 5v14M5 12h14"/>',download:'<path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/>',search:'<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>',link:'<path d="m10 14 4-4m-4-3 2-2a5 5 0 0 1 7 7l-2 2m-3 3-2 2a5 5 0 0 1-7-7l2-2"/>',play:'<path d="m8 5 10 7-10 7z"/>'};
 for(const el of document.querySelectorAll('[data-icon]')) el.innerHTML=`<svg aria-hidden="true" class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${paths[el.dataset.icon]}</svg>`;
+window.tillrollV2Hooks={getBatch:()=>batch};
 let batch=[],orderList=null,orderFilename='',filter='all',seq=0,generation=0,nowReading=0;
 let mode='local',apiKey='',savedSamples=false,noticeTimer,startTime=0,finishedTime=0;
 let lookupBaseUrl='';
+function lookupServiceBase(value){const typed=String(value??'').trim();if(typed)return typed;try{if(location?.origin&&location.origin!=='null')return location.origin;}catch{}return '';}
 const showLookupLocked=()=>{const dialog=$('#lookup-locked-dialog');if(dialog&&!dialog.open)dialog.showModal();};
-let lookupClient=createLookupClient({baseUrl:'',onLocked:showLookupLocked});
+let lookupClient=createLookupClient({baseUrl:lookupServiceBase(''),onLocked:showLookupLocked});
 const queue=[], hashOwners=new Map();
 const receiptFileHashes=new Set();
 let referenceHash=null,referenceRevision=0;
@@ -55,7 +57,9 @@ function renderHistory(){
     return `<article class="history-entry"><strong>${escape(entry.filename||entry.merchant||'Receipt')}</strong><small>${escape(entry.merchant||'')}</small><div class="history-meta"><ul>${eventHtml}</ul></div>${preview}</article>`;
   }).join('')||'<p class="history-empty">No reading or workbook history yet.</p>';
 }
-function openHistory(){renderHistory();const dialog=$('#history-dialog');if(dialog && !dialog.open)dialog.showModal();}
+function showLocalHistory(){const fallback=$('#history-fallback');if(fallback)fallback.hidden=false;renderHistory();}
+function openHistory(){showLocalHistory();const dialog=$('#v2-history-dialog');if(dialog && !dialog.open)dialog.showModal();}
+window.tillrollV2Hooks.showLocalHistory=showLocalHistory;
 function importedPhotoChecks(r, fillMissing=false) {
   const passes=(r.itemIdReadings || []).map(ocr=>verifyImportedItemIds(r.data,ocr));
   if (!passes.length) return [];
@@ -277,7 +281,7 @@ async function run(r){
     hashOwners.set(r.hash,r.id);
     if(r.useSaved){r.data=normalData(normalizeReading(structuredClone(r.demo.data)));r.ocr=r.demo.ocr;r.otherOcr=r.demo.referenceOcr;r.origin='sample';r.method='Saved reading';}
     else{
-      const modelEnabled=chosenMode==='ai'&&!!chosenKey;
+      const modelEnabled=chosenMode==='server'&&!!chosenKey;
       const [ocrRead,aiRead]=await Promise.allSettled([readPhoto(r.file),modelEnabled?extractAI(r.file,chosenKey,1,[]):Promise.resolve(null)]);if(!current())return;
       r.ocr=ocrRead.status==='fulfilled'?ocrRead.value:emptyOCR();
       if(ocrRead.status==='rejected')r.notes.push('Local photo reading failed.');
@@ -563,7 +567,7 @@ for(const button of document.querySelectorAll('[data-sample-set]'))
 $('#more-samples').onclick=e=>addSampleSet(e.currentTarget.dataset.next);
 $('#filters').onclick=e=>{const b=e.target.closest('[data-filter]');if(b){filter=b.dataset.filter;render();}};
 $('#search').oninput=render;
-$('#history').onclick=openHistory;$('#landing-history').onclick=openHistory;$('#history-clear').onclick=()=>{clearHistory();renderHistory();};$('#history-refresh').onclick=()=>{const dialog=$('#history-dialog');if(dialog?.open)dialog.close();$('#refresh-excel')?.click();};
+$('#history').onclick=openHistory;$('#landing-history').onclick=openHistory;$('#history-clear').onclick=()=>{clearHistory();renderHistory();};$('#history-refresh').onclick=()=>{const dialog=$('#v2-history-dialog');if(dialog?.open)dialog.close();$('#refresh-excel')?.click();};
 $('#table').onclick=e=>{const b=e.target.closest('[data-id]');if(b)openDetail(b.dataset.id,b.dataset.path).catch(err=>note(err.message));};
 async function downloadBatch(exporter) {
   const current=generation;
@@ -780,9 +784,9 @@ $('#landing-clear-orders').onclick=$('#clear-orders').onclick=()=>{
   batch.forEach(r=>{evaluate(r);if(r.state==='done')scheduleLookup(r);});duplicates();render();
 };
 $('#startover').onclick=()=>$('#reset-dialog').showModal();$('#reset').onclick=()=>{generation++;unlinkWorkbook();excelBaselines.clear();legacyBaselines.clear();lookupClient.resetRun();for(const r of batch)URL.revokeObjectURL(r.url);batch=[];queue.length=0;hashOwners.clear();receiptFileHashes.clear();referenceHash=null;referenceRevision++;seq=0;orderList=null;orderFilename='';startTime=finishedTime=0;$('#search').value='';$('#reset-dialog').close();render();};
-const refreshSettings=()=>{const ai=$('#reader').value==='ai';$('#key-box').hidden=!ai;$('#key').required=ai;$('#local-explain').hidden=ai;};
-$('#settings').onclick=()=>{$('#reader').value=mode;$('#key').value=apiKey;$('#lookup-base').value=lookupBaseUrl;$('#sample-reading').value=savedSamples?'saved':'live';refreshSettings();$('#settings-dialog').showModal();};$('#reader').onchange=refreshSettings;
-$('#settings-form').onsubmit=e=>{e.preventDefault();const selected=$('#reader').value,key=$('#key').value.trim();if(selected==='ai'&&!key)return;const nextLookup=$('#lookup-base').value.trim();const lookupChanged=nextLookup!==lookupBaseUrl;mode=selected;apiKey=selected==='ai'?key:'';savedSamples=$('#sample-reading').value==='saved';lookupBaseUrl=nextLookup;if(lookupChanged){lookupClient=createLookupClient({baseUrl:lookupBaseUrl,onLocked:showLookupLocked});batch.forEach(r=>{if(r.state==='done')scheduleLookup(r);});}$('#key').value='';$('#settings-dialog').close();note(lookupBaseUrl?'Reading settings saved. Brand look-up will use the service you entered.':'Reading settings saved.');};
+const refreshSettings=()=>{const server=$('#reader').value==='server';$('#key-box').hidden=true;$('#key').required=false;$('#local-explain').hidden=server;};
+$('#settings').onclick=()=>{$('#reader').value=mode;$('#key').value='';$('#lookup-base').value=lookupBaseUrl;$('#sample-reading').value=savedSamples?'saved':'live';refreshSettings();$('#settings-dialog').showModal();};$('#reader').onchange=refreshSettings;
+$('#settings-form').onsubmit=e=>{e.preventDefault();const selected=$('#reader').value;const nextLookup=$('#lookup-base').value.trim();const lookupChanged=nextLookup!==lookupBaseUrl;mode=selected;apiKey=selected==='server'?'__server__':'';savedSamples=$('#sample-reading').value==='saved';lookupBaseUrl=nextLookup;if(lookupChanged){lookupClient=createLookupClient({baseUrl:lookupServiceBase(lookupBaseUrl),onLocked:showLookupLocked});batch.forEach(r=>{if(r.state==='done')scheduleLookup(r);});}$('#key').value='';$('#settings-dialog').close();note('Reading settings saved.');};
 for(const b of document.querySelectorAll('[data-close]'))b.onclick=()=>document.getElementById(b.dataset.close).close();
 for(const d of document.querySelectorAll('dialog'))d.addEventListener('click',e=>{if(e.target===d){const b=d.getBoundingClientRect();if(e.clientX<b.left||e.clientX>b.right||e.clientY<b.top||e.clientY>b.bottom)d.close();}});
 

@@ -9,7 +9,10 @@ export const BRAND_ITEM_ID_FORMATS = [
   {
     brand: 'Chanel',
     // AP/AS/AAC + digits, optional B-ref, optional colour code.
-    test: value => /^(?:AP|AS|AAC)\d{3,8}(?:\s+B\d{3,8})?(?:\s+[A-Z]\d{2,6})?$/i.test(squash(value)),
+    // AP/AS/AAC, or a season prefix such as "25C " in front of a short style code.
+    // ^(?:\d{2}[A-Z]\s+)?([A-Z]{1,3}\d{4,5})\b
+    test: isChanelRef,
+    normalise: value => chanelText(value),
   },
   {
     brand: 'Prada',
@@ -35,6 +38,26 @@ export const BRAND_ITEM_ID_FORMATS = [
     normalise: value => diorText(value).toUpperCase(),
   },
 ];
+
+function chanelText(value) {
+  const text = squash(value);
+  const season = text.match(/^\d{2}[A-Z]\s+(.+)$/i);
+  return season ? season[1] : text;
+}
+
+function isChanelRef(value) {
+  const text = chanelText(value);
+  if (/^(?:AP|AS|AAC)\d{3,8}(?:\s+B\d{3,8})?(?:\s+[A-Z]\d{2,6})?$/i.test(text)) return true;
+  return /^(?:\d{2}[A-Z]\s+)?([A-Z]{1,3}\d{4,5})$/i.test(text);
+}
+
+const CHANEL_SEASON = /(?:^|\s)(?:\d{2}[A-Z]\s+)?([A-Z]{1,3}\d{4,5})\b/gi;
+
+function seasonRefs(value) {
+  const text = String(value ?? '');
+  CHANEL_SEASON.lastIndex = 0;
+  return [...text.matchAll(CHANEL_SEASON)].map(match => match[1]);
+}
 
 function diorText(value) {
   return compact(value).replace(/_TU$/i, '');
@@ -82,8 +105,9 @@ export function brandHasItemIdFormat(brand) {
 
 export function matchesBrandItemId(brand, value) {
   const rule = ruleFor(brand);
-  if (!rule) return false;
-  return rule.test(value);
+  if (!rule || value === undefined || value === null || String(value).trim() === '') return false;
+  const text = rule.normalise ? rule.normalise(value) : value;
+  return rule.test(text);
 }
 
 // chooseItemId returned nothing. Do not keep a store code, or a raw printed
@@ -124,15 +148,18 @@ export function stripProductCodes(text) {
 
 export function chooseItemId({ brand, fields = {} } = {}) {
   const raw = [fields.itemId, fields.sku, fields.item, fields.name, ...(fields.codes || [])];
-  const found = [...new Set(raw.flatMap(codesIn).map(squash).filter(Boolean))];
+  const found = [...new Set([...raw.flatMap(codesIn), ...raw.flatMap(seasonRefs)].map(squash).filter(Boolean))];
   const rule = ruleFor(brand);
   const branded = rule ? found.filter(rule.test) : [];
   if (branded.length) {
     const best = branded.sort((left, right) => compact(right).length - compact(left).length)[0];
     return rule.normalise ? rule.normalise(best) : best;
   }
-  const style = found.filter(value => looksLikeCode(value) && !isEan(value));
-  if (style.length) return style.sort((left, right) => compact(right).length - compact(left).length)[0];
-  if (rule && !fields.allowEan) return '';
+  // A brand with its own format does not keep an unfitting code. The EAN is
+  // the fall-through. A concession code is never returned.
+  if (!rule) {
+    const style = found.filter(value => looksLikeCode(value) && !isEan(value));
+    if (style.length) return style.sort((left, right) => compact(right).length - compact(left).length)[0];
+  }
   return found.find(isEan) || '';
 }

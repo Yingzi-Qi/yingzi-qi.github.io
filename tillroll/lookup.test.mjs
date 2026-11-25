@@ -239,20 +239,20 @@ describe('brand item id', () => {
     assert.equal(chooseItemId({
       brand: 'Dior',
       fields: { itemId: '9999999001', sku: '3607670123456' },
-    }), '');
+    }), '3607670123456');
     assert.equal(chooseItemId({
       brand: 'Dior',
       fields: { item: '3607670123456', allowEan: true },
     }), '3607670123456');
   });
 
-  it('does not keep a store code or an id that misses the brand format', async () => {
+it('does not keep a store code or an id that misses the brand format', async () => {
     const note = 'No brand style ref found; store/internal code not used';
     const { result } = trackingClient(() => json({ cacheHit: false, candidates: [], flag: null, sourcesQueried: [] }));
     const cases = [
       { brand: 'Maison', item: 'Silk scarf', itemId: '2201', sku: '' },
       { brand: 'Selfridges Atelier', item: 'Wool coat', itemId: '0003791468', sku: '' },
-      { brand: 'Chanel', item: 'Card holder', itemId: 'B99999', sku: '' },
+      { brand: 'Chanel', item: 'Card holder', itemId: 'NOT-A-REF', sku: '' },
     ];
     for (const item of cases) {
       const enriched = await enrichLines({ items: [line(item)], currency: 'GBP', client: result });
@@ -286,9 +286,20 @@ describe('brand item id', () => {
     assert.equal(calls.at(-1).body.itemId, '3607670123456');
   });
 
-  it('does not use a concession code or an EAN as a Chanel item id', () => {
-    assert.equal(chooseItemId({ brand: 'Chanel', fields: { itemId: '9999999001', sku: '3607670123456' } }), '');
+  it('does not use a concession code as a Chanel item id, and falls through to the EAN', () => {
+    assert.equal(chooseItemId({ brand: 'Chanel', fields: { itemId: '9999999001', sku: '3607670123456' } }), '3607670123456');
     assert.equal(chooseItemId({ brand: 'Other Atelier', fields: { itemId: '3607670123456' } }), '3607670123456');
+  });
+
+  it('lets an unfitting code fall through to the EAN and strips a Chanel season prefix', () => {
+    assert.equal(chooseItemId({
+      brand: 'Chanel',
+      fields: { itemId: 'NOT-A-REF', sku: '3607670123456' },
+    }), '3607670123456');
+    assert.equal(chooseItemId({
+      brand: 'Chanel',
+      fields: { item: '25C AS44010', itemId: 'NOT-A-REF', sku: '3607670123456' },
+    }), 'AS44010');
   });
 
   it('sends the chosen brand item id on the look-up', async () => {
@@ -994,12 +1005,12 @@ describe('enrichment', () => {
         { field: 'name', receiptValue: null, officialValue: 'Should be ignored' },
         { field: 'price', receiptValue: 5200, officialValue: 5300 },
       ],
-      candidates: [{ ...miniFixture.candidates[0], brand: 'Van Cleef & Arpels', mismatches: [
-        { field: 'itemId', receiptValue: 'AS01112', officialValue: 'DIFFERENT' },
+      candidates: [{ ...miniFixture.candidates[0], brand: 'Van Cleef & Arpels', itemId: 'VCARP7I200', mismatches: [
+        { field: 'itemId', receiptValue: 'VCARP7I200', officialValue: 'DIFFERENT' },
       ] }],
     }));
     const enriched = await enrichLines({
-      items: [line({ brand: 'VCA' })],
+      items: [line({ brand: 'VCA', itemId: 'VCARP7I200' })],
       currency: 'GBP',
       client: result,
     });
@@ -1008,7 +1019,7 @@ describe('enrichment', () => {
     assert.equal(row.fields['品牌'].flag, 'amber');
     assert.equal(row.fields['采购商品原价'].value, 5200);
     assert.equal(row.fields['采购商品原价'].officialValue, 5300);
-    assert.equal(row.fields['品牌货号'].value, 'AS01112');
+    assert.equal(row.fields['品牌货号'].value, 'VCARP7I200');
     assert.equal(row.mismatches.some(entry => entry.officialValue === 'Should be ignored'), false);
     assert.equal(row.mismatches.find(entry => entry.field === '品牌货号').officialValue, 'DIFFERENT');
     assert.equal(row.flagColour, '#FDE68A');
