@@ -318,15 +318,17 @@ export function cleanProductCode(value, {brand = null, card = null, phone = null
 
 // ---------------------------------------------------------------------------
 // 品名 sanity: summary words, column headings and bare numbers are never item names.
-const nonItemWords = /^(?:amount|amt|total|grand\s+total|sub\s*-?\s*total|subtotal|vat|tax|tva|mwst|gst|change|balance(?:\s+due)?|cash|card|payment|tender|discount|qty|quantity|price|unit\s+price|item|items|description|desc|sum|summe|net|gross|due|paid|rounding|tip|service(?:\s+charge)?|n\/?a|null|none|unknown)$/i;
+const nonItemWords = /^(?:amount|amt|total|grand\s+total|sub\s*-?\s*total|subtotal|vat|tax|tva|mwst|gst|change|balance(?:\s+due)?|cash|card|payment|tender|discount|qty|quantity|price|unit\s+price|item|items|description|desc|sum|summe|net|gross|due|paid|rounding|tip|service(?:\s+charge)?|staff(?:\s*(?:no|number|id))?|operator|rewards?|loyalty|customer\s+(?:copy|receipt)|return(?:s|ed)?\s+policy|refund\s+policy|exchange\s+policy|warranty\s+policy|marketing|promotion(?:al)?|n\/?a|null|none|unknown)$/i;
 export function nonItemName(value) {
   const text = clean(value).replace(/[\s:#*.=-]+$/g, '').replace(/^[\s:#*.=-]+/g, '');
   if (!text) return null;
   if (/^[\d\s.,'£$€¥%#*+-]+$/.test(text)) return 'The item name is only a number (' + clean(value) + ').';
   const words = text.replace(/[\s:]+(?:GBP|EUR|USD|[£$€])?\s*[\d.,]+\s*%?$/i, '').replace(/[\s:#*.=-]+$/g, '');
   if (nonItemWords.test(words)) return 'The item name is a receipt label, not a product (' + clean(value) + ').';
-  if (/^(?:salesperson|sales\s*person|served\s+by|cashier|associate|staff)\b/i.test(text))
+  if (/^(?:salesperson|sales\s*person|served\s+by|cashier|associate|staff(?:\s*(?:no|number|id))?|operator)\b/i.test(text))
     return 'The item name is a staff line, not a product (' + clean(value) + ').';
+  if (/^(?:reward(?:s)?\s+(?:points?|saving|number|id)|loyalty\s+(?:points?|number|id)|customer\s+(?:copy|receipt)|return(?:s|ed)?\s+(?:policy|receipt)|refund\s+policy|exchange\s+policy|warranty\s+policy|terms\s+(?:and|&)\s+conditions|marketing|promotion(?:al)?)\b/i.test(text))
+    return 'The item name is a footer or policy line, not a product (' + clean(value) + ').';
   if (/^(?:visa|master\s*card|maestro|amex|american\s+express|union\s*pay|alipay|we\s*chat|apple\s+pay|google\s+pay|cash|tender(?:ed)?|auth(?:\s+code)?|aid|cryptogram|pan\s*seq|terminal|merchant\s+id|card\s*number|approved)\b/i.test(text))
     return 'The item name is a payment line, not a product (' + clean(value) + ').';
   if (/^(?:40|80)\//.test(text))

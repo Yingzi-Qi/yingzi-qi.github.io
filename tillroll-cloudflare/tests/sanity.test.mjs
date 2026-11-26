@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { makeEnv, mockFetch, CATALOGUE } from './helpers.mjs';
-import { runSanity, COLUMNS, PINK, AMBER, normaliseTimestamp, normaliseTender, chooseBrandItemId, resolveBrandItemId, TENDER_REASON, maybeApplyPr1BatchDateOutlierCheck, BRAND_ITEM_ID_FORMAT, BRAND_ITEM_ID_FORMATS, setBrandItemIdFormat, getBrandItemIdFormat, fitsBrandItemIdFormat, extractChanelStyleRef, suggestedPrintedCodeAlternative, printedValueKeptReason, officialSiteShowsReason } from '../functions/_lib/sanity.js';
+import { makeEnv, mockFetch, CATALOGUE, seedCatalogue } from './helpers.mjs';
+import { runSanity, COLUMNS, PINK, AMBER, normaliseTimestamp, normaliseTender, chooseBrandItemId, resolveBrandItemId, TENDER_REASON, maybeApplyPr1BatchDateOutlierCheck, BRAND_ITEM_ID_FORMAT, BRAND_ITEM_ID_FORMATS, setBrandItemIdFormat, getBrandItemIdFormat, fitsBrandItemIdFormat, extractChanelStyleRef, suggestedPrintedCodeAlternative, printedValueKeptReason, officialSiteShowsReason, receiptGate, batchDateFindings, normaliseSupplier, normaliseBrand } from '../functions/_lib/sanity.js';
 import { lookup } from '../functions/_lib/lookup.js';
 import { keys } from '../functions/_lib/cache.js';
 import { createRun, processRun, getRun } from '../functions/_lib/runs.js';
@@ -29,7 +29,7 @@ function checkInvariants(result) {
 }
 
 test('an unfitting item code falls through to the official style ref, or the EAN', async () => {
-  const env = makeEnv();
+  const { SANITY_TEST_MODE: _legacyMarker, ...env } = makeEnv();
   const seen = [];
   const lookupStub = async (_env, req) => {
     seen.push(req.itemId);
@@ -49,12 +49,13 @@ test('an unfitting item code falls through to the official style ref, or the EAN
   const second = result.agreedRows[1].cells['品牌货号'];
   assert.notEqual(first, 'NOT-A-REF');
   assert.notEqual(second, 'ALSO-NOT');
-  // Official style wins over a labelled EAN; with no official, the labelled GTIN is used.
-  assert.equal(first, 'AS44010');
+  // A labelled GTIN is the only deterministic fallback. The injected
+  // provider is intentionally ignored by the production path.
+  assert.equal(first, '4000000000013');
   assert.equal(second, '4000000000020');
   assert.equal(result.agreedRows[1].flags['品牌货号'], AMBER);
   assert.equal(result.agreedRows[1].exportMeta.comments['品牌货号'], 'Only an EAN is available; the brand item id was not found.');
-  assert.deepEqual(seen, ['4000000000013', '4000000000020']);
+  assert.deepEqual(seen, []);
 });
 
 test('timestamps: 24h, 00 seconds, am/pm converted', () => {
@@ -64,6 +65,50 @@ test('timestamps: 24h, 00 seconds, am/pm converted', () => {
   assert.equal(normaliseTimestamp('17/01/2025', null), '2025-01-17 00:00:00');
   assert.equal(normaliseTimestamp('03/04/2026', null), '2026-04-03 00:00:00');
   assert.equal(normaliseTimestamp('2025-13-40', '10:00'), null);
+});
+
+test('strict receipt gate routes unknown, duplicate, and unreconciled synthetic receipts to review', () => {
+  const unknown = {
+    layoutStatus: 'unknown', receiptReference: 'SYN-REVIEW-01', itemCount: 1, total: 10,
+    items: [{ qty: 1, unitPrice: 9, amount: 8 }],
+  };
+  const gate = receiptGate(unknown, unknown.items);
+  assert.equal(gate.status, 'review');
+  assert.equal(gate.exportable, false);
+  assert.ok(gate.reasons.some(reason => /unknown receipt layout/i.test(reason)));
+  assert.ok(gate.reasons.some(reason => /does not reconcile/i.test(reason)));
+  const duplicate = receiptGate({ layoutStatus: 'harrods', receiptReference: 'SYN-REVIEW-01', itemCount: 1, total: 10 }, [{ qty: 1, unitPrice: 10, amount: 10 }], { duplicateReason: 'Duplicate receipt detected by receipt ID.' });
+  assert.equal(duplicate.status, 'review');
+  assert.equal(duplicate.exportable, false);
+  assert.ok(duplicate.reasons.some(reason => /duplicate receipt/i.test(reason)));
+});
+
+test('batch date and fixed normalisers are deterministic', () => {
+  const receipts = [
+    { date: '2026-11-15', time: '10:00' },
+    { date: '2026-11-16', time: '10:00' },
+    { date: '2028-01-01', time: '10:00' },
+  ];
+  const findings = batchDateFindings(receipts, { now: new Date('2026-11-26T12:00:00Z') });
+  assert.deepEqual(findings, [{ index: 2, reason: 'Purchase date is in the future.' }]);
+  assert.equal(normaliseSupplier('Harrods London'), 'Harrods');
+  assert.equal(normaliseBrand('Hernes'), 'Hermès');
+  assert.equal(normaliseBrand('synthetic unknown label'), null);
+});
+
+test('production sanity ignores injected network providers', async () => {
+  let calls = 0;
+  const lookupStub = async () => { calls++; return { candidates: [] }; };
+  const { SANITY_TEST_MODE: _legacyMarker, ...env } = makeEnv();
+  delete env.SANITY_TEST_MODE;
+  seedCatalogue(env, [{ brand: 'Chanel', itemId: 'A1234', officialName: 'Synthetic coat', price: 100, sourceUrl: 'https://catalogue.synthetic/A1234' }]);
+  const { result } = await runSanity(env, { batchId: 'deterministic-only', mode: 'round1', receipts: [{
+    receiptKey: 'deterministic-only', layout: 'harrods', layoutStatus: 'known', gateRequired: true, merchant: 'Harrods', receiptReference: 'NT1234-567890',
+    date: '2026-11-15', time: '10:00', payment: 'Visa', total: 100, itemCount: 1,
+    items: [{ brand: 'Chanel', item: 'Synthetic coat', itemId: 'A1234', qty: 1, unitPrice: 100, amount: 100 }],
+  }] }, { lookup: lookupStub, now: new Date('2026-11-26T12:00:00Z') });
+  assert.equal(calls, 0);
+  assert.equal(result.receiptGates[0].status, 'pass');
 });
 
 test('sanity keeps the reader date issue as the purchase-time reason', async () => {
@@ -96,13 +141,11 @@ test('sanity uses only deterministic catalogue entries and never invokes search 
   const calls = { brave: 0, gemini: 0 };
   const env = makeEnv({ BRAVE_API_KEY: 'synthetic-brave', GEMINI_API_KEY: 'synthetic-gemini' });
   const f = mockFetch([], calls);
-  const cacheKey = keys.item('Synthetic Brand', 'SYN-CAT-42');
   const candidate = {
     brand: 'Synthetic Brand', officialName: 'Synthetic Catalogue Coat', itemId: 'SYN-CAT-42',
     price: 120, currency: 'GBP', onOfficialSite: true, matchedFields: ['itemId', 'brand', 'price'],
     matchType: 'id', confidence: 1, sourceUrls: ['https://catalogue.synthetic.example/SYN-CAT-42'],
   };
-  await env.LOOKUP_CACHE.put(cacheKey, JSON.stringify({ sourcesQueried: ['brave', 'gemini-grounding'], candidates: [candidate] }));
   const rejected = await runSanity(env, { batchId: 'synthetic-ai-cache', mode: 'round1', receipts: [{
     receiptKey: 'synthetic-ai-cache', merchant: 'Synthetic Shop', receiptReference: 'SYN-R1', date: '2026-11-20', time: '12:00', payment: 'Card', currency: 'GBP',
     items: [{ brand: 'Synthetic Brand', item: 'Printed Coat', itemId: 'SYN-CAT-42', unitPrice: 120, amount: 120 }],
@@ -114,7 +157,7 @@ test('sanity uses only deterministic catalogue entries and never invokes search 
   assert.match(rejected.result.agreedRows[0].flagReasons['品名'], /No exact catalogue match/);
 
   const tableEnv = makeEnv({ BRAVE_API_KEY: 'synthetic-brave', GEMINI_API_KEY: 'synthetic-gemini' });
-  await tableEnv.LOOKUP_CACHE.put(cacheKey, JSON.stringify({ deterministic: true, candidates: [candidate] }));
+  seedCatalogue(tableEnv, [candidate]);
   const accepted = await runSanity(tableEnv, { batchId: 'synthetic-table', mode: 'round1', receipts: [{
     receiptKey: 'synthetic-table', merchant: 'Synthetic Shop', receiptReference: 'SYN-R2', date: '2026-11-20', time: '12:00', payment: 'Card', currency: 'GBP',
     items: [{ brand: 'Synthetic Brand', item: 'Printed Coat', itemId: 'SYN-CAT-42', unitPrice: 120, amount: 120 }],
@@ -133,13 +176,15 @@ test('P7: unclear UK dates are DD/MM; 03/04/2026 is 3 April and there is no MM/D
   assert.equal(normaliseTimestamp('04/13/2026', null), null);
 });
 
-test('all stored sample readings (real-samples + featured) pass the export invariants, no keys', async () => {
+test('stored sample readings keep field invariants and route unsupported receipts to review', async () => {
   const fx = fixtures();
   assert.ok(fx.length >= 25);
   const env = makeEnv();
   const { result, audit } = await runSanity(env, { batchId: 'samples', mode: 'round1', receipts: fx.map(f => f.receipt) });
   checkInvariants(result);
-  assert.equal(result.workbookExportReady, true);
+  assert.equal(result.workbookExportReady, false);
+  assert.ok(result.receiptGates.some(gate => gate.status === 'review'));
+  assert.ok(result.reviewReceipts.every(review => review.failingChecks.length > 0));
   // CARRIAGE 0/0 (JD France) is a confirmed true zero -> excluded
   assert.ok(audit.excludedZero.some(z => z.name === 'CARRIAGE'));
   assert.ok(!result.agreedRows.some(r => r.cells['品名'] === 'CARRIAGE'));
@@ -525,6 +570,7 @@ test('brandItemId: Gucci printed ref 000001 is kept, Amber official site shows 6
 
 test('brandItemId: style ref / brand product code, EAN (Amber), empty + Pink, and forbidden concession labels', async () => {
   const env = makeEnv();
+  seedCatalogue(env, [{ brand: 'Chanel', itemId: 'A69900', officialName: 'Flap bag', price: 10, sourceUrl: 'https://catalogue.synthetic/A69900' }]);
   const base = { merchant: 'Selfridges', date: '2026-11-20', time: '12:00', payment: 'Visa', currency: 'GBP' };
   const rec = (key, items) => ({ ...base, receiptKey: key, receiptReference: key, items });
   const { result } = await runSanity(env, { mode: 'round1', receipts: [
@@ -565,19 +611,19 @@ test('brandItemId: style ref / brand product code, EAN (Amber), empty + Pink, an
 test('BRAND_ITEM_ID_FORMAT is empty by default, injectable, and only fitting printed codes count as style refs', async () => {
   assert.equal(BRAND_ITEM_ID_FORMAT, BRAND_ITEM_ID_FORMATS);
   assert.ok(Array.isArray(BRAND_ITEM_ID_FORMATS) && BRAND_ITEM_ID_FORMATS.length > 0);
-  const table = { Synthetic: /^ZZ\d{4}$/ };
+  const table = { Chanel: /^ZZ\d{4}$/ };
   setBrandItemIdFormat(table);
   try {
     assert.equal(BRAND_ITEM_ID_FORMAT, BRAND_ITEM_ID_FORMATS);
-    assert.equal(fitsBrandItemIdFormat('Synthetic', 'ZZ9999'), true);
-    assert.equal(fitsBrandItemIdFormat('Synthetic', 'ZZ999l'), false);
-    const fitting = resolveBrandItemId({ item: { styleRef: 'ZZ9999' }, brand: 'Synthetic' });
+    assert.equal(fitsBrandItemIdFormat('Chanel', 'ZZ9999'), true);
+    assert.equal(fitsBrandItemIdFormat('Chanel', 'ZZ999l'), false);
+    const fitting = resolveBrandItemId({ item: { styleRef: 'ZZ9999' }, brand: 'Chanel' });
     assert.equal(fitting.brandItemId, 'ZZ9999');
     assert.equal(fitting.brandItemIdSource, 'styleRef');
     assert.equal(fitting.flag, null);
     // #20: a non-fitting printed code does not occupy 品牌货号. The official / I→1
     // alternative is recorded in the reason only, never written as the item id.
-    const nonFitting = resolveBrandItemId({ item: { styleRef: 'ZZ999l' }, brand: 'Synthetic', officialItemId: 'ZZ9999' });
+    const nonFitting = resolveBrandItemId({ item: { styleRef: 'ZZ999l' }, brand: 'Chanel', officialItemId: 'ZZ9999' });
     // Official fills when the typo does not fit. It does not write the typo, and does not invent an OCR guess as the id.
     assert.equal(nonFitting.brandItemId, 'ZZ9999');
     assert.equal(nonFitting.brandItemIdSource, 'official');
@@ -590,8 +636,8 @@ test('BRAND_ITEM_ID_FORMAT is empty by default, injectable, and only fitting pri
   const { result } = await runSanity(makeEnv(), { receipts: [{
     receiptKey: 'fmt-inj', merchant: 'Test', date: '2026-04-03', time: '14:00:00',
     payment: 'Visa', currency: 'GBP',
-    items: [{ brand: 'Synthetic', item: 'Tote bag', styleRef: 'XY9999', qty: 1, unitPrice: 100, amount: 100 }],
-  }] }, { brandItemIdFormat: { Synthetic: /^ZZ\d{4}$/ } });
+    items: [{ brand: 'Chanel', item: 'Tote bag', styleRef: 'XY9999', qty: 1, unitPrice: 100, amount: 100 }],
+  }] }, { brandItemIdFormat: { Chanel: /^ZZ\d{4}$/ } });
   assert.equal(BRAND_ITEM_ID_FORMAT, BRAND_ITEM_ID_FORMATS);
   assert.equal(result.agreedRows[0].cells['品牌货号'] || '', '');
   assert.equal(result.agreedRows[0].exportMeta.brandItemId || '', '');
@@ -624,10 +670,10 @@ test('Chanel optional season prefix: 24P AS1234 yields style ref AS1234', async 
 });
 
 test('unconfirmed printed brand code is not auto-corrected into the cell; alternative stays in the comment', async () => {
-  const table = { Synthetic: /^ZZ\d{4}$/ };
+  const table = { Chanel: /^ZZ\d{4}$/ };
   // l→1 is the OCR guess (ZZ9991). The official/format-fitting code is ZZ9999.
-  assert.equal(suggestedPrintedCodeAlternative('ZZ999l', 'Synthetic', table), 'ZZ9991');
-  const rec = resolveBrandItemId({ item: { itemId: 'ZZ999l' }, brand: 'Synthetic', formatTable: table });
+  assert.equal(suggestedPrintedCodeAlternative('ZZ999l', 'Chanel', table), 'ZZ9991');
+  const rec = resolveBrandItemId({ item: { itemId: 'ZZ999l' }, brand: 'Chanel', formatTable: table });
   // #20 empties the cell; printed-value-kept keeps the official/OCR alternative out of the item id.
   assert.equal(rec.brandItemId, null);
   assert.notEqual(rec.brandItemId, 'ZZ9999');
@@ -639,7 +685,7 @@ test('unconfirmed printed brand code is not auto-corrected into the cell; altern
   const { result } = await runSanity(makeEnv(), { receipts: [{
     receiptKey: 'ocr-keep', merchant: 'Test', date: '2026-04-03', time: '14:00:00',
     payment: 'Visa', currency: 'GBP',
-    items: [{ brand: 'Synthetic', item: 'Tote bag', itemId: 'ZZ999l', qty: 1, unitPrice: 100, amount: 100 }],
+    items: [{ brand: 'Chanel', item: 'Tote bag', itemId: 'ZZ999l', qty: 1, unitPrice: 100, amount: 100 }],
   }] }, { brandItemIdFormat: table });
   const row = result.agreedRows[0];
   assert.equal(row.cells['品牌货号'] || '', '');

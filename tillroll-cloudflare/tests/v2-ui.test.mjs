@@ -11,6 +11,7 @@ import {
   clearNeedsChecking,
   receiptSelectId,
 } from '../../tillroll/v2.js';
+import { makeOcr } from '../../tillroll/tests/ocr-fixture.mjs';
 
 function shouldCallServerOcr(apiKey) {
   return String(apiKey ?? '').trim() === '__server__';
@@ -89,6 +90,28 @@ test('receiptsFromBatch keeps the receipt id used for selection', () => {
   assert.equal(row.id, 7);
   assert.ok(row.receiptKey);
   assert.equal(row.items.length, 1);
+});
+
+test('production sanity payload preserves strict layout, gate, totals, and OCR line evidence', () => {
+  const row = receipt(8, {
+    url: 'blob:synthetic-receipt',
+    ocr: makeOcr([
+      'HARRODS',
+      '15/11/2026 10:04 NT1234-567890',
+      '2469 9999991234 Chanel A12345 Synthetic wool coat 120.00 120.00',
+      'TOTAL (1 item) 120.00',
+      'VISA',
+    ]),
+  });
+  const [payload] = receiptsFromBatch([row]);
+  assert.equal(payload.layout, 'harrods');
+  assert.equal(payload.layoutStatus, 'known');
+  assert.equal(payload.gateRequired, true);
+  assert.equal(payload.total, 120);
+  assert.equal(payload.itemCount, 1);
+  assert.equal(payload.receiptReference, 'NT1234-567890');
+  assert.deepEqual(payload.items[0].sourceLines, [3]);
+  assert.equal(payload.imageLink, 'blob:synthetic-receipt');
 });
 
 // Upload network policy: app.js run() + extract.js extractAI, with a mocked fetch.

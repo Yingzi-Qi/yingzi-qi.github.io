@@ -7,6 +7,7 @@ import {
   nonItemName, readStoreClues, mergeStoreClues, storeReceiptId, confirmedStoreReceiptId, classifyZeroPrice, applyZeroPriceExclusion,
 } from '../receipt-rules.js';
 import {extractLocal, cleanReceipt, geminiSchema, geminiPrompt, prepareModelReading, reconcileReadings} from '../extract.js';
+import {classifyLayout} from '../layout-classifier.js';
 import {inspectReference} from '../reference.js';
 import {sortItemFields} from '../field-sorter.js';
 import {identifierClasses, itemCountCheck} from '../item-identifiers.js';
@@ -15,6 +16,25 @@ import {checkReceipt, flagCategory, verifyImportedItemIds} from '../checks.js';
 const today = new Date('2026-11-25T12:00:00Z');
 const read = rows => { const ocr = makeOcr(rows); const data = extractLocal(ocr); return {ocr, data, review: checkReceipt(data, ocr, null, {today})}; };
 const flagsFor = (review, field) => review.flags.filter(f => f.field === field && f.severity !== 'info');
+
+test('synthetic footer noise never becomes an item and unknown layouts are review-only', () => {
+  const {data} = read(['Synthetic Boutique', '15/11/2026 10:04', 'SYN-COAT-42 Wool coat 120.00',
+    'T0TAL 120.00', 'StaffNo 4821 120.00', 'Operator Mira 1.00',
+    'Rewards points 120.00', 'Customer copy 120.00', 'Return policy 120.00', 'Visa Tendered 120.00']);
+  assert.deepEqual(data.items.map(item => item.item), ['Wool coat']);
+  assert.equal(data.items[0].amount, 120);
+  assert.equal(data.layoutStatus, 'unknown');
+  assert.equal(data.fieldIssues.some(issue => issue.reason === 'unknown_layout'), true);
+});
+
+test('synthetic fixed anchors select only their matching layout', () => {
+  const harrods = classifyLayout(makeOcr(['HARRODS', '15/11/2026 10:04 NT1234-567890', 'Coat 120.00']), 'Harrods');
+  const chanel = classifyLayout(makeOcr(['CHANEL', 'Style: AB1234', 'Bag 120.00']), 'Chanel');
+  const unknown = classifyLayout(makeOcr(['Synthetic Shop', 'Coat 120.00']), 'Synthetic Shop');
+  assert.equal(harrods.layout, 'harrods');
+  assert.equal(chanel.layout, 'chanel-boutique');
+  assert.equal(unknown.status, 'unknown');
+});
 
 // ---- 2. 采购时间 -----------------------------------------------------------
 test('receipt numbers keep O and I and offer the digit reading', () => {
@@ -128,7 +148,7 @@ test('storeClues: printed header/footer only, null where absent, merchant untouc
   assert.deepEqual(readStoreClues(makeOcr(['MAC', 'Lipstick 25.00', 'TOTAL 25.00']).lines, 'MAC'),
     {addressLines: [], postcode: null, storeNumber: null, phone: null});
   const {data} = read(['HARRODS', '87-135 Brompton Road', 'London SW1X 7XL', '12/11/2026 14:03 R0012345', 'Notebook 7.00', 'TOTAL 7.00']);
-  assert.equal(data.merchant, 'HARRODS');
+  assert.equal(data.merchant, 'Harrods');
   assert.equal(data.storeClues.postcode, 'SW1X 7XL');
 });
 test('storeClues: Gemini schema requires it; prompt forbids branch inference; ids stay separate', () => {

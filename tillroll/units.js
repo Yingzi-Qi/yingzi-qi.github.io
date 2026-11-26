@@ -145,7 +145,7 @@ function lineFigures(line) {
   if (list === null && amount !== null && amount !== 0) list = round2(amount / qty);
   let linePaid = amount;
   if (linePaid === null && list !== null) {
-    const off = each !== null ? round2(each * qty) : (num(line?.discount) || 0);
+    const off = each !== null ? round2(each * qty) : (num(line?.discount ?? line?.lineDiscount) || 0);
     linePaid = round2(list * qty - off);
   }
   return { qty, list, linePaid, each };
@@ -190,7 +190,9 @@ export function supplierVisibleName(printed, officialBranch) {
 
 function copyRound2(line) {
   const out = {};
-  for (const k of ['clearedCols', 'flaggedCols', 'editedCols', 'previousCells', 'previousItemId', 'readingFlags', 'fieldIssues', 'zeroConfirmed', 'unitSettled']) {
+  // Provenance is carried through unit expansion so the server gate can show
+  // the printed evidence without reconstructing a line after allocation.
+  for (const k of ['clearedCols', 'flaggedCols', 'editedCols', 'previousCells', 'previousItemId', 'readingFlags', 'fieldIssues', 'zeroConfirmed', 'unitSettled', 'sourceLines']) {
     if (line[k] !== undefined) out[k] = line[k];
   }
   return out;

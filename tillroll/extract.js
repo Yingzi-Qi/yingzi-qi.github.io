@@ -6,6 +6,7 @@ import {comparePhotoFields,mergeReadings} from './reading-comparison.js?v=discou
 import {readPurchaseTime,normalizePurchaseTime,readTender,normalizeTender,toPaymentMethod,dropCardDigits,brandItemIdCandidate,readPrintedStyleRef,readStoreClues,mergeStoreClues,storeReceiptId,cleanProductCode,applyZeroPriceExclusion,isUkPurchase,confusableDigitAlternative} from './receipt-rules.js?v=1';
 import {sortItemFields} from './field-sorter.js';
 import {applyItemIdentifiers, isUntrustedReceiptText, maskCardField, cardScheme} from './item-identifiers.js';
+import {classifyLayout, receiptReferenceForLayout, validLayoutReceiptId} from './layout-classifier.js';
 // OCR assets resolve on this site. Receipt images remain in the tab unless the
 // caller explicitly starts the optional Gemini reader using a supplied API key.
 const asset = name => new URL(`./ocr/${name}`, import.meta.url).href;
@@ -120,7 +121,7 @@ const itemShape = () => ({ brand:null, brandRaw:null, item:null, itemId:null, sk
 const receiptShape = () => ({ merchant:null, date:null, time:null, orderNumber:null, orderId:null, receiptReference:null,
   total:null, subtotal:null, discount:null, receiptDiscount:null, receiptDiscounts:[], tax:null, currency:null, payment:null, card:null, identifiers:[], itemCountCheck:null,
   storeClues:{addressLines:[],postcode:null,storeNumber:null,phone:null},
-  items:[], excludedZeroItems:[], fieldIssues:[], imageQuality:'unknown' });
+  items:[], excludedZeroItems:[], fieldIssues:[], imageQuality:'unknown', layout:null, layoutStatus:'unknown', layoutReason:null });
 
 function columns(line) {
   const groups = [];
@@ -133,9 +134,13 @@ function columns(line) {
   }
   return groups.map(words => words.map(w => w.text).join(' '));
 }
-const retailers = [/Harvey\s+Nichols/i,/Harrods/i,/Selfridges/i,/Liberty(?: London)?/i,/Fortnum\s*(?:and|&)\s*Mason/i,/Flannels/i,/Net[-\s]a[-\s]Porter/i,/Bicester Village/i];
+const retailers = [
+  [/Harvey\s+Nichols/i, 'Harvey Nichols'], [/Harrods/i, 'Harrods'], [/Selfridges/i, 'Selfridges'],
+  [/Liberty(?: London)?/i, 'Liberty London'], [/Fortnum\s*(?:and|&)\s*Mason/i, 'Fortnum & Mason'],
+  [/Flannels/i, 'Flannels'], [/Net[-\s]a[-\s]Porter/i, 'Net-a-Porter'], [/Bicester Village/i, 'Bicester Village'],
+];
 function findMerchant(lines, text) {
-  for (const name of retailers) { const seen = text.match(name); if (seen) return seen[0]; }
+  for (const [pattern, canonical] of retailers) if (pattern.test(text)) return canonical;
   const top=lines.slice(0,4).map(line=>line.text.trim()).find(line=>/\bN\.?\s*PEAL\b/i.test(line) && /\/|\blondon\b/i.test(line));
   if(top) return 'N.Peal';
   const city=/^(?:london|paris|manchester|edinburgh|glasgow|dublin|birmingham|bristol|leeds|liverpool|cambridge|oxford|chelsea|mayfair|knightsbridge|westminster|soho|england|scotland|wales|great britain|united kingdom)$/i;
@@ -187,7 +192,9 @@ const subLabel=/^(?:sub\s*total|sous[-~\s]*total|zwischensumme|total\s+(?:net\s+
 const taxLabel=/^(?:(?:includes?|included|sales|total)\s+)?(?:tax|vat|tva)\b/i;
 const discountLabel=/^(?:discount|savings|remise|rabatt)\b/i;
 const metadata=/^(?:sub\s*total|sous[-~\s]*total|(?:(?:grand|order|receipt|gross|net)\s+)?total\b|(?:amount|balance)\s+(?:due|paid|to\s+pay)|item\s+total\b|^amount\b|net\s+[àa]\s+payer|tva\b|gesamt(?:betrag|summe)?\b|summe\b|montant\b|(?:sales\s+)?tax\b|vat\b|includes?\s+vat|discount\b|shipping\b|delivery\b|savings\b|remise\b|rabatt\b|cash\b|change\b|credit\b|tender(?:ed)?\b|paid\b|payment\b|card\b|contactless\b|master\s*card\b|visa\b|american express\b|apple pay\b|thank you\b|auth\b|arqc\b|adyen\b|citcon\b|union\s*pay\b|returns?\b|you have been served\b|product\s+info\b)/i;
-const noProduct = /(?:\border\s*(?:no|number|id)\b|^receipt\b|\binvoice\b|^date\b|^time\b|^till\b|^cashier\b|^placed\b|^store\b|style\s*[:#]|\b(?:qty|price)\b.*\b(?:price|amount|total)\b|\bdescription\b.*\bqty\b|^\d{1,2}[\s/-]\w+[\s/-](?:\d{2}|\d{4})\b|\d{1,2}:\d{2}|^demonstration\b)/i;
+const footerLine = /^(?:staff(?:\s*(?:no|number|id))?|operator|cashier|sales\s*(?:person|associate)|served\s+by|reward(?:s)?\s+(?:points?|saving|number|id)|loyalty\s+(?:points?|number|id)|customer\s+(?:copy|receipt)|return(?:s|ed)?\s+(?:policy|receipt)|refund\s+policy|exchange\s+policy|warranty\s+policy|terms\s+(?:and|&)\s+conditions|marketing|promotion(?:al)?\s+(?:message|text)|thank\s+you|card\s+(?:number|payment|tender|approved|ending)|payment\s+approved|change\s+due|vat\s+(?:number|summary)|tax\s+summary|address|postcode|telephone|phone)\b/i;
+const confusableTotal = /^(?:t[o0]t[a4]l|sub\s*[- ]?t[o0]t[a4]l|gr[a4]nd\s+t[o0]t[a4]l)\b/i;
+const noProduct = /(?:\border\s*(?:no|number|id)\b|^receipt\b|\binvoice\b|^date\b|^time\b|^till\b|^cashier\b|^placed\b|^store\b|style\s*[:#]|\b(?:qty|price)\b.*\b(?:price|amount|total)\b|\bdescription\b.*\bqty\b|^\d{1,2}[\s/-]\w+[\s/-](?:\d{2}|\d{4})\b|\d{1,2}:\d{2}|^demonstration\b|^staff(?:\s*(?:no|number|id))?\b|^operator\b|^reward(?:s)?\s+(?:points?|saving|number|id)\b|^loyalty\s+(?:points?|number|id)\b|^customer\s+(?:copy|receipt)\b|^return(?:s|ed)?\s+(?:policy|receipt)\b|^refund\s+policy\b|^exchange\s+policy\b|^warranty\s+policy\b|^terms\s+(?:and|&)\s+conditions\b|^payment\s+approved\b|^tax\s+summary\b|^vat\s+(?:number|summary)\b)/i;
 function possibleLabel(line) {
   return line && /\p{L}/u.test(line.text) && !metadata.test(tidyLine(line.text)) && !noProduct.test(line.text) && !/^style\b|^sku\b|^(?:item|product|article)\s+(?:id|code)\b|^(?:upc|ean|barcode)\b/i.test(line.text) && !amounts(line.text).length;
 }
@@ -383,7 +390,7 @@ function isClosingTotal(text) {
   const label=tidyLine(text);
   // Harrods closes the item list with "TOTAL (1 item)" / "TOTAL (3 items)".
   // The amount may sit on that line, or a few lines later. "|tem Total" is the same close.
-  if(/^(?:(?:grand|order|receipt|net|gross)\s+)?total\s*\(\s*\d+\s+items?\s*\)/i.test(label) || isServiceTotal(text)) return true;
+  if(/^(?:(?:grand|order|receipt|net|gross)\s+)?total\s*\(\s*\d+\s+items?\s*\)/i.test(label) || confusableTotal.test(label) || isServiceTotal(text)) return true;
   const prices=amounts(text);
   if(prices.length!==1) return false;
   const head=tidyLine(text.slice(0,prices[0].start));
@@ -442,6 +449,10 @@ function itemsFromLines(lines, trace, receiptTotal=null) {
     if(skipCashier){skipCashier=false;continue;}
     if(/you have been served today by/i.test(text)){skipCashier=true;continue;}
     if(isUntrustedReceiptText(text))continue;
+    // Footer, staff and policy lines are never item evidence even when OCR
+    // attaches a plausible price. The anchored rule keeps names such as
+    // "Card holder" eligible.
+    if(footerLine.test(tidyLine(text)) && !/\b(?:discount|saving|offer|promo(?:tion)?|reduction|remise|rabais|rabatt|markdown|off)\b|%/i.test(text))continue;
     const productInfo=/^product\s+info\s*:\s*(\d{13})(?:\s+(.+))?$/i.exec(text);
     if(productInfo){
       if(items.length && i-lastProduct<=3){
@@ -498,7 +509,7 @@ function itemsFromLines(lines, trace, receiptTotal=null) {
       }
       continue;
     }
-    if (noProduct.test(text))continue;
+    if (noProduct.test(text) && !/\b(?:discount|saving|offer|promo(?:tion)?|reduction|remise|rabais|rabatt|markdown|off)\b|%/i.test(text))continue;
     if(layout){
       const row=productFromColumns(line,layout);
       if(row){
@@ -811,10 +822,311 @@ export function readPrintedProductRows(ocr) {
 }
 export {amounts as readPrintedAmounts, neighbouringRows as nearbyPrintedRows};
 
+// Strict v2 item evidence.  extractLocal remains the diagnostic reader used by
+// the comparison UI, where a plausible priced line is useful evidence.  The
+// export reader uses this whitelist instead.  A line is a purchase line only
+// when it contains a product-shaped identifier and a price, or is the name
+// immediately above such a line.  Footer text can therefore never become an
+// item merely because OCR attached a money token to it.
+const strictFooter = /^(?:total|sub\s*[- ]?total|subtotal|grand\s+total|amount|balance|tax|vat|tva|discount|saving|cash|change|tender|payment|visa|master\s*card|maestro|amex|union\s*pay|alipay|we\s*chat|card|approved|auth|terminal|merchant|staff(?:\s*(?:no|number|id))?|operator|cashier|sales\s*(?:person|associate)|served\s+by|reward(?:s)?|loyalty|member|customer\s+(?:copy|receipt)|return|refund|exchange|warranty|terms|marketing|promotion|thank\s+you|please|address|postcode|telephone|phone|carrier\s+bag|by\s+appointment|gift\s+wrap)\b/i;
+const strictCode = /\b(?:[A-Z]{1,6}[0-9][A-Z0-9]*(?:[-_/][A-Z0-9]+)*|[0-9]{4,14})\b/gi;
+const strictCodeBad = /^(?:19|20)\d{2}$|^\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?$|^\d+[.,]\d{2}$/;
+const strictWords = value => String(value ?? '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+const strictPriceText = value => amounts(value).length > 0;
+const strictMetadata = /^(?:citcon|qr\s+tendered|payment\s+reference|payment\s+method|you\s+have\s+been\s+served|rewards?\b|harrods\s+rewards|contactless\b|pan\s+seq|aid\b|cryptogram|verified\s+by|cardholder|please\s+debit|please\s+retain|exchange\b|no\s+refund|product\s+info\b)/i;
+function strictPriceLineAllowed(value) {
+  const text = String(value ?? '').trim();
+  const label = tidyLine(text);
+  return Boolean(text)
+    && !strictFooter.test(label)
+    && !confusableTotal.test(label)
+    && !isClosingTotal(text)
+    && !isPaymentFooter(text)
+    && !isTenderOrBalance(text)
+    && !strictMetadata.test(label)
+    && !noProduct.test(text)
+    && !isUntrustedReceiptText(text);
+}
+function strictPriceEvidenceAllowed(lines, index) {
+  const text = lines[index]?.text || '';
+  if (!strictPriceLineAllowed(text)) return false;
+  // A bare money line before the first closing marker can be an item price.
+  // Once a receipt has printed TOTAL/tender/payment evidence, later bare money
+  // lines belong to the footer and must not be linked back to a product code.
+  if (/[\p{L}]{2}/u.test(text)) return true;
+  for (let cursor = index - 1; cursor >= Math.max(0, index - 10); cursor--) {
+    const prior = lines[cursor]?.text || '';
+    const label = tidyLine(prior);
+    if (isClosingTotal(prior) || isPaymentFooter(prior) || isTenderOrBalance(prior) || strictFooter.test(label)) return false;
+    // A product code or a descriptive line is the nearest item anchor. Stop
+    // there before an earlier masthead line can make a valid item price look
+    // like a payment amount.
+    if (strictCodeTokens(prior).length || /\p{L}{2}/u.test(prior) && !strictMetadata.test(label) && !noProduct.test(prior)) return true;
+  }
+  return true;
+}
+function strictCodeTokens(value) {
+  return [...String(value ?? '').matchAll(strictCode)].map(match => match[0])
+    .filter(token => !strictCodeBad.test(token)
+      && !/^nt\d{4}-\d{6}$/i.test(token)
+      // Harrods prints a four-digit concession followed by a ten-digit
+      // internal number before the brand. Neither value identifies the item.
+      && !/^\d{10}$/.test(token)
+      && !/^(?:staff|terminal|register|auth|merchant|store|concession|cashier|operator|card|payment|total|tax|vat|und)$/i.test(token)
+      && !/^a\d{10,}$/i.test(token)
+      && !/^(?=.*[a-f])(?=.*\d)[a-f0-9]{12,}$/i.test(token));
+}
+function strictLayoutEvidence(layout, lines) {
+  const evidence = [];
+  const add = (indexes, code, text = null) => evidence.push({indexes, code, text: text || indexes.map(index => lines[index].text).join(' ')});
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i], text = String(line?.text || '').trim();
+    if (!text || !strictPriceLineAllowed(text) || /^(?:receipt|transaction|order|date|time)\b/i.test(text)) continue;
+    const prices = amounts(text);
+    const firstPrice = prices[0];
+    const head = firstPrice ? text.slice(0, firstPrice.start).trim() : text;
+    const codes = strictCodeTokens(head);
+    const harrodsPair = layout === 'harrods' && /^\d{4}\s+\d{10}\b/.test(head);
+    const productCode = harrodsPair ? head.match(/^\d{4}\s+(\d{10})/)[1] : codes.at(-1);
+    if (firstPrice && productCode && /\p{L}{2}/u.test(head.replace(productCode, '')) && firstPrice.value >= 0) {
+      add([i], productCode, text);
+      continue;
+    }
+    // The common luxury till layout prints the description on one row and the
+    // code/quantity/prices on the next.  Link only adjacent rows with evidence.
+    const next = lines[i + 1], nextText = String(next?.text || '').trim();
+    if (!next || !/\p{L}{2}/u.test(text) || !strictPriceLineAllowed(text) || /^(?:receipt|transaction|order|date|time)\b/i.test(text) || !strictPriceText(nextText) || !strictPriceLineAllowed(nextText)) continue;
+    const nextPrices = amounts(nextText), nextHead = nextText.slice(0, nextPrices[0].start).trim();
+    const nextCodes = strictCodeTokens(nextHead);
+    if (nextCodes.length && nextPrices[0].value >= 0)
+      add([i, i + 1], nextCodes.at(-1), text + ' ' + nextText);
+  }
+  // Luxury till receipts often place the price beside the product header,
+  // then print the description and SAP/style reference on separate rows. Keep
+  // the whitelist deterministic by joining only a nearby description, a
+  // product-shaped identifier, and one positive price inside a four-row window.
+  const existing = new Set();
+  for (const item of evidence) for (const price of amounts(item.text)) existing.add(`${item.code}|${price.value}`);
+  const descriptionLine = value => {
+    const text = tidyLine(value);
+    if (!/\p{L}{2}/u.test(text) || strictFooter.test(text) || strictMetadata.test(text) || noProduct.test(text)) return false;
+    if (/^(?:sap|sn|style|sku|item\s*(?:id|code|no)|product\s*(?:id|code)|product\s+info|ref(?:erence)?|colour|size)\b/i.test(text)) return false;
+    return strictWords(text).split(' ').filter(word => word.length > 1).length >= 2;
+  };
+  const positivePrices = lines.map((line, index) => strictPriceEvidenceAllowed(lines, index)
+    ? amounts(line?.text || '').filter(price => price.value > 0)
+    : []);
+  for (let i = 0; i < lines.length; i++) {
+    if (strictFooter.test(tidyLine(lines[i]?.text || '')) || (strictMetadata.test(tidyLine(lines[i]?.text || '')) && !/^product\s+info\b/i.test(tidyLine(lines[i]?.text || ''))) || isUntrustedReceiptText(lines[i]?.text || '')) continue;
+    const tokens = strictCodeTokens(lines[i]?.text || '').filter(token => !/^\d{4}$/.test(token));
+    for (const code of tokens) {
+      // Selfridges places a 12–16 digit receipt barcode below the header. It
+      // is receipt evidence, never a product identifier.
+      if (layout === 'selfridges' && /^\d{12,16}$/.test(code)) continue;
+      let priceIndex = -1, priceDistance = Infinity, priceValue = null;
+      for (let j = Math.max(0, i - 4); j <= Math.min(lines.length - 1, i + 4); j++) {
+        for (const price of positivePrices[j]) {
+          const distance = Math.abs(j - i);
+          if (distance < priceDistance || (distance === priceDistance && j <= i && priceValue === null)) {
+            priceIndex = j; priceDistance = distance; priceValue = price.value;
+          }
+        }
+      }
+      if (priceIndex < 0) continue;
+      let descriptionIndex = -1, descriptionDistance = Infinity;
+      for (let j = Math.max(0, i - 4); j <= Math.min(lines.length - 1, i + 4); j++) {
+        if (j === i || !descriptionLine(lines[j]?.text || '')) continue;
+        const between = lines.slice(Math.min(i, j) + 1, Math.max(i, j));
+        if (between.some(line => strictFooter.test(tidyLine(line?.text || '')))) continue;
+        const distance = Math.abs(j - i);
+        if (distance < descriptionDistance) { descriptionIndex = j; descriptionDistance = distance; }
+      }
+      if (descriptionIndex < 0) continue;
+      const key = `${code}|${priceValue}`;
+      if (existing.has(key)) continue;
+      const indexes = [...new Set([descriptionIndex, i, priceIndex])].sort((a, b) => a - b);
+      add(indexes, code, `${lines[descriptionIndex].text} ${code} £${Number(priceValue).toFixed(2)}`);
+      existing.add(key);
+    }
+  }
+  return evidence;
+}
+function strictEvidenceMatch(row, candidate) {
+  const rowWords = strictWords(row?.item).split(' ').filter(word => word.length > 1);
+  const candidateWords = strictWords(candidate.text);
+  const nameMatch = rowWords.length > 0 && rowWords.filter(word => candidateWords.includes(word)).length >= Math.max(1, Math.min(2, rowWords.length));
+  const amountMatch = row?.amount == null || candidate.indexes.some(index => amounts(candidate.text).some(price => Math.abs(price.value - Number(row.amount)) <= .02)) || candidate.indexes.some(index => amounts(candidate.text).some(price => Math.abs(price.value - Number(row.amount)) <= .02));
+  const idMatch = !row?.itemId || candidate.code == null || candidate.text.toLowerCase().includes(String(row.itemId).toLowerCase());
+  return nameMatch && amountMatch && idMatch;
+}
+function strictRowFromEvidence(candidate) {
+  const text = candidate.text, prices = amounts(text);
+  if (!prices.length || !candidate.code) return null;
+  const first = prices[0], last = prices.at(-1);
+  let head = text.slice(0, first.start).trim();
+  head = head.replace(/^(?:style|sku|item\s*(?:id|code|no\.?|number)|product\s*(?:id|code)|article\s*(?:id|code)|ref(?:erence)?)\s*[:#=]?\s*/i, '').trim();
+  const codeAt = head.toLowerCase().indexOf(String(candidate.code).toLowerCase());
+  if (codeAt < 0) return null;
+  const item = (head.slice(0, codeAt) + ' ' + head.slice(codeAt + String(candidate.code).length))
+    .replace(/^[\s|:;–—#-]+|[\s|:;–—#-]+$/g, '')
+    // Harrods places a concession and internal number before the brand. Keep
+    // the product words, never those store-owned identifiers.
+    .replace(/^\d{4}\s+\d{10}\s+/,'')
+    .replace(/\s+/g, ' ').trim();
+  if (!/\p{L}{2}/u.test(item) || strictFooter.test(item) || strictMetadata.test(item)) return null;
+  const quantity = /(?:^|\s)(\d+)\s*[x×@]\s*/i.exec(text);
+  const raw = {...itemShape(), item, itemId:candidate.code, amount:last.value,
+    unitPrice:prices.length > 1 ? prices.at(-2).value : null, qty:quantity ? Number(quantity[1]) : 1};
+  return assignBrandItemId({...sortItemFields(raw).item, sourceLines:candidate.indexes.map(index => index + 1)});
+}
+
+function strictRowWords(row) {
+  return new Set(strictWords(row?.item).split(' ').filter(word => word.length > 1));
+}
+function strictRowSpan(row) {
+  const lines = (row?.sourceLines || []).map(Number).filter(Number.isFinite);
+  return lines.length ? {min:Math.min(...lines), max:Math.max(...lines), set:new Set(lines)} : null;
+}
+function strictIdentifierQuality(value) {
+  const code = String(value ?? '').trim();
+  if (!code) return 0;
+  if (/^[A-Za-z]{1,6}\d[A-Za-z0-9-]*$/.test(code)) return 3;
+  if (/^[A-Za-z0-9-]+$/.test(code) && /[A-Za-z]/.test(code) && /\d/.test(code)) return 2;
+  if (/^\d{12,14}$/.test(code)) return 1;
+  if (/^\d{4,11}$/.test(code)) return 2;
+  return 1;
+}
+function strictRowQuality(row) {
+  const words = strictRowWords(row);
+  const span = strictRowSpan(row);
+  const compactness = span ? Math.max(0, 4 - (span.max - span.min)) : 0;
+  // OCR often turns a chain of style/colour references into a longer string
+  // than the actual name. Give natural-language words priority over tokens
+  // containing digits when choosing one representative for a duplicate block.
+  const descriptive = [...words].reduce((score, word) => score + (/^\p{L}[\p{L}'&-]*$/u.test(word) ? 10 : 2), 0);
+  return descriptive + Math.min(20, [...words].join('').length / 2) + strictIdentifierQuality(row?.itemId) + compactness;
+}
+function strictRowsSameBlock(left, right) {
+  if (left?.amount == null || right?.amount == null || Math.abs(Number(left.amount) - Number(right.amount)) > .02) return false;
+  const a = strictRowSpan(left), b = strictRowSpan(right);
+  if (!a || !b) return false;
+  const overlaps = [...a.set].some(line => b.set.has(line));
+  if (!overlaps) return false;
+  const wordsA = strictRowWords(left), wordsB = strictRowWords(right);
+  if (!wordsA.size || !wordsB.size) return true;
+  const shared = [...wordsA].filter(word => wordsB.has(word)).length;
+  return shared >= Math.min(2, Math.min(wordsA.size, wordsB.size));
+}
+function strictCollapseRows(rows, printedCount) {
+  const clusters = [];
+  for (const row of rows) {
+    const cluster = clusters.find(group => group.some(existing => strictRowsSameBlock(existing, row)));
+    if (cluster) cluster.push(row);
+    else clusters.push([row]);
+  }
+  const ambiguous = [];
+  let collapsed = clusters.map(group => {
+    const ranked = [...group].sort((left, right) => strictRowQuality(right) - strictRowQuality(left));
+    const chosen = {...ranked[0]};
+    const identifiers = [...new Set(group.map(row => String(row?.itemId ?? '').trim()).filter(Boolean))];
+    if (identifiers.length > 1) {
+      chosen.itemId = null;
+      chosen.itemIdCandidates = identifiers;
+      chosen.itemIdDecision = 'ambiguous_identifier';
+      chosen.brandItemId = null;
+      chosen.brandItemIdCandidate = null;
+      ambiguous.push(identifiers);
+    }
+    const settled = assignBrandItemId(chosen);
+    if (identifiers.length > 1) {
+      // Candidate lists are retained for human review, but an ambiguous block
+      // must never promote the first OCR token into the export field.
+      settled.brandItemId = null;
+      settled.brandItemIdCandidate = null;
+    }
+    return settled;
+  });
+  const limit = Number.isInteger(printedCount) && printedCount >= 0 ? printedCount : null;
+  if (limit != null && collapsed.length > limit) {
+    collapsed = [...collapsed].sort((left, right) => strictRowQuality(right) - strictRowQuality(left)).slice(0, limit);
+  }
+  collapsed.sort((left, right) => (strictRowSpan(left)?.min ?? Infinity) - (strictRowSpan(right)?.min ?? Infinity));
+  return {rows:collapsed, collapsedCount:Math.max(0, rows.length - collapsed.length), ambiguous};
+}
+
+// Public strict reader for the v2 payload/scorer.  It intentionally calls the
+// legacy reader for field normalisation and discount handling, then applies a
+// deterministic layout whitelist and attaches one-based OCR source lines.
+export function extractStrictReceipt(ocr) {
+  const base = extractLocal(ocr || {lines: []});
+  const layout = classifyLayout(ocr || {});
+  const strict = {...base, merchant: layout.retailer || base.merchant, layout: layout.layout, layoutStatus: layout.status,
+    layoutReason: layout.reason || null, gateRequired: true, readMode: 'strict', parserReasons: []};
+  if (layout.status !== 'known') {
+    strict.items = [];
+    strict.excludedZeroItems = [];
+    strict.parserReasons.push(layout.reason || 'Unknown receipt layout.');
+    strict.fieldIssues = [...(strict.fieldIssues || []), {field:'receipt', reason:'unknown_layout', evidence:layout.reason || 'No supported layout anchor.'}];
+    return strict;
+  }
+  const lines = ocr?.lines || [];
+  const candidates = strictLayoutEvidence(layout.layout, lines);
+  const used = new Set(), kept = [];
+  for (const row of base.items || []) {
+    const match = candidates.find((candidate, index) => !used.has(index) && strictEvidenceMatch(row, candidate));
+    if (!match) {
+      strict.parserReasons.push('Unrecognised item line was excluded because it lacked a linked product identifier and price.');
+      continue;
+    }
+    const index = candidates.indexOf(match); used.add(index);
+    kept.push({...row, sourceLines: match.indexes.map(lineIndex => lineIndex + 1)});
+  }
+  // Some layouts label the style column (for example “STYLE AB1234”) and the
+  // legacy diagnostic reader deliberately parks that line as metadata. Build a
+  // row only from the same whitelist evidence, never from a generic priced line.
+  for (const [index, candidate] of candidates.entries()) {
+    if (used.has(index)) continue;
+    const row = strictRowFromEvidence(candidate);
+    if (!row) continue;
+    used.add(index);
+    kept.push(row);
+  }
+  const collapsed = strictCollapseRows(kept, strict.itemCountCheck?.printed);
+  if (collapsed.collapsedCount > 0)
+    strict.parserReasons.push('Multiple identifier lines were attached to an already-counted item block and collapsed to one row.');
+  if (collapsed.ambiguous.length > 0)
+    strict.parserReasons.push('Competing product identifiers were found in one item block, so the item ID was left blank.');
+  if (!collapsed.rows.length && base.items?.length) strict.parserReasons.push('No item line matched the known layout whitelist.');
+  strict.items = collapsed.rows;
+  if (strict.itemCountCheck) {
+    strict.itemCountCheck = {...strict.itemCountCheck,
+      counted:strict.items.length,
+      purchased:strict.items.length,
+      withExcludedZeros:strict.items.length,
+      matches:strict.itemCountCheck.printed == null ? null : strict.itemCountCheck.printed === strict.items.length};
+  }
+  const receiptId = receiptReferenceForLayout(layout.layout, lines);
+  if (receiptId) strict.receiptReference = receiptId;
+  else if (!validLayoutReceiptId(layout.layout, strict.receiptReference || '')) {
+    strict.receiptReference = null;
+    strict.parserReasons.push('The receipt ID is missing, ambiguous, or does not match the known layout format.');
+    strict.fieldIssues = [...(strict.fieldIssues || []), {field:'receiptReference', reason:'layout_receipt_id', evidence:'No exact layout receipt-ID match.'}];
+  }
+  if (strict.itemCountCheck?.printed != null && strict.itemCountCheck.printed !== strict.items.length &&
+      strict.itemCountCheck.printed !== strict.items.length + (strict.excludedZeroItems || []).length)
+    strict.parserReasons.push('Printed item count does not match the whitelisted item rows.');
+  return strict;
+}
+
 export function extractLocal(ocr) {
   const result=receiptShape();
   const lines=ocr.lines || []; const text=lines.map(l=>l.text).join('\n');
   result.merchant=findMerchant(lines,text);
+  const layout=classifyLayout(ocr,result.merchant);
+  result.layout=layout.layout;
+  result.layoutStatus=layout.status;
+  result.layoutReason=layout.reason || null;
+  if(layout.status==='unknown') result.fieldIssues.push({field:'receipt',reason:'unknown_layout',evidence:layout.reason});
   result.storeClues=readStoreClues(lines,result.merchant);
   const date=readPurchaseDate(text,{uk:isUkPurchase(result.merchant,result.storeClues)});result.date=date.date;result.dateIssue=date.issue;
   const time=readPurchaseTime(text);result.time=time.time;
@@ -840,14 +1152,14 @@ export function extractLocal(ocr) {
     const label=tidyLine(l.text);
     if(result.total!=null && amounts(l.text).some(price=>price.value<0)) savingAfterTotal=true;
     const balanceDue=/^(?:balance\s+(?:due|to\s+pay|paid)|amount\s+(?:due|paid|to\s+pay))\b/i.test(label);
-    const heading=/^(?:(?:grand|order|receipt|net|gross)\s+)?total\b/i.test(label);
+    const heading=confusableTotal.test(label) || /^(?:(?:grand|order|receipt|net|gross)\s+)?total\b/i.test(label);
     // A tender is not the total once a TOTAL heading exists. Balance due remains the total after a printed saving.
     if(merchandiseTotal && !heading && ((isTenderOrBalance(l.text) && !balanceDue) || (balanceDue && result.total!=null && !savingAfterTotal))) continue;
     let key=null;
     if (subLabel.test(label)) key='subtotal';
     else if (taxLabel.test(label)) key='tax';
     else if (discountLabel.test(label)) key='discount';
-    else if (totalLabel.test(label) && !otherTotal.test(label)) key='total';
+    else if ((totalLabel.test(label) || confusableTotal.test(label)) && !otherTotal.test(label)) key='total';
     if (itemTotalLine.test(label)) {
       const itemTotal=amounts(l.text);
       if (itemTotal.length===1 && result.total==null) { result.total=itemTotal[0].value; totals.add(result.total); }

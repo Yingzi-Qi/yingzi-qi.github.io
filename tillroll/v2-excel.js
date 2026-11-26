@@ -90,6 +90,7 @@ function agreedList(input) {
     if (input.some(r => r?.cells && r?.rowId)) return input.filter(r => r?.cells);
     return input.filter(r => r?.data || r?.items).flatMap(receiptToRows);
   }
+  if (Array.isArray(input.exportableRows)) return input.exportableRows;
   if (Array.isArray(input.agreedRows)) return input.agreedRows;
   return [];
 }
@@ -172,6 +173,9 @@ function baselineFor(row, exportKey) {
     alternates: meta.alternates || {},
     comments: meta.comments || {},
     gateNotes: meta.gateNotes || null,
+    // Receipt-level evidence must survive a workbook refresh so Round 2 can
+    // re-run the same deterministic gate instead of guessing from rows.
+    receiptEvidence: meta.receiptEvidence || row.receiptEvidence || null,
     pendingOwnerConfirmation: meta.pendingOwnerConfirmation || null,
   };
 }
@@ -255,6 +259,11 @@ export async function buildV2XlsxBlob(input, { exportKey = (globalThis.crypto?.r
       ]);
     }
   }
+  const reviewHeaders = ['采购小票id', 'Tillroll receipt key', 'Image link', 'Failing check'];
+  const reviewRows = (Array.isArray(input?.reviewReceipts) ? input.reviewReceipts : []).map(review => [
+    textCell(review.receiptId), textCell(review.receiptKey), textCell(review.imageLink), textCell((review.failingChecks || []).join(' ')),
+  ]);
+  const hasReviewSheet = Array.isArray(input?.reviewReceipts);
   const zip = new JSZip();
   const overrides = [
     ['/xl/workbook.xml', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml'],
@@ -263,6 +272,7 @@ export async function buildV2XlsxBlob(input, { exportKey = (globalThis.crypto?.r
     ['/xl/worksheets/sheet2.xml', 'application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml'],
     ['/xl/worksheets/sheet3.xml', 'application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml'],
   ];
+  if (hasReviewSheet) overrides.push(['/xl/worksheets/sheet4.xml', 'application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml']);
   if (comments.length) overrides.push(['/xl/comments1.xml', 'application/vnd.openxmlformats-officedocument.spreadsheetml.comments+xml']);
   zip.file('[Content_Types].xml', XML + `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">` +
     `<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>` +
@@ -274,15 +284,18 @@ export async function buildV2XlsxBlob(input, { exportKey = (globalThis.crypto?.r
     `<sheet name="Line items" sheetId="1" r:id="rId1"/>` +
     `<sheet name="Excluded zero items" sheetId="2" r:id="rId3"/>` +
     `<sheet name="Flags" sheetId="3" r:id="rId4"/>` +
+    (hasReviewSheet ? `<sheet name="Review receipts" sheetId="4" r:id="rId5"/>` : '') +
     `</sheets></workbook>`);
   zip.file('xl/_rels/workbook.xml.rels', XML + `<Relationships xmlns="${PACKAGE}">` +
     `<Relationship Id="rId1" Type="${REL}/worksheet" Target="worksheets/sheet1.xml"/>` +
     `<Relationship Id="rId2" Type="${REL}/styles" Target="styles.xml"/>` +
     `<Relationship Id="rId3" Type="${REL}/worksheet" Target="worksheets/sheet2.xml"/>` +
     `<Relationship Id="rId4" Type="${REL}/worksheet" Target="worksheets/sheet3.xml"/>` +
+    (hasReviewSheet ? `<Relationship Id="rId5" Type="${REL}/worksheet" Target="worksheets/sheet4.xml"/>` : '') +
     `</Relationships>`);
   zip.file('xl/worksheets/sheet2.xml', sheetDocument(zeroHeaders, zeroRows));
   zip.file('xl/worksheets/sheet3.xml', sheetDocument(flagHeaders, flagRows));
+  if (hasReviewSheet) zip.file('xl/worksheets/sheet4.xml', sheetDocument(reviewHeaders.map(title => textCell(title, STYLE.header)), reviewRows));
   const sheetRels = comments.length
     ? XML + `<Relationships xmlns="${PACKAGE}"><Relationship Id="rIdComments" Type="${REL}/comments" Target="../comments1.xml"/><Relationship Id="rIdVml" Type="${REL}/vmlDrawing" Target="../drawings/vmlDrawing1.vml"/></Relationships>`
     : XML + `<Relationships xmlns="${PACKAGE}"/>`;
@@ -526,6 +539,7 @@ export function planRefresh(parsedRows) {
   }
   const receipts = [...byReceipt].map(([receiptKey, group]) => {
     const first = group[0];
+    const evidence = first.baseline.receiptEvidence || null;
     const storeClues = group.map(row => row.baseline.storeClues).find(v => v && typeof v === 'object') || null;
     return {
       receiptKey,
@@ -536,6 +550,14 @@ export function planRefresh(parsedRows) {
       payment: first.values['采购商品方法'],
       currency: first.currency || 'GBP',
       storeClues,
+      layout: evidence?.layout || null,
+      layoutStatus: evidence?.layoutStatus || null,
+      gateRequired: Boolean(evidence?.layoutStatus || evidence?.layout),
+      parserReasons: evidence?.parserReasons || [],
+      total: evidence?.total ?? null,
+      itemCountCheck: evidence?.itemCountCheck || null,
+      imageLink: evidence?.imageLink || null,
+      sha256: evidence?.sha256 || null,
       items: group.map(row => {
         const baseFlags = row.baseline.flags || {};
         const readingFlags = VISIBLE_COLUMNS.filter(col => baseFlags[col] === PINK && !row.clearedCols.includes(col) && !row.editedCols.includes(col));
@@ -562,6 +584,7 @@ export function planRefresh(parsedRows) {
           baselineMatchType: row.baseline.matchType || row.values['Tillroll match type'] || null,
           previousItemId: row.editedCols.includes('品牌货号') ? row.previousItemId : null,
           previousCells: row.previousCells,
+          sourceLines: evidence?.sourceLines || [],
         };
       }),
     };

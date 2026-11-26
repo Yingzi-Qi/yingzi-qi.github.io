@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { makeEnv, mockFetch, CATALOGUE } from './helpers.mjs';
+import { makeEnv, mockFetch, CATALOGUE, seedCatalogue } from './helpers.mjs';
 import { runSanity, PINK, AMBER } from '../functions/_lib/sanity.js';
 import { lookup } from '../functions/_lib/lookup.js';
 import { keys } from '../functions/_lib/cache.js';
@@ -225,7 +225,9 @@ test('edited 品牌货号 invalidates the 2dp price-fallback key and re-looks-up
 
   const paused = await runSanity(makeEnv(), { batchId: 'pause', mode: 'round1', receipts: [{ receiptKey: 'p', merchant: 'Rolex', receiptReference: 'R1', date: '2026-01-02', time: '09:00', payment: 'Cash', currency: 'GBP', storeClues: { postcode: 'E14 5AB' }, items: [{ brand: 'Rolex', item: 'Datejust', itemId: '126234', unitPrice: 8000, amount: 8000 }] }] });
   const role = paused.result.agreedRows[0];
-  assert.equal(role.cells['供应商'], 'Rolex Canary Wharf');
+  // The deterministic sanity path has no branch-name inference. The printed
+  // supplier remains visible and any unresolved branch is flagged Amber.
+  assert.equal(role.cells['供应商'], 'Rolex');
   assert.equal(role.flags['供应商'], AMBER);
   assert.equal(paused.result.lookupsPaused, undefined);
   assert.equal(role.flags['品名'], AMBER);
@@ -378,6 +380,45 @@ test('excluded zero sheet keeps 采购小票id and 采购时间 in Sheet 1 forma
   const zero2 = again.excludedZero.find(z => z.name === 'Paper bag');
   assert.equal(zero2.receiptId, 'SYN-ZERO-9');
   assert.equal(zero2.purchaseTime, '2026-06-15 19:05:00');
+});
+
+test('strict receipt gate evidence survives workbook round-trip into Round 2', async () => {
+  const evidence = {
+    layout: 'chanel-boutique', layoutStatus: 'known', parserReasons: [],
+    total: 100, itemCountCheck: { printed: 1, exported: 1, passed: true },
+    receiptId: 'SYN-REF-01', imageLink: 'synthetic://receipt-1', sha256: 'synthetic-hash-1',
+    sourceLines: [3, 4],
+  };
+  const row = {
+    rowId: 'strict-1:0:u0', receiptKey: 'strict-1', flags: {},
+    cells: {
+      '采购小票id': 'SYN-REF-01', '采购时间': '2026-04-03 14:00:00',
+      '供应商': 'Chanel', '品牌': 'Chanel', '品名': 'Synthetic Tote',
+      '品牌货号': 'AS1234', '采购商品原价': 100, '采购商品金额': 100,
+      '采购商品方法': 'Card', '销售金额': 88,
+    },
+    exportMeta: { currency: 'GBP', receiptEvidence: evidence },
+  };
+  const blob = await buildV2XlsxBlob({ exportableRows: [row] });
+  const planned = await readV2Workbook(blob);
+  const body = round2Body(planned, 'strict-round2');
+  const receipt = body.receipts[0];
+  assert.equal(receipt.layout, evidence.layout);
+  assert.equal(receipt.layoutStatus, evidence.layoutStatus);
+  assert.equal(receipt.gateRequired, true);
+  assert.equal(receipt.total, 100);
+  assert.deepEqual(receipt.itemCountCheck, evidence.itemCountCheck);
+  assert.equal(receipt.imageLink, evidence.imageLink);
+  assert.equal(receipt.sha256, evidence.sha256);
+  assert.deepEqual(receipt.items[0].sourceLines, evidence.sourceLines);
+
+  const env = seedCatalogue(makeEnv(), [{
+    brand: 'Chanel', itemId: 'AS1234', officialName: 'Synthetic Tote', price: 100,
+    sourceUrl: 'https://catalogue.synthetic.example/AS1234',
+  }]);
+  const { result } = await runSanity(env, body);
+  assert.equal(result.receiptGates[0].status, 'pass');
+  assert.equal(result.workbookExportReady, true);
 });
 
 test('P4: 采购商品方法 is UnionPay, Card, Alipay or WeChat; anything else is Pink', async () => {

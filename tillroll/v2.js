@@ -1,3 +1,4 @@
+import {extractStrictReceipt} from './extract.js?v=discounts1';
 // Tillroll v2 layer: Run sanity checks, Linked Workbooks (Google Drive),
 // Reading History, quota status and Brave attribution. Talks only to the
 // same-origin /api/* Cloudflare Pages Functions; holds no secrets.
@@ -53,7 +54,11 @@ function deriveStoreClues(ocr) {
 }
 export function receiptsFromBatch(batch) {
   return batch.filter(r => r.state === 'done' && !r.duplicateOf && r.data).map(r => {
-    const d = r.data;
+    // The strict OCR reader is the only source admitted to the server review
+    // pipeline. Structured model output remains diagnostic evidence until it
+    // passes the same fixed-layout whitelist.
+    const strict = r.ocr?.lines?.length ? extractStrictReceipt(r.ocr) : null;
+    const d = strict || r.data;
     const flagsByLine = new Map();
     for (const f of r.review?.flags || []) {
       if (!f.escalate) continue;
@@ -65,11 +70,15 @@ export function receiptsFromBatch(batch) {
     }
     return {
       id: r.id,
-      receiptKey: r.hash ? 'sha:' + r.hash.slice(0, 16) : undefined, sha256: r.hash, filename: r.filename,
+      receiptKey: r.hash ? 'sha:' + r.hash.slice(0, 16) : undefined, sha256: r.hash, filename: r.filename, imageLink: r.url || null,
       merchant: d.merchant, receiptReference: d.receiptReference, orderNumber: d.orderNumber, orderId: d.orderId,
       date: d.date, dateIssue: d.dateIssue, time: d.time, payment: d.payment, currency: d.currency, discount: d.discount,
+      total: d.total, subtotal: d.subtotal, receiptDiscount: d.receiptDiscount, receiptDiscounts: d.receiptDiscounts,
+      itemCount: d.itemCountCheck?.printed ?? d.itemCount ?? null, itemCountCheck: d.itemCountCheck || null,
+      layout: d.layout, layoutStatus: d.layoutStatus, layoutReason: d.layoutReason, gateRequired: true,
+      parserReasons: d.parserReasons || [], fieldIssues: d.fieldIssues || [], readMode: d.readMode || null,
       storeClues: d.storeClues || deriveStoreClues(r.ocr),
-      items: (d.items || []).map((it, i) => ({ ...it, lineIndex: i, readingFlags: [...(flagsByLine.get(i) || [])] })),
+      items: (d.items || []).map((it, i) => ({ ...it, lineIndex: i, sourceLines: it.sourceLines || [], readingFlags: [...(flagsByLine.get(i) || [])] })),
     };
   });
 }
@@ -175,14 +184,15 @@ function renderResult(out) {
     <div class="v2-result-head"><h2>Final agreed version</h2>
       <div class="actions"><button id="v2-csv" class="quiet">Download CSV</button><button id="v2-xlsx" class="primary">Export Excel</button></div></div>
     ${out.lookupsPaused ? `<p class="v2-paused" style="background:#FDE68A">Look-ups are paused: ${esc((out.pausedReasons || []).join(' '))} Affected cells are flagged Amber.</p>` : ''}
-    <p class="v2-summary">${out.agreedRows.length} rows · <span class="v2-chip" style="background:#FECDD3">${out.readingErrors.length} reading errors</span> · <span class="v2-chip" style="background:#FDE68A">${out.lookupUncertainties.length} look-up flags</span> · ${out.excludedZeroCount} zero-price line(s) excluded</p>
+    <p class="v2-summary">${rowsForExport(out).length} exportable rows of ${out.agreedRows.length} read · <span class="v2-chip" style="background:#FECDD3">${out.readingErrors.length} reading errors</span> · <span class="v2-chip" style="background:#FDE68A">${out.lookupUncertainties.length} look-up flags</span> · ${(out.reviewReceipts || []).length} receipt(s) held for review · ${out.excludedZeroCount} zero-price line(s) excluded</p>
     ${pinkList ? `<details open><summary>Reading errors to check first (Pink)</summary><ul>${pinkList}</ul></details>` : ''}
     ${amberList ? `<details><summary>Look-up uncertainty (Amber)</summary><ul>${amberList}</ul></details>` : ''}
     <div class="table-wrap"><table class="v2-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
   $('#v2-csv').onclick = () => download('tillroll-agreed.csv', toCsv(out), 'text/csv;charset=utf-8');
   $('#v2-xlsx').onclick = () => exportAgreed(out);
 }
-const toCsv = out => '\ufeff' + [COLUMNS, ...out.agreedRows.map(r => COLUMNS.map(c => r.cells[c] ?? ''))].map(row => row.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\r\n');
+const rowsForExport = out => Array.isArray(out?.exportableRows) ? out.exportableRows : (out?.agreedRows || []);
+const toCsv = out => '\ufeff' + [COLUMNS, ...rowsForExport(out).map(r => COLUMNS.map(c => r.cells[c] ?? ''))].map(row => row.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\r\n');
 function download(name, text, type) { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000); }
 let driveReplace = null;
 async function exportAgreed(out) {

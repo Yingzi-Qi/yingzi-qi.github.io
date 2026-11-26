@@ -84,6 +84,20 @@ CREATE TABLE IF NOT EXISTS lookup_cache (
   expires_at INTEGER NOT NULL
 );
 
+-- Deterministic catalogue used by the server-side sanity gate.  Rows are
+-- loaded by an operator from an approved catalogue export.  The sanity path
+-- never writes this table and never searches the web for a missing row.
+CREATE TABLE IF NOT EXISTS catalogue_items (
+  brand TEXT NOT NULL,
+  item_id TEXT NOT NULL,
+  official_name TEXT NOT NULL,
+  price_pence INTEGER,
+  currency TEXT NOT NULL DEFAULT 'GBP',
+  source_url TEXT,
+  PRIMARY KEY (brand, item_id)
+);
+CREATE INDEX IF NOT EXISTS idx_catalogue_items_id ON catalogue_items(item_id);
+
 CREATE TABLE IF NOT EXISTS quota_usage (
   provider TEXT NOT NULL,           -- brave | gemini_grounding | gemini_ocr | kv_writes
   period TEXT NOT NULL,             -- month:YYYY-MM | day:YYYY-MM-DD

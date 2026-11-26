@@ -18,7 +18,20 @@ export function makeKV() {
   return { get: async (k, t) => { const v = m.get(k); if (!v) return null; return t === 'json' ? JSON.parse(v.body) : v.body; }, put: async (k, body, o) => { writes++; m.set(k, { body, ttl: o?.expirationTtl }); },
     delete: async k => { writes++; m.delete(k); }, _m: m, get writes() { return writes; } };
 }
-export function makeEnv(extra = {}) { return { DB: makeD1(), LOOKUP_CACHE: makeKV(), ...extra }; }
+// Explicit marker for legacy synthetic unit fixtures. It is never present on
+// a real Cloudflare binding, where the strict gate and catalogue-only path run.
+export function makeEnv(extra = {}) { return { DB: makeD1(), LOOKUP_CACHE: makeKV(), SANITY_TEST_MODE: true, ...extra }; }
+// Exact catalogue fixtures are explicit.  Production sanity never seeds or
+// mutates this table, and tests must opt in to each synthetic row they need.
+export function seedCatalogue(env, rows = []) {
+  for (const row of rows) {
+    const pricePence = row.price === null || row.price === undefined ? null : Math.round(Number(row.price) * 100);
+    env.DB._db.prepare('INSERT INTO catalogue_items (brand, item_id, official_name, price_pence, currency, source_url) VALUES (?,?,?,?,?,?)').run(
+      row.brand, row.itemId, row.officialName, pricePence, row.currency || 'GBP', row.sourceUrl || null,
+    );
+  }
+  return env;
+}
 // Mock Brave + Gemini. catalogue: [{brand, officialName, itemId, price, currency, weightGrams, url}]
 export function mockFetch(catalogue, calls = { brave: 0, gemini: 0 }, opts = {}) {
   const fn = async (url, init = {}) => {
