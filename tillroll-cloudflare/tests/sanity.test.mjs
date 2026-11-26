@@ -79,6 +79,18 @@ test('sanity keeps the reader date issue as the purchase-time reason', async () 
   assert.match(result.readingErrors.find(e => e.col === '采购时间').reason, /Day and month are ambiguous/);
 });
 
+test('a doubtful zero without a unit price stays blank and cannot create a sale amount', async () => {
+  const env = makeEnv();
+  const { result } = await runSanity(env, { batchId: 'doubtful-zero', mode: 'round1', receipts: [{
+    receiptKey: 'doubtful-zero', merchant: 'Synthetic Shop', receiptReference: 'SZ1', date: '2026-11-20', time: '12:00', payment: 'Card', currency: 'GBP',
+    items: [{ brand: 'Synthetic Brand', item: 'Unclear line', itemId: 'SYN-ITEM-1', unitPrice: null, amount: 0, zeroConfirmed: false }],
+  }] });
+  const row = result.agreedRows[0];
+  assert.equal(row.cells['采购商品原价'], null);
+  assert.equal(row.cells['销售金额'], null);
+  assert.equal(row.flags['采购商品原价'], PINK);
+});
+
 test('P7: unclear UK dates are DD/MM; 03/04/2026 is 3 April and there is no MM/DD fallback', () => {
   assert.equal(normaliseTimestamp('03/04/2026', null), '2026-04-03 00:00:00');
   assert.equal(normaliseTimestamp('03/04/2026', '9:15 am'), '2026-04-03 09:15:00');
