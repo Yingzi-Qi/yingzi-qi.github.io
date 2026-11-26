@@ -10,6 +10,15 @@ export function isPrintedItemNumber(value) {
   return typeof value==='string' && /^\d{4,14}$/.test(value) && !/^0+$/.test(value) &&
     !/^(?:19|20)\d{2}$/.test(value);
 }
+// A product number may contain separators or letters. Keep this broader token
+// rule separate from isPrintedItemNumber because the latter is also used for
+// narrow barcode and store-number layouts.
+function isPrintedCodeToken(value) {
+  const text=String(value??'').trim();
+  if(!/^[A-Za-z0-9][A-Za-z0-9._/-]{3,31}$/.test(text) || !/\d/.test(text))return false;
+  if(/^\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?$/.test(text) || /^(?:19|20)\d{2}$/.test(text))return false;
+  return !/^\d+[.,]\d{2}$/.test(text);
+}
 const codeLabel='(?:item\\s*(?:id|code|no\\.?|number|#)|product\\s*(?:id|code)|article\\s*(?:id|code)|upc|ean|gtin|barcode)';
 const labelledPrefix=new RegExp('^'+codeLabel+'\\s*[:#=]?\\s*([\\w./-]+)\\s+(.*)$','i');
 const labelledSuffix=new RegExp('^(.+?)\\s+'+codeLabel+'\\s*[:#=]?\\s*([\\w./-]+)$','i');
@@ -24,7 +33,7 @@ function parsed(code,item,evidence) {
   return hasName(description) ? {itemId:code,item:description,evidence} : null;
 }
 export function parsePrintedItemId(value) {
-  const text=String(value??'').trim();
+  const text=String(value??'').trim().replace(/^[^\p{L}\p{N}]+/u,'');
   const prefix=labelledPrefix.exec(text), suffix=labelledSuffix.exec(text);
   if(prefix && (/\d/.test(prefix[1]) || /[:#=]/.test(text) && /^[A-Z]{2,}$/.test(prefix[1])))
     return parsed(prefix[1],prefix[2],'label');
@@ -36,9 +45,16 @@ export function parsePrintedItemId(value) {
     !/^\d+[.,]\d/.test(start[4]) && parsed(start[2],start[4],edgeEvidence(start[2],start[3]));
   const trailing=end && isPrintedItemNumber(end[3]) && !describesNumber.test(end[1]) &&
     !/\d[/.:,-]$/.test(end[1]) && parsed(end[3],end[1],edgeEvidence(end[3],end[2]));
-  if(leading && trailing) return leading.itemId===trailing.itemId
-    ? parsed(leading.itemId,end[1].slice(start[0].length-start[4].length),'position') : null;
-  return leading || trailing || null;
+  const alphaStart=/^(?:([0-9]{1,2})\s+)?([A-Za-z0-9][A-Za-z0-9._/-]{3,31})(\s+[|:;–—-]\s*|\s+)(.+)$/u.exec(text);
+  const alphaEnd=/^(.+?)(\s+[|:;–—-]\s*|\s+)([A-Za-z0-9][A-Za-z0-9._/-]{3,31})$/u.exec(text);
+  const alphaLeading=alphaStart && isPrintedCodeToken(alphaStart[2]) && !measure.test(alphaStart[4]) &&
+    !/^\d+[.,]\d/.test(alphaStart[4]) && parsed(alphaStart[2],alphaStart[4],edgeEvidence(alphaStart[2],alphaStart[3]));
+  const alphaTrailing=alphaEnd && isPrintedCodeToken(alphaEnd[3]) && !describesNumber.test(alphaEnd[1]) &&
+    !/\d[/.:,-]$/.test(alphaEnd[1]) && parsed(alphaEnd[3],alphaEnd[1],edgeEvidence(alphaEnd[3],alphaEnd[2]));
+  const first=leading||alphaLeading, last=trailing||alphaTrailing;
+  if(first && last) return first.itemId===last.itemId
+    ? parsed(first.itemId,alphaEnd?.[1] || end[1].slice(start[0].length-start[4].length),'position') : null;
+  return first || last || null;
 }
 function edgeEvidence(value,separator) {
   if(isGtin(value))return 'barcode';

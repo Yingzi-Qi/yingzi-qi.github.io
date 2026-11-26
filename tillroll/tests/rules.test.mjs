@@ -159,6 +159,12 @@ test('codes: strip repeated brand prefix, keep digits and leading zeros', () => 
   assert.equal(cleanProductCode('0012345', {brand: 'Gucci'}).code, '0012345');
   assert.equal(cleanProductCode('AS-028').code, 'AS-028');
 });
+test('codes: accept OCR punctuation and general alphanumeric product tokens at the edge', async () => {
+  const {parsePrintedItemId} = await import('../product-code.js');
+  assert.equal(parsePrintedItemId('= SYN-PROD-42 Synthetic coat').itemId, 'SYN-PROD-42');
+  assert.equal(parsePrintedItemId('Synthetic coat 9-169135').itemId, '9-169135');
+  assert.equal(parsePrintedItemId('20/11/2026 Synthetic coat'), null);
+});
 test('codes: reject dates, prices, phones and card last-4', () => {
   for (const [value, ctx] of [['12/05/2026', {}], ['2026-11-12', {}], ['34.00', {}], ['20261112', {date: '2026-11-12'}],
     ['3005', {card: '3005'}], ['020 7160 6222', {}], ['02071606222', {phone: '020 7160 6222'}]])
