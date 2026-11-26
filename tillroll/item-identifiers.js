@@ -3,6 +3,7 @@
 // policies and survey text are never followed and never become identifiers.
 import {sortItemFields} from './field-sorter.js';
 import {brandItemIdCandidate} from './receipt-rules.js';
+import {isConcessionCode, isStoreCode, matchesBrandItemId, validGtin} from './brand-item-ids.js';
 
 export const identifierClasses = Object.freeze([
   'physical_item_id',
@@ -28,12 +29,6 @@ const candidateClasses = new Set(['physical_item_id', 'product_id', 'product_cod
 const candidateRejectedLine = /^(?:total|sub\s*total|amount|balance|cash|change|tender|payment|visa|master\s*card|amex|maestro|union\s*pay|card|auth|terminal|merchant|receipt|transaction|order|invoice|loyalty|rewards|member|date|time|qty|quantity|price|size|colour|color|tax|vat|discount|saving|return|survey)\b/i;
 const candidateToken = /^[A-Za-z0-9][A-Za-z0-9./_–—-]{3,}$/;
 
-function isGtinValue(value) {
-  const text = String(value ?? '').replace(/\s+/g, '');
-  if (!/^(?:\d{8}|\d{12,14})$/.test(text)) return false;
-  return [...text].reverse().reduce((sum, digit, index) => sum + Number(digit) * (index % 2 ? 3 : 1), 0) % 10 === 0;
-}
-
 function isEanValue(value) {
   return /^\d{13}$/.test(String(value ?? '').replace(/\s+/g, ''));
 }
@@ -47,17 +42,23 @@ function candidateFormat(value) {
   return candidateToken.test(text) && /\d/.test(text) && text.length >= 4 && text.length <= 32;
 }
 
-function candidateChecks(value, entry, source) {
+function candidateChecks(value, entry, source, context = {}) {
   const text = tidyCandidateValue(value);
   const label = String(entry?.label ?? '');
   const className = entry?.class || (isEanValue(text) ? 'ean' : 'unknown');
+  const gtinApplicable = className === 'ean' || className === 'barcode_or_qr';
+  const gtinChecksum = gtinApplicable ? (validGtin(text) ? 'pass' : 'fail') : 'not_applicable';
+  const storeInternal = isStoreCode(text) || isConcessionCode(text);
   const rejected = paymentClasses.has(className) || ['receipt_or_transaction_number', 'loyalty_or_rewards_number', 'payment_reference'].includes(className)
     || (!label && candidateRejectedLine.test(String(entry?.evidence ?? '')))
-    || /(?:receipt|transaction|order|invoice|terminal|merchant|loyalty|rewards|card|auth|date|time|total|amount|price|qty|quantity|size)\b/i.test(text);
+    || /(?:receipt|transaction|order|invoice|terminal|merchant|loyalty|rewards|card|auth|date|time|total|amount|price|qty|quantity|size)\b/i.test(text)
+    || (source !== 'label' && storeInternal);
   const format = candidateFormat(text);
-  const gtinChecksum = !/^\d+$/.test(text) || !/^(?:\d{8}|\d{12,14})$/.test(text) || isGtinValue(text);
-  const paymentLike = /^\d{12,19}$/.test(text) || /^(?:19|20)\d{2}$/.test(text);
-  return {format, gtinChecksum, paymentLike, rejected, source};
+  const paymentLike = /^\d{12,19}$/.test(text) && gtinChecksum !== 'pass';
+  const dateLike = /^(?:19|20)\d{2}$/.test(text);
+  const brandFormat = context.brand ? (matchesBrandItemId(context.brand, text) ? 'pass' : 'fail') : 'unknown';
+  return {format: format ? 'pass' : 'fail', gtinChecksum, notDatePricePayment: !rejected && !paymentLike && !dateLike ? 'pass' : 'fail',
+    brandFormat, lookupExact: 'unknown', priceWithinTolerance: 'unknown', paymentLike, storeInternal, rejected, source};
 }
 
 function candidateBaseScore(className) {
@@ -182,8 +183,8 @@ function readLabel(line, text, itemDescription) {
 function joinWrapped(lines, index) {
   const current = tidy(lines[index]?.text);
   const next = tidy(lines[index + 1]?.text);
-  const fragment = /^(?:serial|item|product|id|style|model|ref|reference|article|sku|loyalty|rewards|receipt|transaction|auth|terminal|merchant|card)$/i.test(current)
-    || /^(?:serial\s+number|item\s+(?:no\.?|number|id|code)|product\s+(?:info|code|id)|receipt\s+(?:no\.?|number)|transaction\s+(?:no\.?|number))$/i.test(current);
+  const fragment = /^(?:serial|item|product|id|style|model|ref|reference|article|sku|loyalty|rewards|receipt|transaction|auth|terminal|merchant|card)\s*[:#]?$/i.test(current)
+    || /^(?:serial\s+number|item\s+(?:no\.?|number|id|code)|product\s+(?:info|code|id)|receipt\s+(?:no\.?|number)|transaction\s+(?:no\.?|number))\s*[:#]?$/i.test(current);
   if (fragment && next && !isUntrustedReceiptText(next)) {
     return {text: current + ' ' + next, span: 2, line: lines[index], next: lines[index + 1]};
   }
@@ -303,16 +304,14 @@ function choosePrimary(identifiers) {
   return {value: null, class: null, label: null, entry: null, reason: 'No explicit ID, serial number, or product code was printed for this item.'};
 }
 
-function candidateFromEntry(entry, source = 'label', lineIndex = null) {
+function candidateFromEntry(entry, source = 'label', lineIndex = null, context = {}) {
   const value = tidyCandidateValue(entry?.value);
-  // DEBUG_CANDIDATE
-  if (value === 'SYN-A' || value === 'SYN-B') console.log('DEBUG', value, candidateClass(entry, value), candidateChecks(value, {...entry, class: candidateClass(entry, value)}, source));
   if (!value || !candidateClasses.has(candidateClass(entry, value))) return null;
   const className = candidateClass(entry, value);
-  const checks = candidateChecks(value, {...entry, class: className}, source);
-  if (checks.rejected || !checks.format || checks.paymentLike) return null;
+  const checks = candidateChecks(value, {...entry, class: className}, source, context);
+  if (checks.rejected || checks.format !== 'pass' || checks.paymentLike) return null;
   const proximity = source === 'label' ? .08 : source === 'same_line' ? .06 : source === 'next_line' ? .04 : .02;
-  const checksum = checks.gtinChecksum && /^\d+$/.test(value) ? .05 : 0;
+  const checksum = checks.gtinChecksum === 'pass' ? .05 : 0;
   const confidence = Math.max(0, Math.min(1, Number(entry?.confidence ?? .8)));
   const score = Math.min(1, candidateBaseScore(className) + proximity + checksum + (confidence - .8) * .1);
   return {
@@ -342,7 +341,7 @@ function unlabelledCandidates(block, item) {
     const className = isEanValue(value) ? 'ean' : 'product_code';
     const entry = {value, class: className, label: null, evidence: text, confidence: Number(parts[index]?.line?.confidence ?? .8)};
     const source = index === 0 ? 'same_line' : index === 1 ? 'next_line' : 'chain';
-    const candidate = candidateFromEntry(entry, source, index);
+    const candidate = candidateFromEntry(entry, source, index, item);
     if (candidate) {
       candidate.reasons = ['unlabelled code adjacent to item block', source.replace('_', ' ')];
       if (item?.item && sameName(item.item, block.itemDescription)) candidate.reasons.push('description matched');
@@ -364,14 +363,17 @@ function dedupeCandidates(entries) {
 }
 
 function resolveCandidates(candidates) {
-  const valid = candidates.filter(entry => entry.checks?.format && !entry.checks?.rejected && !entry.checks?.paymentLike);
+  const valid = candidates.filter(entry => entry.checks?.format === 'pass' && !entry.checks?.rejected && !entry.checks?.paymentLike
+    && (entry.class !== 'ean' || entry.checks?.gtinChecksum === 'pass'));
   if (!valid.length) return {value: null, status: 'missing', reason: 'No structurally valid product/item ID candidate was printed.', candidates: []};
   const [best, second] = valid;
+  const rank = value => ({physical_item_id: 6, product_id: 5, product_code: 4, sku: 3, style_or_model_reference: 2, serial_number: 1, ean: 0, barcode_or_qr: 0}[value] ?? -1);
   const margin = second ? best.score - second.score : best.score;
   const eligible = ['physical_item_id', 'product_id', 'product_code', 'sku', 'style_or_model_reference', 'ean'].includes(best.class);
   if (!eligible || best.score < .75) return {value: null, status: 'probable', reason: 'A possible identifier was found but its format or evidence is too weak to promote automatically.', candidates: valid};
-  if (second && margin < .15) return {value: null, status: 'ambiguous', reason: 'Several possible identifiers are similarly supported. Review the candidates before choosing one.', candidates: valid};
-  return {value: best.value, status: best.score >= .85 ? 'confirmed' : 'probable', reason: 'Selected the highest-scoring candidate using its label, position, format, and OCR confidence.', candidates: valid};
+  if (second && rank(best.class) === rank(second.class) && margin < .15) return {value: null, status: 'ambiguous', reason: 'Several possible identifiers are similarly supported. Review the candidates before choosing one.', candidates: valid};
+  if (best.source !== 'label' && !/^Existing /i.test(String(best.label || ''))) return {value: null, status: 'probable', reason: 'An adjacent code was found, but it needs an exact catalogue match or human confirmation before promotion.', candidates: valid};
+  return {value: best.value, status: 'confirmed', reason: 'Selected the highest-scoring candidate using its label, class priority, format, and OCR confidence.', candidates: valid};
 }
 
 function itemIdMetadata(item, block, primary) {
@@ -382,30 +384,30 @@ function itemIdMetadata(item, block, primary) {
   }
   for (const entry of block?.identifiers || []) {
     const source = entry.class === 'barcode_or_qr' ? 'barcode' : 'label';
-    const candidate = candidateFromEntry(entry, source, byEntry.get(entry) ?? null);
+    const candidate = candidateFromEntry(entry, source, byEntry.get(entry) ?? null, item);
     if (candidate) entries.push(candidate);
   }
   entries.push(...unlabelledCandidates(block, item));
   if (item?.itemId) {
-    const existing = candidateFromEntry({value: item.itemId, class: 'physical_item_id', label: 'Existing item ID', evidence: item.itemId, confidence: 1}, 'same_line', null);
+    const existing = candidateFromEntry({value: item.itemId, class: 'product_code', label: 'Existing item ID', evidence: item.itemId, confidence: 1}, 'same_line', null, item);
     if (existing) entries.push(existing);
   }
   if (item?.sku) {
-    const existing = candidateFromEntry({value: item.sku, class: 'sku', label: 'Existing SKU', evidence: item.sku, confidence: 1}, 'same_line', null);
+    const existing = candidateFromEntry({value: item.sku, class: 'sku', label: 'Existing SKU', evidence: item.sku, confidence: 1}, 'same_line', null, item);
     if (existing) entries.push(existing);
   }
   if (item?.styleRef) {
-    const existing = candidateFromEntry({value: item.styleRef, class: 'style_or_model_reference', label: 'Existing style/ref', evidence: item.styleRef, confidence: 1}, 'same_line', null);
+    const existing = candidateFromEntry({value: item.styleRef, class: 'style_or_model_reference', label: 'Existing style/ref', evidence: item.styleRef, confidence: 1}, 'same_line', null, item);
     if (existing) entries.push(existing);
   }
   if (item?.ean) {
-    const existing = candidateFromEntry({value: item.ean, class: 'ean', label: 'Existing EAN', evidence: item.ean, confidence: 1}, 'barcode', null);
+    const existing = candidateFromEntry({value: item.ean, class: 'ean', label: 'Existing EAN', evidence: item.ean, confidence: 1}, 'barcode', null, item);
     if (existing) entries.push(existing);
   }
   const candidates = dedupeCandidates(entries);
   const decision = resolveCandidates(candidates);
   if (primary?.value && !candidates.some(entry => entry.value === primary.value)) {
-    const primaryEntry = candidateFromEntry(primary.entry || {value: primary.value, class: primary.class, label: primary.label, evidence: primary.value, confidence: .8}, 'label', null);
+    const primaryEntry = candidateFromEntry(primary.entry || {value: primary.value, class: primary.class, label: primary.label, evidence: primary.value, confidence: .8}, 'label', null, item);
     if (primaryEntry) {
       candidates.push(primaryEntry);
       candidates.sort((a, b) => b.score - a.score || a.value.localeCompare(b.value));
@@ -460,11 +462,13 @@ export function applyItemIdentifiers(data, ocr) {
     const metadata = itemIdMetadata(next, block, primary);
     next = {...next, itemIdCandidates: metadata.candidates, itemIdDecision: metadata.decision};
     const chosen = metadata.decision.value && metadata.candidates.find(entry => entry.value === metadata.decision.value);
-    if (!next.itemId && chosen && chosen.class !== 'ean' && chosen.class !== 'serial_number') {
+    if (!next.itemId && metadata.decision?.status === 'confirmed' && chosen && chosen.class !== 'serial_number') {
       if (chosen.class === 'style_or_model_reference') {
         if (!next.styleRef) next.styleRef = chosen.value;
       } else if (chosen.class === 'sku') {
         if (!next.sku) next.sku = chosen.value;
+      } else if (chosen.class === 'ean') {
+        if (!next.ean) next.ean = chosen.value;
       } else next.itemId = chosen.value;
     }
     return next;

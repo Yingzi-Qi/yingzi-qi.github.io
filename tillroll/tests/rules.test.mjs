@@ -685,6 +685,32 @@ test('identifiers: labels, priority, masks, count and untrusted text', () => {
   assert.equal(JSON.stringify(injected.data).includes('HACKED'), false);
   assert.equal(injected.data.items[0].brandItemId, plain.data.items[0].brandItemId);
 });
+test('item ID candidates keep adjacent options and only promote a deterministic label', () => {
+  const labelled = read(['SYNTHETIC SHOP', '15/11/2026 10:00', 'Synthetic coat 120.00', 'Product Info: SYN-PROD-42', 'TOTAL 120.00']);
+  const labelledItem = labelled.data.items[0];
+  assert.equal(labelledItem.itemId, 'SYN-PROD-42');
+  assert.equal(labelledItem.itemIdDecision.status, 'confirmed');
+  assert.equal(labelledItem.itemIdCandidates[0].source, 'label');
+  assert.equal(labelledItem.itemIdCandidates[0].checks.notDatePricePayment, 'pass');
+
+  const wrapped = read(['SYNTHETIC SHOP', '15/11/2026 10:01', 'Synthetic coat 120.00', 'Product Info:', 'SYN-PROD-43', 'TOTAL 120.00']);
+  assert.equal(wrapped.data.items[0].itemId, 'SYN-PROD-43');
+
+  const chain = read(['SYNTHETIC SHOP', '15/11/2026 10:02', 'Synthetic coat 120.00', 'SYN-CHAIN-42', 'SYN-CHAIN-43', 'TOTAL 120.00']);
+  const chainItem = chain.data.items[0];
+  assert.equal(chainItem.itemId, null);
+  assert.equal(chainItem.itemIdDecision.status, 'ambiguous');
+  assert.deepEqual(chainItem.itemIdCandidates.map(candidate => candidate.value), ['SYN-CHAIN-42', 'SYN-CHAIN-43']);
+
+  const ean = read(['SYNTHETIC SHOP', '15/11/2026 10:03', 'Synthetic coat 120.00', 'Product Info: 7712345678907', 'TOTAL 120.00']);
+  assert.equal(ean.data.items[0].itemId, null);
+  assert.equal(ean.data.items[0].ean, '7712345678907');
+  assert.equal(ean.data.items[0].itemIdCandidates[0].class, 'ean');
+  assert.equal(ean.data.items[0].itemIdCandidates[0].checks.gtinChecksum, 'pass');
+
+  const payment = read(['SYNTHETIC SHOP', '15/11/2026 10:04', 'Synthetic coat 120.00', 'Auth Code: 654321', 'TOTAL 120.00']);
+  assert.equal(payment.data.items[0].itemIdCandidates.some(candidate => candidate.value === '654321'), false);
+});
 test('addendum: brand description, savings, footer amount, zero lines, merchant and brands', () => {
   const described = read(['HARRODS', '12/11/2026 14:03 NT04567-333111',
     '2469 9999991234 Christian Dior 1234.00', 'NAVY CREW 38', 'TOTAL GBP 1234.00']);

@@ -251,6 +251,21 @@ function showProof(panel, r) {
       const codes=[item.itemId && 'Item ID '+item.itemId,item.sku && 'Style / SKU '+item.sku];
       line.append(element('p',codes.filter(Boolean).join(' · '),'hint'));
     }
+    const hiddenIdentifierClasses=new Set(['payment_card','payment_auth','payment_merchant','payment_terminal','payment_reference','loyalty_or_rewards_number','receipt_or_transaction_number']);
+    const possibleIds=(item?.itemIdCandidates || []).filter(candidate=>candidate?.value && !hiddenIdentifierClasses.has(candidate.class));
+    if (!item?.itemId && possibleIds.length) {
+      const candidates=disclosure('Possible item IDs · review',false);
+      const list=element('ul','', 'issue-list');
+      for (const candidate of possibleIds) {
+        const checks=candidate.checks || {};
+        const evidence=[candidate.class, candidate.source, checks.gtinChecksum==='pass'?'valid GTIN':null].filter(Boolean).join(' · ');
+        const reason=Array.isArray(candidate.reasons) && candidate.reasons.length ? ' · '+candidate.reasons.join(', ') : '';
+        list.append(element('li',String(candidate.value)+' · '+evidence+reason));
+      }
+      candidates.append(list);
+      if (item.itemIdDecision?.reason) candidates.append(element('p',item.itemIdDecision.reason,'hint'));
+      line.append(candidates);
+    }
     const verification=r.verification?.[i];
     if (verification) {
       const audit=element('div');
