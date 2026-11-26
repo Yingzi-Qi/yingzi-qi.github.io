@@ -87,3 +87,17 @@ test('strict evidence keeps two distinct same-price products as two rows', () =>
   assert.deepEqual(data.items.map(item => item.item), ['Synthetic coat', 'Synthetic scarf']);
   assert.deepEqual(data.items.map(item => item.itemId), ['SYN-A1001', 'SYN-B2002']);
 });
+
+test('strict evidence carries a fixed-list brand from the nearby product block', () => {
+  const data = extractStrictReceipt(makeOcr([
+    'HARRODS',
+    '15/11/2026 10:04 NT1234-567890',
+    'BULGARI',
+    'Synthetic bracelet A3001 £120.00',
+    'TOTAL (1 item) £120.00',
+    'VISA',
+  ]));
+  assert.equal(data.items.length, 1);
+  assert.equal(data.items[0].brand, 'Bulgari');
+  assert.equal(data.items[0].item, 'Synthetic bracelet');
+});

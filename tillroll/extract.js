@@ -1053,6 +1053,18 @@ function strictCollapseRows(rows, printedCount) {
   collapsed.sort((left, right) => (strictRowSpan(left)?.min ?? Infinity) - (strictRowSpan(right)?.min ?? Infinity));
   return {rows:collapsed, collapsedCount:Math.max(0, rows.length - collapsed.length), ambiguous};
 }
+function strictBrandFromEvidence(row, lines) {
+  if (row?.brand || !row?.sourceLines?.length) return row;
+  const span = strictRowSpan(row);
+  if (!span) return row;
+  const start = Math.max(0, span.min - 1 - 5);
+  const end = Math.min(lines.length, span.max + 4);
+  const context = lines.slice(start, end).map(line => line?.text || '').join(' ');
+  const contextFields = sortItemFields({brand:null, name:context, itemId:row.itemId});
+  if (!contextFields.brand) return row;
+  const rowFields = sortItemFields({brand:contextFields.brand, name:row.item, itemId:row.itemId});
+  return {...row, brand:contextFields.brand, item:rowFields.name || row.item};
+}
 
 // Public strict reader for the v2 payload/scorer.  It intentionally calls the
 // legacy reader for field normalisation and discount handling, then applies a
@@ -1097,7 +1109,7 @@ export function extractStrictReceipt(ocr) {
   if (collapsed.ambiguous.length > 0)
     strict.parserReasons.push('Competing product identifiers were found in one item block, so the item ID was left blank.');
   if (!collapsed.rows.length && base.items?.length) strict.parserReasons.push('No item line matched the known layout whitelist.');
-  strict.items = collapsed.rows;
+  strict.items = collapsed.rows.map(row => strictBrandFromEvidence(row, lines));
   if (strict.itemCountCheck) {
     strict.itemCountCheck = {...strict.itemCountCheck,
       counted:strict.items.length,
