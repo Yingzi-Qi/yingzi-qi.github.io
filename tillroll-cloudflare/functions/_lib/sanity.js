@@ -726,6 +726,9 @@ async function verifierStage(rows, receipt, ctx) {
     const res = await ctx.callLookup({ supplier: rows[0].cells['供应商'], storeClues: sc });
     const name = res?.branch?.officialStoreName;
     const printedSupplier = rows[0].cells['供应商'];
+    if (!name && res?.unavailableReason) for (const row of rows) {
+      if (!ctx.locked(row.rowId, '供应商')) lookupFlag(row, '供应商', AMBER, res.unavailableReason);
+    }
     const visible = name ? supplierVisibleName(printedSupplier, name) : printedSupplier;
     for (const row of rows) row._officialBranch = name || null;
     if (name && visible && visible !== printedSupplier) for (const row of rows) {
@@ -763,6 +766,11 @@ async function verifierStage(rows, receipt, ctx) {
     const req = { brand: row.raw.printedBrand || c['品牌'], itemId: lookupItemId, name: c['品名'], style: row.raw.style, price: c['采购商品原价'], currency: row.raw.currency };
     const res = await ctx.callLookup(req);
     if (!res) { settleBrandItemId(row, null, ctx); continue; }
+    if (res.noExactMatch) {
+      lookupFlag(row, '品名', AMBER, res.unavailableReason || 'No exact catalogue match in the server lookup table.');
+      settleBrandItemId(row, null, ctx);
+      continue;
+    }
     if (res.paused || res.unavailableReason) {
       // A paused or unavailable look-up stays Amber, even when nothing came back.
       lookupFlag(row, '品名', AMBER, `Look-up paused: ${res.unavailableReason || 'quota guard reached'}.`);
@@ -1120,7 +1128,12 @@ export async function runSanity(env, input, deps = {}) {
       if (memo.has(k)) return memo.get(k);
       ctx.lookupsUsed++;
       let res;
-      try { res = await (deps.lookup || defaultLookup)(env, req, deps); } catch (e) { res = { candidates: [], unavailableReason: e.message }; }
+      try {
+        // Sanity is rules plus an exact server catalogue table. The general lookup
+        // endpoint may use search providers, but the sanity default never invokes them.
+        const lookupDeps = deps.lookup ? deps : { ...deps, deterministicOnly: true };
+        res = await (deps.lookup || defaultLookup)(env, req, lookupDeps);
+      } catch (e) { res = { candidates: [], unavailableReason: e.message }; }
       memo.set(k, res);
       return res;
     },

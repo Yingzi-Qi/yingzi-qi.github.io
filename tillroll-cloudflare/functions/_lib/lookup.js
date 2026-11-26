@@ -34,6 +34,33 @@ export function normaliseRequest(body) {
   return req;
 }
 
+function exactCachedCandidates(req, value) {
+  if (value?.deterministic !== true) return [];
+  const candidates = Array.isArray(value?.candidates) ? value.candidates : [];
+  return candidates.filter(candidate => {
+    if (!candidate || candidate.onOfficialSite !== true || !candidate.itemId || !req.itemId) return false;
+    if (compact(candidate.itemId) !== compact(req.itemId)) return false;
+    if (req.brand && candidate.brand && canonicalBrand(candidate.brand) !== req.brand) return false;
+    return Array.isArray(candidate.matchedFields) && candidate.matchedFields.includes('itemId');
+  });
+}
+
+async function deterministicRunStage(env, req, key) {
+  const hit = await cacheGet(env, key);
+  const candidates = exactCachedCandidates(req, hit);
+  if (candidates.length) {
+    return { cacheHit: true, sourcesQueried: ['deterministic-catalogue'], candidates, mismatches: [] };
+  }
+  return {
+    cacheHit: Boolean(hit),
+    sourcesQueried: [],
+    candidates: [],
+    mismatches: [],
+    noExactMatch: true,
+    unavailable: ['No exact catalogue match in the server lookup table.'],
+  };
+}
+
 // Final tolerance, approved 25 Nov 2026 18:12: max(2% of the receipt price, £5).
 export function priceTolerance(price) {
   const n = Math.abs(Number(price));
@@ -320,6 +347,11 @@ function braveQuery(req, stage, { chanelFallback = false } = {}) {
 }
 
 async function runStage(env, req, stage, key, deps, trail) {
+  if (deps?.deterministicOnly) {
+    const result = await deterministicRunStage(env, req, key);
+    trail.push({ stage, key, cache: result.cacheHit, deterministic: true });
+    return result;
+  }
   if (!req.bypassCache) {
     const hit = await cacheGet(env, key);
     if (hit) { trail.push({ stage, key, cache: true }); return { ...hit, cacheHit: true }; }
@@ -368,9 +400,13 @@ async function resolveBranch(env, req, deps) {
   const clue = sc.postcode || sc.addressLines[0] || sc.storeNumber;
   if (!clue) return null;
   const key = keys.branch(req.supplier, clue);
-  if (!req.bypassCache) { const hit = await cacheGet(env, key); if (hit) return { ...hit, cacheKey: key, cacheHit: true }; }
+  if (!req.bypassCache) {
+    const hit = await cacheGet(env, key);
+    if (hit?.deterministic === true) return { ...hit, cacheKey: key, cacheHit: true };
+  }
   const known = knownBranch(req.supplier, sc.postcode);
-  if (known) { const v = { supplier: req.supplier, officialStoreName: known, sourceUrls: [], source: 'known-branch-table' }; await cachePut(env, key, v); return { ...v, cacheKey: key, cacheHit: false }; }
+  if (known) { const v = { supplier: req.supplier, officialStoreName: known, sourceUrls: [], source: 'known-branch-table', deterministic: true }; await cachePut(env, key, v); return { ...v, cacheKey: key, cacheHit: false }; }
+  if (deps?.deterministicOnly) return { supplier: req.supplier, officialStoreName: null, sourceUrls: [], cacheKey: key, cacheHit: false, unavailable: ['No exact branch match in the server lookup table.'] };
   const g = await geminiGrounded(env, req, 'branch', deps);
   if (!g.parsed?.branch?.officialStoreName) return { supplier: req.supplier, officialStoreName: null, sourceUrls: [], cacheKey: key, cacheHit: false, unavailable: g.paused || g.error || g.skipped || 'No official branch found.' };
   const v = { supplier: req.supplier, officialStoreName: str(g.parsed.branch.officialStoreName), sourceUrls: (g.parsed.branch.sourceUrls || []).slice(0, 4), source: 'gemini-grounding' };
@@ -431,13 +467,21 @@ export async function lookup(env, body, deps = {}) {
   const trail = [];
   const stages = [];
   if (req.itemId && req.brand !== undefined) stages.push(['id', keys.item(req.brand || '', req.itemId)]);
-  if ((req.name || req.style) && req.brand) stages.push(['multi-field', keys.mf(req.brand, req.name || '', req.style || '')]);
+  if (!deps.deterministicOnly && (req.name || req.style) && req.brand) stages.push(['multi-field', keys.mf(req.brand, req.name || '', req.style || '')]);
+  if (deps.deterministicOnly && !req.itemId) {
+    const branch = await resolveBranch(env, req, deps);
+    if (branch?.officialStoreName) return { cacheHit: Boolean(branch.cacheHit), cacheKey: branch.cacheKey || null, sourcesQueried: ['deterministic-catalogue'], candidates: [], mismatches: [], branch };
+    return {
+      cacheHit: false, cacheKey: branch?.cacheKey || null, sourcesQueried: [], candidates: [], mismatches: [],
+      noExactMatch: true, unavailableReason: branch?.unavailable?.[0] || 'Exact catalogue lookup requires an item ID.',
+    };
+  }
   let result = { cacheHit: false, cacheKey: null, sourcesQueried: [], candidates: [] };
   let idMatched = false, idResult = null, unavailable = [], paused = [];
   for (const [stage, key] of stages) {
     const r = await runStage(env, req, stage, key, deps, trail);
     unavailable.push(...(r.unavailable || [])); paused.push(...(r.paused || []));
-    result = { cacheHit: r.cacheHit, cacheKey: key, sourcesQueried: r.sourcesQueried, candidates: r.candidates };
+    result = { cacheHit: r.cacheHit, cacheKey: key, sourcesQueried: r.sourcesQueried, candidates: r.candidates, noExactMatch: Boolean(r.noExactMatch), unavailable: r.unavailable || [] };
     if (stage === 'id') {
       idResult = r;
       if (r.candidates.length) { idMatched = true; break; }
@@ -456,11 +500,11 @@ export async function lookup(env, body, deps = {}) {
     req.itemId && !idMatched && idResult && !idResult.candidates.length &&
     (idResult.cacheHit || ((idResult.sourcesQueried || []).length === 2 && !(idResult.paused || []).length && !(idResult.unavailable || []).length))
   );
-  if (idConfirmedNoMatch && !result.candidates.length && req.price !== null && req.brand) {
+  if (!deps.deterministicOnly && idConfirmedNoMatch && !result.candidates.length && req.price !== null && req.brand) {
     const key = keys.pf(req.brand, req.currency, req.price);
     const r = await runStage(env, req, 'price-fallback', key, deps, trail);
     unavailable.push(...(r.unavailable || [])); paused.push(...(r.paused || []));
-    result = { cacheHit: r.cacheHit, cacheKey: key, sourcesQueried: r.sourcesQueried, candidates: r.candidates };
+    result = { cacheHit: r.cacheHit, cacheKey: key, sourcesQueried: r.sourcesQueried, candidates: r.candidates, noExactMatch: Boolean(r.noExactMatch), unavailable: r.unavailable || [] };
   }
   const branch = await resolveBranch(env, req, deps);
   const candidates = (result.candidates || []).map(c => {
@@ -469,12 +513,15 @@ export async function lookup(env, body, deps = {}) {
     return { ...c, mismatches };
   });
   const mismatches = candidates[0]?.mismatches || [];
-  const out = { ...result, candidates, mismatches, flag: null, printedItemId: req.itemId, canonicalBrand: req.brand };
+  const noExactMatch = Boolean(deps.deterministicOnly && req.itemId && !candidates.length);
+  const out = { ...result, candidates, mismatches, flag: null, printedItemId: req.itemId, canonicalBrand: req.brand, noExactMatch };
   if (candidates[0]?.sourceNote) out.sourceNote = candidates[0].sourceNote;
   else if (result.sourceNote) out.sourceNote = result.sourceNote;
   if (branch) out.branch = branch;
   // Any source pause (quota guard etc.) is reported, even when the other source or another stage still answered.
-  if (paused.length) {
+  if (noExactMatch) {
+    out.unavailableReason = 'No exact catalogue match in the server lookup table.';
+  } else if (paused.length) {
     out.paused = true;
     out.unavailableReason = [...new Set(unavailable.filter(Boolean))].join(' ') || [...new Set(paused)].join(' ');
     out.quotaGuard = [...new Set(paused)];

@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { makeEnv, mockFetch, CATALOGUE } from './helpers.mjs';
 import { runSanity, COLUMNS, PINK, AMBER, normaliseTimestamp, normaliseTender, chooseBrandItemId, resolveBrandItemId, TENDER_REASON, maybeApplyPr1BatchDateOutlierCheck, BRAND_ITEM_ID_FORMAT, BRAND_ITEM_ID_FORMATS, setBrandItemIdFormat, getBrandItemIdFormat, fitsBrandItemIdFormat, extractChanelStyleRef, suggestedPrintedCodeAlternative, printedValueKeptReason, officialSiteShowsReason } from '../functions/_lib/sanity.js';
 import { lookup } from '../functions/_lib/lookup.js';
+import { keys } from '../functions/_lib/cache.js';
 import { createRun, processRun, getRun } from '../functions/_lib/runs.js';
 const REPO = new URL('../../tillroll/', import.meta.url).pathname;
 const KEYS = { BRAVE_API_KEY: 'b', GEMINI_API_KEY: 'g' };
@@ -91,6 +92,38 @@ test('a doubtful zero without a unit price stays blank and cannot create a sale 
   assert.equal(row.flags['采购商品原价'], PINK);
 });
 
+test('sanity uses only deterministic catalogue entries and never invokes search AI', async () => {
+  const calls = { brave: 0, gemini: 0 };
+  const env = makeEnv({ BRAVE_API_KEY: 'synthetic-brave', GEMINI_API_KEY: 'synthetic-gemini' });
+  const f = mockFetch([], calls);
+  const cacheKey = keys.item('Synthetic Brand', 'SYN-CAT-42');
+  const candidate = {
+    brand: 'Synthetic Brand', officialName: 'Synthetic Catalogue Coat', itemId: 'SYN-CAT-42',
+    price: 120, currency: 'GBP', onOfficialSite: true, matchedFields: ['itemId', 'brand', 'price'],
+    matchType: 'id', confidence: 1, sourceUrls: ['https://catalogue.synthetic.example/SYN-CAT-42'],
+  };
+  await env.LOOKUP_CACHE.put(cacheKey, JSON.stringify({ sourcesQueried: ['brave', 'gemini-grounding'], candidates: [candidate] }));
+  const rejected = await runSanity(env, { batchId: 'synthetic-ai-cache', mode: 'round1', receipts: [{
+    receiptKey: 'synthetic-ai-cache', merchant: 'Synthetic Shop', receiptReference: 'SYN-R1', date: '2026-11-20', time: '12:00', payment: 'Card', currency: 'GBP',
+    items: [{ brand: 'Synthetic Brand', item: 'Printed Coat', itemId: 'SYN-CAT-42', unitPrice: 120, amount: 120 }],
+  }] }, { fetchImpl: f });
+  assert.equal(calls.brave, 0);
+  assert.equal(calls.gemini, 0);
+  assert.equal(rejected.result.agreedRows[0].cells['品名'], 'Printed Coat');
+  assert.equal(rejected.result.agreedRows[0].flags['品名'], AMBER);
+  assert.match(rejected.result.agreedRows[0].flagReasons['品名'], /No exact catalogue match/);
+
+  const tableEnv = makeEnv({ BRAVE_API_KEY: 'synthetic-brave', GEMINI_API_KEY: 'synthetic-gemini' });
+  await tableEnv.LOOKUP_CACHE.put(cacheKey, JSON.stringify({ deterministic: true, candidates: [candidate] }));
+  const accepted = await runSanity(tableEnv, { batchId: 'synthetic-table', mode: 'round1', receipts: [{
+    receiptKey: 'synthetic-table', merchant: 'Synthetic Shop', receiptReference: 'SYN-R2', date: '2026-11-20', time: '12:00', payment: 'Card', currency: 'GBP',
+    items: [{ brand: 'Synthetic Brand', item: 'Printed Coat', itemId: 'SYN-CAT-42', unitPrice: 120, amount: 120 }],
+  }] }, { fetchImpl: f });
+  assert.equal(accepted.result.agreedRows[0].cells['品名'], 'Synthetic Catalogue Coat');
+  assert.equal(calls.brave, 0);
+  assert.equal(calls.gemini, 0);
+});
+
 test('P7: unclear UK dates are DD/MM; 03/04/2026 is 3 April and there is no MM/DD fallback', () => {
   assert.equal(normaliseTimestamp('03/04/2026', null), '2026-04-03 00:00:00');
   assert.equal(normaliseTimestamp('03/04/2026', '9:15 am'), '2026-04-03 09:15:00');
@@ -113,8 +146,9 @@ test('all stored sample readings (real-samples + featured) pass the export invar
   // "SB SIZE 45.5": unit price unreadable + amount 0 -> doubtful, kept and Pink
   const sb = result.agreedRows.find(r => r.cells['品名'] === 'SB SIZE 45.5');
   assert.ok(sb && sb.flags['采购商品原价'] === PINK);
-  // look-ups had no keys -> paused Amber, never silent
-  assert.equal(result.lookupsPaused, true);
+  // No exact catalogue table is available in this test environment, so rows stay Amber.
+  assert.equal(result.lookupsPaused, undefined);
+  assert.ok(result.lookupUncertainties.some(e => /No exact catalogue match/.test(e.reason)));
   console.log(`samples: ${fx.length} receipts, ${result.agreedRows.length} rows, ${result.excludedZeroCount} zero excluded, ${result.readingErrors.length} reading errors, ${result.lookupUncertainties.length} look-up flags`);
   assert.ok(!JSON.stringify(result).includes('trail'), 'no internal debate in final output');
 });

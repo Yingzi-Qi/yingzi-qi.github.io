@@ -202,7 +202,7 @@ test('cleared Pink/Amber fill becomes a lock and is never re-flagged; edits are 
   assert.equal(r3.result.agreedRows[0].flags['品牌'], undefined);
 });
 
-test('edited 品牌货号 invalidates the 2dp price-fallback key and re-looks-up; paused stays Amber', async () => {
+test('edited 品牌货号 invalidates the 2dp price-fallback key and re-looks-up; missing exact table entry stays Amber', async () => {
   const env = makeEnv(KEYS);
   const f = mockFetch(CATALOGUE);
   const base = { receiptKey: 'pf', merchant: 'Gucci', receiptReference: 'G1', date: '2026-11-21', time: '10:00', payment: 'Visa', currency: 'GBP' };
@@ -227,8 +227,9 @@ test('edited 品牌货号 invalidates the 2dp price-fallback key and re-looks-up
   const role = paused.result.agreedRows[0];
   assert.equal(role.cells['供应商'], 'Rolex Canary Wharf');
   assert.equal(role.flags['供应商'], AMBER);
-  assert.equal(paused.result.lookupsPaused, true);
+  assert.equal(paused.result.lookupsPaused, undefined);
   assert.equal(role.flags['品名'], AMBER);
+  assert.match(role.flagReasons['品名'], /No exact catalogue match/);
 });
 
 test('header fill is the dark green, never a flag colour; money format and autoFilter stay', async () => {
