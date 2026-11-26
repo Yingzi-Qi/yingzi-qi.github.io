@@ -23,7 +23,52 @@ export const identifierClasses = Object.freeze([
 ]);
 
 const paymentClasses = new Set(['payment_card', 'payment_auth', 'payment_merchant', 'payment_terminal', 'payment_reference']);
-const primaryOrder = ['physical_item_id', 'serial_number', 'product_code'];
+const primaryOrder = ['physical_item_id', 'product_id', 'serial_number', 'product_code'];
+const candidateClasses = new Set(['physical_item_id', 'product_id', 'product_code', 'sku', 'style_or_model_reference', 'serial_number', 'barcode_or_qr', 'ean']);
+const candidateRejectedLine = /^(?:total|sub\s*total|amount|balance|cash|change|tender|payment|visa|master\s*card|amex|maestro|union\s*pay|card|auth|terminal|merchant|receipt|transaction|order|invoice|loyalty|rewards|member|date|time|qty|quantity|price|size|colour|color|tax|vat|discount|saving|return|survey)\b/i;
+const candidateToken = /^[A-Za-z0-9][A-Za-z0-9./_–—-]{3,}$/;
+
+function isGtinValue(value) {
+  const text = String(value ?? '').replace(/\s+/g, '');
+  if (!/^(?:\d{8}|\d{12,14})$/.test(text)) return false;
+  return [...text].reverse().reduce((sum, digit, index) => sum + Number(digit) * (index % 2 ? 3 : 1), 0) % 10 === 0;
+}
+
+function isEanValue(value) {
+  return /^\d{13}$/.test(String(value ?? '').replace(/\s+/g, ''));
+}
+
+function tidyCandidateValue(value) {
+  return String(value ?? '').trim().replace(/^[|:;#]+|[|:;]+$/g, '');
+}
+
+function candidateFormat(value) {
+  const text = tidyCandidateValue(value);
+  return candidateToken.test(text) && /\d/.test(text) && text.length >= 4 && text.length <= 32;
+}
+
+function candidateChecks(value, entry, source) {
+  const text = tidyCandidateValue(value);
+  const label = String(entry?.label ?? '');
+  const className = entry?.class || (isEanValue(text) ? 'ean' : 'unknown');
+  const rejected = paymentClasses.has(className) || ['receipt_or_transaction_number', 'loyalty_or_rewards_number', 'payment_reference'].includes(className)
+    || (!label && candidateRejectedLine.test(String(entry?.evidence ?? '')))
+    || /(?:receipt|transaction|order|invoice|terminal|merchant|loyalty|rewards|card|auth|date|time|total|amount|price|qty|quantity|size)\b/i.test(text);
+  const format = candidateFormat(text);
+  const gtinChecksum = !/^\d+$/.test(text) || !/^(?:\d{8}|\d{12,14})$/.test(text) || isGtinValue(text);
+  const paymentLike = /^\d{12,19}$/.test(text) || /^(?:19|20)\d{2}$/.test(text);
+  return {format, gtinChecksum, paymentLike, rejected, source};
+}
+
+function candidateBaseScore(className) {
+  return ({physical_item_id: .96, product_id: .94, product_code: .90, sku: .87,
+    style_or_model_reference: .84, barcode_or_qr: .80, ean: .80, serial_number: .68}[className] ?? .55);
+}
+
+function candidateClass(entry, value) {
+  if (isEanValue(value) || entry?.label && /^(?:ean|upc|gtin|barcode)$/i.test(entry.label)) return 'ean';
+  return entry?.class || 'unknown';
+}
 
 // Printed instructions and links are not receipt fields.
 const untrustedText = /ignore\s+previous\s+instructions|\b(?:do\s+not\s+follow|system\s+prompt)\b|https?:\/\/|www\.\S+|\bqr\b[^.\n]{0,40}\b(?:code|scan|visit)\b|\bscan\s+(?:this|the)\s+(?:qr|code)\b|\breturn\s+policy\b|\bsurvey\b|\bplease\s+visit\b/i;
@@ -137,7 +182,8 @@ function readLabel(line, text, itemDescription) {
 function joinWrapped(lines, index) {
   const current = tidy(lines[index]?.text);
   const next = tidy(lines[index + 1]?.text);
-  const fragment = /^(?:serial|item|product|id|style|model|ref|reference|article|sku|loyalty|rewards|receipt|transaction|auth|terminal|merchant|card)$/i.test(current);
+  const fragment = /^(?:serial|item|product|id|style|model|ref|reference|article|sku|loyalty|rewards|receipt|transaction|auth|terminal|merchant|card)$/i.test(current)
+    || /^(?:serial\s+number|item\s+(?:no\.?|number|id|code)|product\s+(?:info|code|id)|receipt\s+(?:no\.?|number)|transaction\s+(?:no\.?|number))$/i.test(current);
   if (fragment && next && !isUntrustedReceiptText(next)) {
     return {text: current + ' ' + next, span: 2, line: lines[index], next: lines[index + 1]};
   }
@@ -252,9 +298,120 @@ export function itemCountCheck(lines, items, excludedZeroItems = []) {
 function choosePrimary(identifiers) {
   for (const kind of primaryOrder) {
     const hit = identifiers.find(entry => entry.class === kind && entry.value);
-    if (hit) return {value: hit.value, reason: hit.label + ' is the primary item ID (' + kind + ').'};
+    if (hit) return {value: hit.value, class: kind, label: hit.label, entry: hit, reason: hit.label + ' is the primary item ID (' + kind + ').'};
   }
-  return {value: null, reason: 'No explicit ID, serial number, or product code was printed for this item.'};
+  return {value: null, class: null, label: null, entry: null, reason: 'No explicit ID, serial number, or product code was printed for this item.'};
+}
+
+function candidateFromEntry(entry, source = 'label', lineIndex = null) {
+  const value = tidyCandidateValue(entry?.value);
+  // DEBUG_CANDIDATE
+  if (value === 'SYN-A' || value === 'SYN-B') console.log('DEBUG', value, candidateClass(entry, value), candidateChecks(value, {...entry, class: candidateClass(entry, value)}, source));
+  if (!value || !candidateClasses.has(candidateClass(entry, value))) return null;
+  const className = candidateClass(entry, value);
+  const checks = candidateChecks(value, {...entry, class: className}, source);
+  if (checks.rejected || !checks.format || checks.paymentLike) return null;
+  const proximity = source === 'label' ? .08 : source === 'same_line' ? .06 : source === 'next_line' ? .04 : .02;
+  const checksum = checks.gtinChecksum && /^\d+$/.test(value) ? .05 : 0;
+  const confidence = Math.max(0, Math.min(1, Number(entry?.confidence ?? .8)));
+  const score = Math.min(1, candidateBaseScore(className) + proximity + checksum + (confidence - .8) * .1);
+  return {
+    value,
+    class: className,
+    label: entry?.label || null,
+    source,
+    evidence: entry?.evidence || value,
+    lineIndex,
+    confidence,
+    score: Number(score.toFixed(3)),
+    reasons: [entry?.label ? 'explicit label' : 'adjacent code line', source.replace('_', ' ')],
+    checks,
+    alternatives: [...(entry?.alternatives || [])],
+  };
+}
+
+function unlabelledCandidates(block, item) {
+  const found = [];
+  const parts = block?.parts || [];
+  for (let index = 0; index < parts.length; index++) {
+    const text = tidy(parts[index]?.text);
+    if (!text || candidateRejectedLine.test(text) || /\p{L}{3}/u.test(text) && !candidateToken.test(text)) continue;
+    const words = text.split(/\s+/).map(tidyCandidateValue).filter(Boolean);
+    if (words.length !== 1 || !candidateToken.test(words[0])) continue;
+    const value = words[0];
+    const className = isEanValue(value) ? 'ean' : 'product_code';
+    const entry = {value, class: className, label: null, evidence: text, confidence: Number(parts[index]?.line?.confidence ?? .8)};
+    const source = index === 0 ? 'same_line' : index === 1 ? 'next_line' : 'chain';
+    const candidate = candidateFromEntry(entry, source, index);
+    if (candidate) {
+      candidate.reasons = ['unlabelled code adjacent to item block', source.replace('_', ' ')];
+      if (item?.item && sameName(item.item, block.itemDescription)) candidate.reasons.push('description matched');
+      found.push(candidate);
+    }
+  }
+  return found;
+}
+
+function dedupeCandidates(entries) {
+  const byValue = new Map();
+  for (const entry of entries) {
+    const key = entry.value.toUpperCase();
+    const prior = byValue.get(key);
+    if (!prior || entry.score > prior.score) byValue.set(key, entry);
+    else if (prior && entry.source !== prior.source) prior.reasons = [...new Set([...prior.reasons, entry.source.replace('_', ' ')])];
+  }
+  return [...byValue.values()].sort((a, b) => b.score - a.score || a.value.localeCompare(b.value));
+}
+
+function resolveCandidates(candidates) {
+  const valid = candidates.filter(entry => entry.checks?.format && !entry.checks?.rejected && !entry.checks?.paymentLike);
+  if (!valid.length) return {value: null, status: 'missing', reason: 'No structurally valid product/item ID candidate was printed.', candidates: []};
+  const [best, second] = valid;
+  const margin = second ? best.score - second.score : best.score;
+  const eligible = ['physical_item_id', 'product_id', 'product_code', 'sku', 'style_or_model_reference', 'ean'].includes(best.class);
+  if (!eligible || best.score < .75) return {value: null, status: 'probable', reason: 'A possible identifier was found but its format or evidence is too weak to promote automatically.', candidates: valid};
+  if (second && margin < .15) return {value: null, status: 'ambiguous', reason: 'Several possible identifiers are similarly supported. Review the candidates before choosing one.', candidates: valid};
+  return {value: best.value, status: best.score >= .85 ? 'confirmed' : 'probable', reason: 'Selected the highest-scoring candidate using its label, position, format, and OCR confidence.', candidates: valid};
+}
+
+function itemIdMetadata(item, block, primary) {
+  const entries = [];
+  const byEntry = new Map();
+  for (const [index, part] of (block?.parts || []).entries()) {
+    for (const entry of part?.line ? identifiersOn(part.line, part.text, block.itemDescription) : []) byEntry.set(entry, index);
+  }
+  for (const entry of block?.identifiers || []) {
+    const source = entry.class === 'barcode_or_qr' ? 'barcode' : 'label';
+    const candidate = candidateFromEntry(entry, source, byEntry.get(entry) ?? null);
+    if (candidate) entries.push(candidate);
+  }
+  entries.push(...unlabelledCandidates(block, item));
+  if (item?.itemId) {
+    const existing = candidateFromEntry({value: item.itemId, class: 'physical_item_id', label: 'Existing item ID', evidence: item.itemId, confidence: 1}, 'same_line', null);
+    if (existing) entries.push(existing);
+  }
+  if (item?.sku) {
+    const existing = candidateFromEntry({value: item.sku, class: 'sku', label: 'Existing SKU', evidence: item.sku, confidence: 1}, 'same_line', null);
+    if (existing) entries.push(existing);
+  }
+  if (item?.styleRef) {
+    const existing = candidateFromEntry({value: item.styleRef, class: 'style_or_model_reference', label: 'Existing style/ref', evidence: item.styleRef, confidence: 1}, 'same_line', null);
+    if (existing) entries.push(existing);
+  }
+  if (item?.ean) {
+    const existing = candidateFromEntry({value: item.ean, class: 'ean', label: 'Existing EAN', evidence: item.ean, confidence: 1}, 'barcode', null);
+    if (existing) entries.push(existing);
+  }
+  const candidates = dedupeCandidates(entries);
+  const decision = resolveCandidates(candidates);
+  if (primary?.value && !candidates.some(entry => entry.value === primary.value)) {
+    const primaryEntry = candidateFromEntry(primary.entry || {value: primary.value, class: primary.class, label: primary.label, evidence: primary.value, confidence: .8}, 'label', null);
+    if (primaryEntry) {
+      candidates.push(primaryEntry);
+      candidates.sort((a, b) => b.score - a.score || a.value.localeCompare(b.value));
+    }
+  }
+  return {candidates, decision};
 }
 
 function sameName(a, b) {
@@ -284,7 +441,7 @@ export function applyItemIdentifiers(data, ocr) {
     if (index >= 0) cursor = index + 1;
     const list = block?.identifiers || [];
     const primary = choosePrimary(list);
-    const next = {...item, identifiers: list, primaryItemId: primary.value, primaryItemIdReason: primary.reason};
+    let next = {...item, identifiers: list, primaryItemId: primary.value, primaryItemIdReason: primary.reason};
     const ref = list.find(entry => /^ref#?$/i.test(entry.label) && entry.value);
     if (ref && !next.styleRef) next.styleRef = ref.value;
     if (!next.item) {
@@ -299,6 +456,16 @@ export function applyItemIdentifiers(data, ocr) {
           filledIndexes.push({index: itemIndex, name});
         }
       }
+    }
+    const metadata = itemIdMetadata(next, block, primary);
+    next = {...next, itemIdCandidates: metadata.candidates, itemIdDecision: metadata.decision};
+    const chosen = metadata.decision.value && metadata.candidates.find(entry => entry.value === metadata.decision.value);
+    if (!next.itemId && chosen && chosen.class !== 'ean' && chosen.class !== 'serial_number') {
+      if (chosen.class === 'style_or_model_reference') {
+        if (!next.styleRef) next.styleRef = chosen.value;
+      } else if (chosen.class === 'sku') {
+        if (!next.sku) next.sku = chosen.value;
+      } else next.itemId = chosen.value;
     }
     return next;
   });

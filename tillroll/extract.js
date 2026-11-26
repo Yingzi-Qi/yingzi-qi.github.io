@@ -116,7 +116,7 @@ function amounts(text) {
   });
 }
 const roundMoney = value => Math.round(value * 100) / 100;
-const itemShape = () => ({ brand:null, brandRaw:null, item:null, itemId:null, sku:null, colour:null, size:null, qty:null, unitPrice:null, amount:null, lineDiscount:null, lineDiscountLabel:null, lineDiscounts:null, concessionCode:null, internalCode:null, ean:null, styleRef:null, brandItemId:null, brandItemIdCandidate:null, identifiers:[], primaryItemId:null, primaryItemIdReason:null });
+const itemShape = () => ({ brand:null, brandRaw:null, item:null, itemId:null, sku:null, colour:null, size:null, qty:null, unitPrice:null, amount:null, lineDiscount:null, lineDiscountLabel:null, lineDiscounts:null, concessionCode:null, internalCode:null, ean:null, styleRef:null, brandItemId:null, brandItemIdCandidate:null, identifiers:[], primaryItemId:null, primaryItemIdReason:null, itemIdCandidates:[], itemIdDecision:null });
 const receiptShape = () => ({ merchant:null, date:null, time:null, orderNumber:null, orderId:null, receiptReference:null,
   total:null, subtotal:null, discount:null, receiptDiscount:null, receiptDiscounts:[], tax:null, currency:null, payment:null, card:null, identifiers:[], itemCountCheck:null,
   storeClues:{addressLines:[],postcode:null,storeNumber:null,phone:null},
