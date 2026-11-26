@@ -59,7 +59,7 @@ test('strict evidence ignores footer prices and leaves tied identifiers blank', 
     '15/11/2026 10:04 NT1234-567890',
     'Synthetic wool coat',
     'Product Info: A1234',
-    'Style B5678',
+    'Product Info: B5678',
     '£120.00',
     'TOTAL (1 item) £120.00',
     'StaffNo 4821 £120.00',
@@ -100,4 +100,35 @@ test('strict evidence carries a fixed-list brand from the nearby product block',
   assert.equal(data.items.length, 1);
   assert.equal(data.items[0].brand, 'Bulgari');
   assert.equal(data.items[0].item, 'Synthetic bracelet');
+});
+
+test('strict evidence prefers a product description over a short colour line', () => {
+  const data = extractStrictReceipt(makeOcr([
+    'CHANEL',
+    '15/11/2026 10:04',
+    'Receipt # SYN-CH-0004',
+    'CHANEL BEANIE',
+    'BLK ECRU',
+    'A4001 £120.00',
+    'TOTAL (1 item) £120.00',
+    'VISA',
+  ]));
+  assert.equal(data.items.length, 1);
+  assert.equal(data.items[0].item, 'BEANIE');
+});
+
+test('strict evidence promotes a labelled product code over a serial candidate', () => {
+  const data = extractStrictReceipt(makeOcr([
+    'HARRODS',
+    '15/11/2026 10:04 NT1234-567890',
+    'Synthetic bracelet',
+    'SAP 123456',
+    'SN Z9999',
+    '£120.00',
+    'TOTAL (1 item) £120.00',
+    'VISA',
+  ]));
+  assert.equal(data.items.length, 1);
+  assert.equal(data.items[0].itemId, '123456');
+  assert.equal(data.items[0].brandItemId, '123456');
 });

@@ -828,12 +828,12 @@ export {amounts as readPrintedAmounts, neighbouringRows as nearbyPrintedRows};
 // when it contains a product-shaped identifier and a price, or is the name
 // immediately above such a line.  Footer text can therefore never become an
 // item merely because OCR attached a money token to it.
-const strictFooter = /^(?:total|sub\s*[- ]?total|subtotal|grand\s+total|amount|balance|tax|vat|tva|discount|saving|cash|change|tender|payment|visa|master\s*card|maestro|amex|union\s*pay|alipay|we\s*chat|card|approved|auth|terminal|merchant|staff(?:\s*(?:no|number|id))?|operator|cashier|sales\s*(?:person|associate)|served\s+by|reward(?:s)?|loyalty|member|customer\s+(?:copy|receipt)|return|refund|exchange|warranty|terms|marketing|promotion|thank\s+you|please|address|postcode|telephone|phone|carrier\s+bag|by\s+appointment|gift\s+wrap)\b/i;
+const strictFooter = /^(?:total|sub\s*[- ]?total|subtotal|grand\s+total|amount|balance|tax|vat|tva|discount|saving|cash|change|tender|payment|visa|master\s*card|maestro|amex|union\s*pay|alipay|we\s*chat|card|approved|auth|terminal|merchant|staff(?:\s*(?:no|number|id))?|operator|cashier|sales\s*(?:person|associate)|served\s+by|reward(?:s)?|loyalty|member|customer\s+(?:copy|receipt)|return|refund|exchange|warranty|terms|marketing|promotion|thank\s+you|please|address|postcode|telephone|phone|carrier\s+bag|by\s+appointment|gift\s+wrap|sold\s+in\s+perfect\s+condition|item\s+checked\s+by|item\s+in\s+perfect\s+condition|checked|soft\s+wrap|box\s+and\s+dust\s+bag|item\s+sold\b|all\s+packaging\b|with\s+tag\b|perfect\s+condition\b|sold\s+as\s+seen\b|no\s+refund\b|none\s+(?:refund|exchange)\b|\d+\s+days?\b)\b/i;
 const strictCode = /\b(?:[A-Z]{1,6}[0-9][A-Z0-9]*(?:[-_/][A-Z0-9]+)*|[0-9]{4,14})\b/gi;
 const strictCodeBad = /^(?:19|20)\d{2}$|^\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?$|^\d+[.,]\d{2}$/;
 const strictWords = value => String(value ?? '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
 const strictPriceText = value => amounts(value).length > 0;
-const strictMetadata = /^(?:citcon|qr\s+tendered|payment\s+reference|payment\s+method|you\s+have\s+been\s+served|rewards?\b|harrods\s+rewards|contactless\b|pan\s+seq|aid\b|cryptogram|verified\s+by|cardholder|please\s+debit|please\s+retain|exchange\b|no\s+refund|product\s+info\b)/i;
+const strictMetadata = /^(?:citcon|qr\s+tendered|payment\s+reference|payment\s+method|you\s+have[_\s]+been[_\s]+served|rewards?\b|harrods\s+rewards|contactless\b|pan\s+seq|aid\b|cryptogram|verified\s+by|cardholder|please\s+debit|please\s+retain|exchange\b|no\s+refund|product\s+info\b)/i;
 function strictPriceLineAllowed(value) {
   const text = String(value ?? '').trim();
   const label = tidyLine(text);
@@ -878,7 +878,14 @@ function strictCodeTokens(value) {
 }
 function strictLayoutEvidence(layout, lines) {
   const evidence = [];
-  const add = (indexes, code, text = null) => evidence.push({indexes, code, text: text || indexes.map(index => lines[index].text).join(' ')});
+  const identifierSource = indexes => {
+    const text = indexes.map(index => lines[index]?.text || '').join(' ');
+    if (/\b(?:product\s+info|product\s*(?:id|code)|item\s*(?:id|no|code)|article\s*(?:id|no|code)|ref(?:erence)?|sap)\b/i.test(text)) return 'labelled_product_id';
+    if (/\b(?:style|sku|model)\b/i.test(text)) return 'labelled_style';
+    if (/\b(?:serial|sn)\b/i.test(text)) return 'labelled_serial';
+    return 'adjacent_code';
+  };
+  const add = (indexes, code, text = null) => evidence.push({indexes, code, label:identifierSource(indexes), text: text || indexes.map(index => lines[index].text).join(' ')});
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i], text = String(line?.text || '').trim();
     if (!text || !strictPriceLineAllowed(text) || /^(?:receipt|transaction|order|date|time)\b/i.test(text)) continue;
@@ -911,7 +918,11 @@ function strictLayoutEvidence(layout, lines) {
     const text = tidyLine(value);
     if (!/\p{L}{2}/u.test(text) || strictFooter.test(text) || strictMetadata.test(text) || noProduct.test(text)) return false;
     if (/^(?:sap|sn|style|sku|item\s*(?:id|code|no)|product\s*(?:id|code)|product\s+info|ref(?:erence)?|colour|size)\b/i.test(text)) return false;
-    return strictWords(text).split(' ').filter(word => word.length > 1).length >= 2;
+    const words = strictWords(text).split(' ').filter(word => word.length > 1);
+    const codes = strictCodeTokens(text);
+    if (codes.some(token => /^\d{4,}$/.test(token))) return false;
+    const codeWords = new Set(codes.map(token => strictWords(token)));
+    return words.filter(word => !codeWords.has(word)).length >= 2;
   };
   const positivePrices = lines.map((line, index) => strictPriceEvidenceAllowed(lines, index)
     ? amounts(line?.text || '').filter(price => price.value > 0)
@@ -933,13 +944,18 @@ function strictLayoutEvidence(layout, lines) {
         }
       }
       if (priceIndex < 0) continue;
-      let descriptionIndex = -1, descriptionDistance = Infinity;
+      let descriptionIndex = -1, descriptionDistance = Infinity, descriptionScore = -Infinity;
       for (let j = Math.max(0, i - 4); j <= Math.min(lines.length - 1, i + 4); j++) {
         if (j === i || !descriptionLine(lines[j]?.text || '')) continue;
         const between = lines.slice(Math.min(i, j) + 1, Math.max(i, j));
         if (between.some(line => strictFooter.test(tidyLine(line?.text || '')))) continue;
         const distance = Math.abs(j - i);
-        if (distance < descriptionDistance) { descriptionIndex = j; descriptionDistance = distance; }
+        const words = strictWords(lines[j]?.text || '').split(' ').filter(word => word.length > 1);
+        const letters = words.filter(word => /^\p{L}+$/u.test(word)).join('').length;
+        const score = words.length * 10 + letters;
+        if (score > descriptionScore || (score === descriptionScore && distance < descriptionDistance)) {
+          descriptionIndex = j; descriptionDistance = distance; descriptionScore = score;
+        }
       }
       if (descriptionIndex < 0) continue;
       const key = `${code}|${priceValue}`;
@@ -955,7 +971,9 @@ function strictEvidenceMatch(row, candidate) {
   const rowWords = strictWords(row?.item).split(' ').filter(word => word.length > 1);
   const candidateWords = strictWords(candidate.text);
   const nameMatch = rowWords.length > 0 && rowWords.filter(word => candidateWords.includes(word)).length >= Math.max(1, Math.min(2, rowWords.length));
-  const amountMatch = row?.amount == null || candidate.indexes.some(index => amounts(candidate.text).some(price => Math.abs(price.value - Number(row.amount)) <= .02)) || candidate.indexes.some(index => amounts(candidate.text).some(price => Math.abs(price.value - Number(row.amount)) <= .02));
+  const amountMatch = row?.amount == null
+    || candidate.indexes.some(index => amounts(candidate.text).some(price => Math.abs(price.value - Number(row.amount)) <= .02))
+    || candidate.label === 'labelled_product_id' && nameMatch;
   const idMatch = !row?.itemId || candidate.code == null || candidate.text.toLowerCase().includes(String(row.itemId).toLowerCase());
   return nameMatch && amountMatch && idMatch;
 }
@@ -976,12 +994,85 @@ function strictRowFromEvidence(candidate) {
   if (!/\p{L}{2}/u.test(item) || strictFooter.test(item) || strictMetadata.test(item)) return null;
   const quantity = /(?:^|\s)(\d+)\s*[x×@]\s*/i.exec(text);
   const raw = {...itemShape(), item, itemId:candidate.code, amount:last.value,
-    unitPrice:prices.length > 1 ? prices.at(-2).value : null, qty:quantity ? Number(quantity[1]) : 1};
+    unitPrice:prices.length > 1 ? prices.at(-2).value : null, qty:quantity ? Number(quantity[1]) : 1,
+    identifierSource:candidate.label || 'adjacent_code'};
   return assignBrandItemId({...sortItemFields(raw).item, sourceLines:candidate.indexes.map(index => index + 1)});
 }
 
 function strictRowWords(row) {
   return new Set(strictWords(row?.item).split(' ').filter(word => word.length > 1));
+}
+function strictNameQuality(value) {
+  const words = strictWords(value).split(' ').filter(word => word.length > 1);
+  const natural = words.filter(word => /^\p{L}+[\p{L}'&-]*$/u.test(word));
+  return natural.length * 10 + natural.join('').length;
+}
+function strictDescriptionCandidate(value) {
+  const text = tidyLine(value);
+  if (!/\p{L}{2}/u.test(text) || amounts(text).length || strictFooter.test(text) || strictMetadata.test(text) || noProduct.test(text)) return false;
+  if (/^(?:sap|sn|style|sku|item\s*(?:id|code|no)|product\s*(?:id|code)|product\s+info|ref(?:erence)?|colour|size)\b/i.test(text)) return false;
+  const codes = strictCodeTokens(text);
+  if (/\b\d{4,}\b/.test(text)) return false;
+  if (codes.some(token => /^\d{4,}$/.test(token))) return false;
+  const words = strictWords(text).split(' ').filter(word => word.length > 1);
+  const natural = words.filter(word => !codes.includes(word));
+  return natural.length >= 2;
+}
+function strictBestDescription(row, lines) {
+  if (!row?.sourceLines?.length) return row;
+  const span = strictRowSpan(row);
+  if (!span) return row;
+  let best = null, bestScore = strictNameQuality(row.item);
+  const start = Math.max(0, span.min - 1 - 5);
+  const end = Math.min(lines.length, span.max + 4);
+  for (let index = start; index < end; index++) {
+    const text = lines[index]?.text || '';
+    if (!strictDescriptionCandidate(text)) continue;
+    const score = strictNameQuality(text);
+    if (score > bestScore) { best = text; bestScore = score; }
+  }
+  if (!best) return strictNameQuality(row.item) ? row : {...row, item:null};
+  const fields = sortItemFields({brand:null, name:best, itemId:row.itemId});
+  return {...row, brand:fields.brand || row.brand, item:fields.name || row.item};
+}
+function strictNormaliseItemId(row, layout) {
+  if (layout !== 'harrods') return row;
+  if (/^\d{13}$/.test(String(row?.itemId ?? '')))
+    return {...row, itemId:null, ean:row.ean || row.itemId, brandItemId:null, brandItemIdCandidate:null};
+  if (row?.ean && String(row.brandItemId ?? '') === String(row.ean))
+    return {...row, brandItemId:null, brandItemIdCandidate:null};
+  return row;
+}
+function strictPromoteLabelledIdentifier(row, lines) {
+  if (!row?.sourceLines?.length) return row;
+  const span = strictRowSpan(row);
+  if (!span) return row;
+  const found = [];
+  const start = Math.max(0, span.min - 1 - 2);
+  const end = Math.min(lines.length, span.max + 2);
+  for (let index = start; index < end; index++) {
+    const text = tidyLine(lines[index]?.text || '');
+    const labelled = /^(?:product\s+info|product\s*(?:id|code)|item\s*(?:id|no|code)|article\s*(?:id|no|code)|ref(?:erence)?|sap)\s*[:#=\-]?\s*(.*)$/i.exec(text);
+    if (labelled) {
+      const inline = strictCodeTokens(labelled[1]);
+      if (inline.length) found.push({value:inline.at(-1), rank:4});
+      else {
+        const next = strictCodeTokens(lines[index + 1]?.text || '');
+        if (next.length) found.push({value:next.at(-1), rank:4});
+      }
+    }
+    const serial = /^(?:serial\s*(?:no|number|id)?|sn)\s*[:#=\-]?\s*(.*)$/i.exec(text);
+    if (serial) {
+      const inline = strictCodeTokens(serial[1]);
+      if (inline.length) found.push({value:inline.at(-1), rank:2});
+    }
+  }
+  if (!found.length) return row;
+  const topRank = Math.max(...found.map(candidate => candidate.rank));
+  const top = [...new Set(found.filter(candidate => candidate.rank === topRank).map(candidate => candidate.value))];
+  if (top.length !== 1) return row;
+  const value = top[0];
+  return {...row, itemId:value, identifierSource:topRank >= 4 ? 'labelled_product_id' : 'labelled_serial', brandItemId:value, brandItemIdCandidate:{value, source:topRank >= 4 ? 'labelled_product_id' : 'labelled_serial'}};
 }
 function strictRowSpan(row) {
   const lines = (row?.sourceLines || []).map(Number).filter(Number.isFinite);
@@ -996,6 +1087,9 @@ function strictIdentifierQuality(value) {
   if (/^\d{4,11}$/.test(code)) return 2;
   return 1;
 }
+function strictIdentifierSourceQuality(value) {
+  return value === 'labelled_product_id' ? 4 : value === 'labelled_style' ? 3 : value === 'labelled_serial' ? 2 : 1;
+}
 function strictRowQuality(row) {
   const words = strictRowWords(row);
   const span = strictRowSpan(row);
@@ -1005,6 +1099,9 @@ function strictRowQuality(row) {
   // containing digits when choosing one representative for a duplicate block.
   const descriptive = [...words].reduce((score, word) => score + (/^\p{L}[\p{L}'&-]*$/u.test(word) ? 10 : 2), 0);
   return descriptive + Math.min(20, [...words].join('').length / 2) + strictIdentifierQuality(row?.itemId) + compactness;
+}
+function strictIdentifierDecisionQuality(row) {
+  return strictIdentifierSourceQuality(row?.identifierSource) * 10 + strictIdentifierQuality(row?.itemId);
 }
 function strictRowsSameBlock(left, right) {
   if (left?.amount == null || right?.amount == null || Math.abs(Number(left.amount) - Number(right.amount)) > .02) return false;
@@ -1026,19 +1123,26 @@ function strictCollapseRows(rows, printedCount) {
   }
   const ambiguous = [];
   let collapsed = clusters.map(group => {
-    const ranked = [...group].sort((left, right) => strictRowQuality(right) - strictRowQuality(left));
+    const ranked = [...group].sort((left, right) => {
+      const identifierDelta = strictIdentifierDecisionQuality(right) - strictIdentifierDecisionQuality(left);
+      return identifierDelta || strictRowQuality(right) - strictRowQuality(left);
+    });
     const chosen = {...ranked[0]};
     const identifiers = [...new Set(group.map(row => String(row?.itemId ?? '').trim()).filter(Boolean))];
-    if (identifiers.length > 1) {
+    const bestIdentifierScore = strictIdentifierDecisionQuality(ranked[0]);
+    const tiedIdentifiers = [...new Set(group
+      .filter(row => String(row?.itemId ?? '').trim() && strictIdentifierDecisionQuality(row) === bestIdentifierScore)
+      .map(row => String(row.itemId).trim()))];
+    if (tiedIdentifiers.length > 1) {
       chosen.itemId = null;
       chosen.itemIdCandidates = identifiers;
       chosen.itemIdDecision = 'ambiguous_identifier';
       chosen.brandItemId = null;
       chosen.brandItemIdCandidate = null;
-      ambiguous.push(identifiers);
+      ambiguous.push(tiedIdentifiers);
     }
     const settled = assignBrandItemId(chosen);
-    if (identifiers.length > 1) {
+    if (tiedIdentifiers.length > 1) {
       // Candidate lists are retained for human review, but an ambiguous block
       // must never promote the first OCR token into the export field.
       settled.brandItemId = null;
@@ -1091,7 +1195,10 @@ export function extractStrictReceipt(ocr) {
       continue;
     }
     const index = candidates.indexOf(match); used.add(index);
-    kept.push({...row, sourceLines: match.indexes.map(lineIndex => lineIndex + 1)});
+    kept.push({...row,
+      itemId:row.itemId || match.code || null,
+      identifierSource:match.label || row.identifierSource || 'adjacent_code',
+      sourceLines: match.indexes.map(lineIndex => lineIndex + 1)});
   }
   // Some layouts label the style column (for example “STYLE AB1234”) and the
   // legacy diagnostic reader deliberately parks that line as metadata. Build a
@@ -1109,7 +1216,7 @@ export function extractStrictReceipt(ocr) {
   if (collapsed.ambiguous.length > 0)
     strict.parserReasons.push('Competing product identifiers were found in one item block, so the item ID was left blank.');
   if (!collapsed.rows.length && base.items?.length) strict.parserReasons.push('No item line matched the known layout whitelist.');
-  strict.items = collapsed.rows.map(row => strictBrandFromEvidence(row, lines));
+  strict.items = collapsed.rows.map(row => strictBestDescription(row, lines)).map(row => strictBrandFromEvidence(row, lines)).map(row => strictPromoteLabelledIdentifier(row, lines)).map(row => strictNormaliseItemId(row, layout.layout));
   if (strict.itemCountCheck) {
     strict.itemCountCheck = {...strict.itemCountCheck,
       counted:strict.items.length,
