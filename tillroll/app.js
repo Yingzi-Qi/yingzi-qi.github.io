@@ -370,9 +370,35 @@ function receiptStatus(r){
   if(r.orders?.length && r.orders.every(o=>o.status==='Matched'))return badge('Order matched');
   return '';
 }
+const hiddenIdentifierClasses=new Set(['payment_card','payment_auth','payment_merchant','payment_terminal','payment_reference','loyalty_or_rewards_number','receipt_or_transaction_number']);
+function visibleItemIdCandidates(item) {
+  const raw = Array.isArray(item?.itemIdCandidates) ? item.itemIdCandidates : (Array.isArray(item?.identifiers) ? item.identifiers : []);
+  const seen = new Set();
+  return raw.filter(candidate => {
+    const value = String(candidate?.value ?? '').trim();
+    const kind = String(candidate?.class ?? 'unknown');
+    if (!value || hiddenIdentifierClasses.has(kind)) return false;
+    const key = kind + ':' + value.toUpperCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
 function productCodeCell(r,item,path) {
   if (String(item.itemId??'').trim()) return cell(r,path+'itemId',item.itemId,'Edit item ID');
   if (String(item.sku??'').trim()) return cell(r,path+'sku','SKU '+item.sku,'Only the style/SKU is recorded. Edit the style/SKU.');
+  const candidates = visibleItemIdCandidates(item);
+  if (candidates.length) {
+    const shown = candidates.slice(0, 3).map(candidate => String(candidate.value).trim()).join(' / ');
+    const suffix = candidates.length > 3 ? ' +' + (candidates.length - 3) : '';
+    const detail = candidates.map(candidate => {
+      const source = candidate.source ? ' · ' + candidate.source : '';
+      const reason = Array.isArray(candidate.reasons) && candidate.reasons.length ? ' · ' + candidate.reasons.join(', ') : '';
+      return String(candidate.value).trim() + ' [' + String(candidate.class || 'candidate') + source + reason + ']';
+    }).join(' | ');
+    const decision = item.itemIdDecision?.reason || item.primaryItemIdReason || 'These values were read near the item but no single deterministic winner was selected.';
+    return cell(r,path+'itemId','Possible: '+shown+suffix,decision+' '+detail,'no-product-code lookup-uncertainty');
+  }
   return cell(r,path+'itemId','No code','No item ID or style/SKU recorded. Enter an item ID.','no-product-code');
 }
 const amountFormat=new Intl.NumberFormat('en-GB',{minimumFractionDigits:2,maximumFractionDigits:2});
