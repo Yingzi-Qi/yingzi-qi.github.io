@@ -96,6 +96,24 @@ test('batch date and fixed normalisers are deterministic', () => {
   assert.equal(normaliseBrand('synthetic unknown label'), null);
 });
 
+test('export text cleanup title-cases human fields and preserves structured data', async () => {
+  const env = makeEnv();
+  const { result } = await runSanity(env, { batchId: 'text-format', mode: 'round1', receipts: [{
+    receiptKey: 'text-format', layout: 'harrods', layoutStatus: 'known', gateRequired: true,
+    merchant: 'harrods', receiptReference: 'NT1234-567890', date: '2026-11-15', time: '10:00',
+    payment: 'visa', currency: 'GBP', total: 120, itemCount: 1,
+    items: [{ brand: 'chanel', item: 'WALLET ON CHAIN', itemId: 'A12345', qty: 1, unitPrice: 120, amount: 120 }],
+  }] }, { now: new Date('2026-11-26T12:00:00Z') });
+  const cells = result.agreedRows[0].cells;
+  assert.equal(cells['供应商'], 'Harrods');
+  assert.equal(cells['品牌'], 'Chanel');
+  assert.equal(cells['品名'], 'Wallet On Chain');
+  assert.equal(cells['采购商品方法'], 'Card');
+  assert.equal(cells['采购小票id'], 'NT1234-567890');
+  assert.equal(cells['品牌货号'], 'A12345');
+  assert.equal(cells['采购商品原价'], 120);
+});
+
 test('production sanity ignores injected network providers', async () => {
   let calls = 0;
   const lookupStub = async () => { calls++; return { candidates: [] }; };
@@ -189,7 +207,7 @@ test('stored sample readings keep field invariants and route unsupported receipt
   assert.ok(audit.excludedZero.some(z => z.name === 'CARRIAGE'));
   assert.ok(!result.agreedRows.some(r => r.cells['品名'] === 'CARRIAGE'));
   // "SB SIZE 45.5": unit price unreadable + amount 0 -> doubtful, kept and Pink
-  const sb = result.agreedRows.find(r => r.cells['品名'] === 'SB SIZE 45.5');
+  const sb = result.agreedRows.find(r => r.cells['品名'] === 'Sb Size 45.5');
   assert.ok(sb && sb.flags['采购商品原价'] === PINK);
   // No exact catalogue table is available in this test environment, so rows stay Amber.
   assert.equal(result.lookupsPaused, undefined);
@@ -234,7 +252,7 @@ test('look-ups enrich rows (Amber) without overwriting printed prices or item ID
   assert.equal(gucci.brandItemIdReason, 'official site shows 658574');
   assert.equal(gucci.exportMeta.brandItemId, '000001');
   assert.equal(gucci.exportMeta.brandItemIdReason, 'official site shows 658574');
-  assert.equal(gucci.cells['品名'], 'Horsebit 1955 mini bag');
+  assert.equal(gucci.cells['品名'], 'Horsebit 1955 Mini Bag');
   assert.equal(gucci.lookup.matchType, 'price-fallback');
   assert.equal(dior.cells['品名'], 'Handbag'); // ambiguous, weightless: not guessed
   assert.ok(result.lookupUncertainties.some(u => u.rowId === dior.rowId && u.candidates?.length === 2));
@@ -267,7 +285,7 @@ test('round 2: edited 品牌货号 invalidates cache and re-looks-up; changes ar
   const row = r1.result.agreedRows[0];
   const r2 = await runSanity(env, { batchId: 'b3', mode: 'round2', receipts: [{ ...base, items: [{ rowId: row.rowId, brand: 'Gucci', item: row.cells['品名'], itemId: '446744', unitPrice: 1350, amount: 1350, editedCols: ['品牌货号'], previousItemId: '000001', previousCells: row.cells }] }] }, { fetchImpl: f, lookup });
   const row2 = r2.result.agreedRows[0];
-  assert.equal(row2.cells['品名'], 'GG Marmont mini bag');
+  assert.equal(row2.cells['品名'], 'Gg Marmont Mini Bag');
   assert.equal(row2.lookup.matchType, 'id');
   assert.ok(row2.round2Changed.includes('品名') && row2.round2Changed.includes('品牌货号'));
 });
@@ -320,7 +338,7 @@ test('brand/name take official values on mismatch; price and item ID stay as pri
   const row = result.agreedRows[0];
   assert.equal(row.cells['品牌'], 'Van Cleef & Arpels');
   assert.equal(row.flags['品牌'], AMBER);
-  assert.equal(row.cells['品名'], 'Vintage Laurel pendant');
+  assert.equal(row.cells['品名'], 'Vintage Laurel Pendant');
   assert.equal(row.flags['品名'], AMBER);
   assert.equal(row.cells['采购商品原价'], 3700);
   assert.equal(row.flags['采购商品原价'], AMBER);
@@ -340,7 +358,7 @@ test('qty N becomes N unit rows sharing receipt id and time; line discount is es
     ],
   }] });
   assert.equal(result.agreedRows.length, 5);
-  const holders = result.agreedRows.filter(r => r.cells['品名'] === 'Card holder');
+  const holders = result.agreedRows.filter(r => r.cells['品名'] === 'Card Holder');
   assert.equal(holders.length, 2);
   assert.deepEqual(holders.map(r => r.cells['采购商品原价']), [100, 100]);
   assert.equal(holders.reduce((s, r) => s + r.cells['采购商品金额'], 0), 190);
@@ -461,7 +479,7 @@ test('P4: wallets are Card with no flag; cash, PayPal, Klarna, gift card and emp
     assert.equal(byKey[key].cells['采购商品方法'], 'Card', key);
     assert.equal(byKey[key].flags['采购商品方法'], undefined, key);
   }
-  for (const [key, printed] of [['p4-cash', 'Cash'], ['p4-paypal', 'PayPal'], ['p4-klarna', 'Klarna'], ['p4-gift', 'gift card'], ['p4-empty', null]]) {
+  for (const [key, printed] of [['p4-cash', 'Cash'], ['p4-paypal', 'Paypal'], ['p4-klarna', 'Klarna'], ['p4-gift', 'Gift Card'], ['p4-empty', null]]) {
     assert.equal(byKey[key].cells['采购商品方法'], printed, key);
     assert.equal(byKey[key].flags['采购商品方法'], PINK, key);
     assert.ok(result.readingErrors.some(e => e.rowId === byKey[key].rowId && e.col === '采购商品方法' && e.reason === TENDER_REASON), key);

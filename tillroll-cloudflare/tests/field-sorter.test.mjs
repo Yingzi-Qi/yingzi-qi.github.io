@@ -56,7 +56,7 @@ test('readerStage runs field-sorter before verifier: brand moved from 品名 is 
   });
   const row = result.agreedRows[0];
   assert.equal(row.cells['品牌'], 'Dior');
-  assert.match(row.cells['品名'], /Saddle bag/);
+  assert.match(row.cells['品名'], /Saddle Bag/);
   assert.equal(row.flags['品牌'], PINK);
   assert.ok(result.readingErrors.some(e => e.col === '品牌' && /taken from the item name/.test(e.reason)));
 });
@@ -74,7 +74,7 @@ test('readerStage: brand-only and code+brand 品名 are Pink; non-numeric prices
     ],
   });
   const byName = name => result.agreedRows.find(r => r.cells['品名'] === name);
-  const x1 = byName('Christian Dior'), x2 = result.agreedRows.find(r => /9999991234/.test(r.cells['品名'] || '')), x3 = byName('Saddle bag');
+  const x1 = byName('Christian Dior'), x2 = result.agreedRows.find(r => /9999991234/.test(r.cells['品名'] || '')), x3 = byName('Saddle Bag');
   assert.ok(x1 && x2 && x3);
   // Look-ups are paused without keys, so a later Amber on 品名 is mixed-colour; the reader still recorded Pink.
   assert.ok(result.readingErrors.some(e => e.rowId === x1.rowId && e.col === '品名' && /no non-brand word/.test(e.reason)));

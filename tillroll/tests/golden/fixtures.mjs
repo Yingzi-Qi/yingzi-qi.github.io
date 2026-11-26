@@ -31,7 +31,7 @@ export const goldenDataset = {
         '采购时间': '2026-11-15 10:04:00',
         供应商: 'Chanel',
         品牌: 'Chanel',
-        品名: 'Synthetic wool coat',
+        品名: 'Synthetic Wool Coat',
         品牌货号: 'A12345',
         采购商品原价: 120,
         采购商品金额: 120,

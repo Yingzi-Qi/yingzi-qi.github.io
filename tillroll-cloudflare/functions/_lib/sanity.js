@@ -13,6 +13,7 @@ import { matchBrandIdFormat } from '../../../tillroll/brand-id-format.js';
 import { NAME_NEEDS_CHECKING, concessionReading, gateFindings, isUnlabelledTenDigits, selectBrandItem } from '../../../tillroll/export-gate.js';
 import { ALLOWED_TENDERS, TENDER_REASON, normaliseTender } from '../../../tillroll/tender.js';
 import { validLayoutReceiptId } from '../../../tillroll/layout-classifier.js';
+import { formatVisibleCells } from '../../../tillroll/text-format.js';
 import { keys as lookupKeys } from './cache.js';
 export { ALLOWED_TENDERS, TENDER_REASON, normaliseTender };
 
@@ -1417,6 +1418,10 @@ export async function runSanity(env, input, deps = {}) {
   const finalIssues = excelAudit(allRows, ctx);
   const readingErrors = [], lookupUncertainties = [];
   const agreedRows = allRows.map(row => {
+    // Keep the visible text columns consistently formatted after reader and
+    // verifier stages. IDs, dates, and numeric cells are left untouched by
+    // formatVisibleCells.
+    row.cells = formatVisibleCells(row.cells);
     const round2Changed = row.previous ? COLUMNS.filter(col => row.previous[col] !== undefined && row.previous[col] !== row.cells[col]) : [];
     // Cells the look-up changed in Round 2 are Amber, and never over a human lock.
     if (mode === 'round2') for (const col of round2Changed) {

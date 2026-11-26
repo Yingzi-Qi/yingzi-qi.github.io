@@ -85,7 +85,7 @@ test('qty N becomes N unit rows sharing receipt id and time; line discount sums 
     ],
   }] });
   assert.equal(result.agreedRows.length, 5);
-  const holders = result.agreedRows.filter(r => r.cells['品名'] === 'Card holder');
+  const holders = result.agreedRows.filter(r => r.cells['品名'] === 'Card Holder');
   assert.equal(holders.length, 2);
   assert.deepEqual(holders.map(r => r.cells['采购商品原价']), [100, 100]);
   assert.equal(holders.reduce((s, r) => s + r.cells['采购商品金额'], 0), 190);
@@ -194,7 +194,7 @@ test('cleared Pink/Amber fill becomes a lock and is never re-flagged; edits are 
   const again = r2.result.agreedRows[0];
   assert.equal(again.flags['采购小票id'], undefined);
   assert.equal(again.flags['品牌'], undefined);
-  assert.equal(again.cells['品名'], 'Classic Flap Mini Bag edited');
+  assert.equal(again.cells['品名'], 'Classic Flap Mini Bag Edited');
   assert.ok(!again.round2Changed.includes('采购小票id'));
   assert.equal(f.calls.gemini, calls, 'verified brand, name and price with an unedited item id skip look-up');
   const r3 = await runSanity(env, { batchId: 'lock', mode: 'round1', receipts: [{ ...base, items: [{ brand: 'Chanel Accessory', item: 'mini', itemId: 'A69900', unitPrice: 4950, amount: 4950 }] }] }, { fetchImpl: f, lookup });
@@ -216,7 +216,7 @@ test('edited 品牌货号 invalidates the 2dp price-fallback key and re-looks-up
   parsed.receipts[0].items[0].editedCols = ['品牌货号'];
   parsed.receipts[0].items[0].previousItemId = '000001';
   const r2 = await runSanity(env, { batchId: 'pf', mode: 'round2', receipts: parsed.receipts }, { fetchImpl: f, lookup });
-  assert.equal(r2.result.agreedRows[0].cells['品名'], 'GG Marmont mini bag');
+  assert.equal(r2.result.agreedRows[0].cells['品名'], 'Gg Marmont Mini Bag');
   assert.equal(r2.result.agreedRows[0].lookup.matchType, 'id');
   assert.ok(r2.result.agreedRows[0].round2Changed.includes('品名'));
   assert.equal(r2.result.agreedRows[0].flags['品名'], undefined);
@@ -433,7 +433,7 @@ test('P4: 采购商品方法 is UnionPay, Card, Alipay or WeChat; anything else 
     { ...base, receiptKey: 'p4-empty', receiptReference: 'P4-EMPTY', payment: '' },
   ] });
   const byId = Object.fromEntries(result.agreedRows.map(r => [r.cells['采购小票id'], r]));
-  for (const [id, value] of [['P4-VISA', 'Card'], ['P4-ALI', 'Alipay'], ['P4-WX', 'WeChat'], ['P4-UP', 'UnionPay']]) {
+  for (const [id, value] of [['P4-VISA', 'Card'], ['P4-ALI', 'Alipay'], ['P4-WX', 'Wechat'], ['P4-UP', 'Unionpay']]) {
     assert.equal(byId[id].cells['采购商品方法'], value);
     assert.equal(byId[id].flags['采购商品方法'], undefined);
   }
@@ -724,7 +724,7 @@ test('gate (b): a name that still holds a brand, a code, or no product word is P
     assert.match(by[id].flagReasons['品名'], /Name needs checking/);
     assert.match(by[id].exportMeta.comments['品名'], /Name needs checking/);
   }
-  assert.equal(by['gb-ok'].cells['品名'], 'Saddle bag');
+  assert.equal(by['gb-ok'].cells['品名'], 'Saddle Bag');
   assert.notEqual(by['gb-ok'].flagReasons['品名'], 'Name needs checking');
 });
 
@@ -844,13 +844,13 @@ test('short brand aliases pink only at the start or end, and not inside the look
   const start = result.agreedRows.find(r => r.rowId === 'al-start');
   const mid = result.agreedRows.find(r => r.rowId === 'al-mid');
   const official = result.agreedRows.find(r => r.rowId === 'al-official');
-  assert.equal(start.cells['品名'], 'MAC lipstick');
+  assert.equal(start.cells['品名'], 'Mac Lipstick');
   assert.equal(start.flags['品名'], PINK);
   assert.match(start.flagReasons['品名'], /Name needs checking/);
-  assert.equal(mid.cells['品名'], 'Big Mac print tee');
+  assert.equal(mid.cells['品名'], 'Big Mac Print Tee');
   assert.notEqual(mid.flagReasons['品名'], undefined);
   assert.doesNotMatch(String(mid.flagReasons['品名'] || ''), /Name needs checking/);
-  assert.equal(official.cells['品名'], 'MAC Rouge Coco');
+  assert.equal(official.cells['品名'], 'Mac Rouge Coco');
   assert.equal(official.flags['品名'], undefined);
   assert.doesNotMatch(String(official.flagReasons['品名'] || ''), /Name needs checking/);
 });
@@ -866,11 +866,11 @@ test('cd is a Dior alias only as its own token at the start or end of a non-offi
   }] }, { lookup: noLookup });
   const start = result.agreedRows.find(r => r.rowId === 'cd-start');
   const inside = result.agreedRows.find(r => r.rowId === 'cd-inside');
-  assert.equal(start.cells['品名'], 'CD saddle bag');
+  assert.equal(start.cells['品名'], 'Cd Saddle Bag');
   assert.equal(start.cells['品牌'], null);
   assert.equal(start.flags['品名'], PINK);
   assert.match(start.flagReasons['品名'], /Name needs checking/);
-  assert.equal(inside.cells['品名'], 'ABCD bag');
+  assert.equal(inside.cells['品名'], 'Abcd Bag');
   assert.notEqual(inside.flags['品名'], PINK);
   assert.doesNotMatch(String(inside.flagReasons['品名'] || ''), /Name needs checking/);
 });
@@ -886,7 +886,7 @@ test('a gate Pink keeps the look-up Amber reason and candidates in the comment a
     items: [{ rowId: 'both-1', brand: 'Dior', item: 'Dior tote', itemId: 'SYN-BOTH', unitPrice: 10, amount: 10 }],
   }] }, { lookup });
   const row = result.agreedRows[0];
-  assert.equal(row.cells['品名'], 'Dior tote');
+  assert.equal(row.cells['品名'], 'Dior Tote');
   assert.equal(row.flags['品名'], PINK);
   assert.match(row.flagReasons['品名'], /Name needs checking/);
   assert.match(row.flagReasons['品名'], /Price-fallback look-up/);
@@ -1071,14 +1071,14 @@ test('an official look-up name that contains the brand keeps its Amber and is no
   const dior = result.agreedRows.find(r => r.rowId === 'off-dior');
   const chanel = result.agreedRows.find(r => r.rowId === 'off-chanel');
   const plain = result.agreedRows.find(r => r.rowId === 'off-plain');
-  assert.equal(dior.cells['品名'], 'Dior Aurora folio, sage');
+  assert.equal(dior.cells['品名'], 'Dior Aurora Folio, Sage');
   assert.equal(dior.flags['品名'], AMBER);
   assert.doesNotMatch(String(dior.flagReasons['品名'] || ''), /Name needs checking/);
   assert.doesNotMatch(String(dior.exportMeta.comments['品名'] || ''), /Name needs checking/);
-  assert.equal(chanel.cells['品名'], 'Chanel Meridian satchel, slate');
+  assert.equal(chanel.cells['品名'], 'Chanel Meridian Satchel, Slate');
   assert.equal(chanel.flags['品名'], AMBER);
   assert.doesNotMatch(String(chanel.flagReasons['品名'] || ''), /Name needs checking/);
-  assert.equal(plain.cells['品名'], 'Dior tote');
+  assert.equal(plain.cells['品名'], 'Dior Tote');
   assert.equal(plain.flags['品名'], PINK);
   assert.match(plain.flagReasons['品名'], /Name needs checking/);
 });

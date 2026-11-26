@@ -25,6 +25,7 @@ import * as zipPackage from './export-vendor/jszip.min.js';
 import { expandReceipt, joinPurchaseTime, round2, saleAmount, supplierVisibleName } from './units.js';
 import { ALLOWED_TENDERS, TENDER_REASON, normaliseTender } from './tender.js';
 import { withoutCardDigits } from './exports.js';
+import { formatVisibleCells } from './text-format.js';
 
 const JSZip = zipPackage.default ?? globalThis.JSZip;
 const MAIN = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
@@ -204,7 +205,7 @@ function moneyCell(value, colour) {
 }
 
 export async function buildV2XlsxBlob(input, { exportKey = (globalThis.crypto?.randomUUID?.() || `exp-${Date.now()}`) } = {}) {
-  const rows = agreedList(input).map(maskPaymentRow);
+  const rows = agreedList(input).map(maskPaymentRow).map(row => ({ ...row, cells: formatVisibleCells(row.cells) }));
   if (rows.length > 1048575) throw new Error('This batch exceeds the number of item rows allowed in one Excel worksheet.');
   const comments = [];
   const body = rows.map((row, i) => {
