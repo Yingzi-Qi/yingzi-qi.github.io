@@ -94,7 +94,10 @@ async function processFile(file) {
   let server = null;
   try {
     const response = await fetch(initialReaderEndpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ reading }) });
-    if (response.ok) server = await response.json();
+    if (response.ok) {
+      server = await response.json();
+      reading = server.reading || reading;
+    }
     else throw new Error(`Server reader returned ${response.status}.`);
   } catch (error) {
     reading.flags.push({ field: 'server', severity: 'Amber', reason: `${error.message} The local reading is shown for review.` });
