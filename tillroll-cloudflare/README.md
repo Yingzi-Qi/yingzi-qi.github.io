@@ -20,6 +20,7 @@ Owner: Website Builder. Source of truth: Notion "Tillroll v2 — Operating Manua
 | `GET /api/sanity-run/:runId` | `queued|running|completed|failed`; completed returns ONLY `{agreedRows,excludedZeroCount,readingErrors,lookupUncertainties,workbookExportReady}` |
 | `GET /api/quota` | quota-guard status, `lookupsPaused` + Amber flag |
 | `POST /api/ocr` | Gemini Vision proxy (server key, daily guard, backoff) |
+| `POST /api/initial-reader` | Deterministic first-reader contract. Accepts OCR fields, validates receipt fundamentals, matches each item against the D1 catalogue by exact price plus a clue, and returns official evidence or review-only candidates. |
 | `POST /api/batches` | SHA-256 duplicate check + batch registration |
 | `GET/POST /api/history` | Reading History |
 | `GET/POST /api/locks` | `human_verified_unflagged` locks |
@@ -34,6 +35,20 @@ Response `{cacheHit,cacheKey,sourcesQueried,candidates:[{brand,officialName,item
 Keys (30-day TTL): `lookup:v2:item:{brand}:{itemId}`, `lookup:v2:mf:{brand}:{name}:{style}`, `lookup:v2:pf:{brand}:{currency}:{price.toFixed(2)}` (only when itemId matched nothing), `lookup:v2:branch:{supplier}:{postcode|addressLine1|storeNumber}`.
 Brand given ⇒ only `onOfficialSite` candidates (verified against the brand's official domain by code, not by the model). Retailers only corroborate.
 Additive fields (proposed, see PR): `supplier` (request), `branch`, `printedItemId`, `canonicalBrand`, `flag`, `paused`, `unavailableReason`, `quotaGuard` (response).
+
+### `/api/initial-reader`
+
+The browser sends the output of the existing local or fallback server OCR as
+`{reading:{receiptId,date,time,paymentMethod,totalPaid,items:[{itemPrice,purchasePrice,brand,name,reference}],evidence}}`.
+The endpoint never asks an AI model to validate a value. It blanks ambiguous
+fundamentals, flags split tenders and total mismatches, and keeps the image
+hash idempotent. An accepted item match requires an exact catalogue price, at
+least one matching clue, and an official source URL. If those conditions are
+not met, the endpoint returns review-only candidates ordered by closest price,
+then a price at or above the receipt amount, then lighter published weight.
+Receipt values are preserved separately from the official brand, name,
+reference, price, and source URL evidence. Run migration `0003_initial_reader.sql`
+before using the endpoint in a bound D1 environment.
 
 ### Excel export and Update/Refresh (Excel Sync, 25 Nov 2026)
 The workbook is built in the browser (`tillroll/v2-excel.js` + `tillroll/units.js`). No new credentials.

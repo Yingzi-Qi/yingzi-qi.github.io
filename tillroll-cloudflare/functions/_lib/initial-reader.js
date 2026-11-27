@@ -1,6 +1,6 @@
 // Deterministic first-reader contract and catalogue matcher.
 // OCR may provide the input, but this module never calls an OCR or LLM service.
-import { canonicalBrand } from './brands.js';
+import { canonicalBrand, officialDomains, isOfficialUrl } from './brands.js';
 
 const FUNDAMENTAL_CONFIDENCE = 0.75;
 const REVIEW = 'Pink';
@@ -99,7 +99,9 @@ function readTender(value) {
 function paymentEntries(input) {
   const candidates = input.payments ?? input.tenders ?? input.paymentMethods;
   if (Array.isArray(candidates)) return candidates.filter(item => rawValue(item) !== null && str(rawValue(item)));
+  if (Array.isArray(input.paymentMethod)) return input.paymentMethod.filter(item => rawValue(item) !== null && str(rawValue(item)));
   if (typeof candidates === 'string' && /[,/;+]|\band\b/i.test(candidates)) return candidates.split(/[,/;+]|\band\b/i).map(value => value.trim()).filter(Boolean);
+  if (typeof input.paymentMethod === 'string' && /[,/;+]|\band\b/i.test(input.paymentMethod)) return input.paymentMethod.split(/[,/;+]|\band\b/i).map(value => value.trim()).filter(Boolean);
   return [];
 }
 
@@ -123,7 +125,7 @@ function readItem(item, index) {
   else if (ambiguous(purchasePriceRaw) || (confidenceOf(purchasePriceRaw) !== null && confidenceOf(purchasePriceRaw) < FUNDAMENTAL_CONFIDENCE)) { purchasePrice = null; flags.push(flag(`items[${index}].purchasePrice`, 'OCR reading is ambiguous or below the fundamental-field confidence threshold.')); }
   const brand = readOptional(fieldFrom(source, ['brand', 'brandName']));
   const name = readOptional(fieldFrom(source, ['name', 'description', 'productName']));
-  const reference = readOptional(fieldFrom(source, ['reference', 'ref', 'itemId', 'productId', 'sku']));
+  const reference = readOptional(fieldFrom(source, ['reference', 'ref', 'itemId', 'styleRef', 'productId', 'sku', 'ean']));
   if (!brand && !name && !reference) flags.push(flag(`items[${index}].clue`, 'No brand, item name, or reference was read for this priced line.', AMBER, { code: 'missing_item_clue' }));
   if (itemPrice !== null && purchasePrice !== null && purchasePrice > itemPrice + 0.005) flags.push(flag(`items[${index}].purchasePrice`, 'Paid purchase amount is greater than the printed item price.'));
   return {
@@ -141,10 +143,18 @@ function readItem(item, index) {
 export function normaliseInitialReceipt(input = {}) {
   const source = input && typeof input === 'object' ? input : {};
   const flags = [];
-  const receiptId = readFundamental(source.receiptId ?? source.receipt_id, 'receiptId', value => str(rawValue(value)), 'Receipt ID is missing.', 'Receipt ID is invalid.');
+  const receiptId = readFundamental(source.receiptId ?? source.receipt_id ?? source.receiptReference ?? source.orderNumber ?? source.transactionId, 'receiptId', value => str(rawValue(value)), 'Receipt ID is missing.', 'Receipt ID is invalid.');
   const date = readFundamental(source.date ?? source.purchaseDate, 'date', dateValue, 'Purchase date is missing.', 'Purchase date must be a valid YYYY-MM-DD date.');
+  const today = dateValue(source.today) || new Date().toISOString().slice(0, 10);
+  if (date.value && date.value > today) {
+    date.value = null;
+    date.flags = [flag('date', 'The printed purchase date is in the future.')];
+  }
   const time = readFundamental(source.time ?? source.purchaseTime, 'time', timeValue, 'Purchase time is missing.', 'Purchase time must be HH:MM or HH:MM:SS.');
-  const tender = readTender(source.paymentMethod ?? source.tender);
+  const rawTender = source.paymentMethod ?? source.payment ?? source.tender;
+  const tender = Array.isArray(rawTender) && rawTender.length > 1
+    ? { value: null, flags: [flag('paymentMethod', 'A single receipt total is split across multiple payment entries.', AMBER, { code: 'split_payment' })] }
+    : readTender(Array.isArray(rawTender) ? rawTender[0] : rawTender);
   flags.push(...receiptId.flags, ...date.flags, ...time.flags, ...tender.flags);
   const entries = paymentEntries(source);
   if (entries.length > 1) flags.push(flag('paymentMethod', 'A single receipt total is split across multiple tender entries.', REVIEW, { code: 'split_payment' }));
@@ -155,6 +165,10 @@ export function normaliseInitialReceipt(input = {}) {
   const totalRaw = source.totalPaid ?? source.paidTotal ?? source.total;
   const totalPaid = positiveAmount(totalRaw);
   if (totalPaid === null) flags.push(flag('totalPaid', rawValue(totalRaw) ? 'Receipt total is invalid or not positive.' : 'Receipt total is missing.', AMBER));
+  if (totalPaid !== null && items.length && items.every(item => item.purchasePrice !== null)) {
+    const itemTotal = Math.round(items.reduce((sum, item) => sum + (item.purchasePrice * item.quantity), 0) * 100) / 100;
+    if (Math.abs(itemTotal - totalPaid) > 0.005) flags.push(flag('totalPaid', `Receipt total ${totalPaid.toFixed(2)} does not equal item paid amounts ${itemTotal.toFixed(2)}.`, REVIEW, { code: 'total_mismatch' }));
+  }
   const evidence = source.evidence && typeof source.evidence === 'object' ? { ...source.evidence } : {};
   const reviewRequired = flags.length > 0;
   return {
@@ -212,7 +226,7 @@ function normaliseCatalogueCandidate(candidate) {
 
 function clueScore(item, candidate) {
   const reference = item.reference && candidate.itemId && compact(item.reference) === compact(candidate.itemId) ? 60 : 0;
-  const brand = item.brand && candidate.brand && canonicalBrand(item.brand) === canonicalBrand(candidate.brand) ? 25 : 0;
+  const brand = item.brand && candidate.brand && compact(canonicalBrand(item.brand)) === compact(canonicalBrand(candidate.brand)) ? 25 : 0;
   const a = tokens(item.name), b = tokens(candidate.officialName);
   const shared = a.size ? [...a].filter(token => b.has(token)).length / a.size : 0;
   const name = shared >= 0.5 ? 15 : 0;
@@ -236,6 +250,14 @@ function candidateOutput(candidate, item, exact, now) {
   };
 }
 
+function hasOfficialSource(candidate) {
+  const source = str(candidate.sourceUrl ?? candidate.source_url ?? candidate.url);
+  if (!source || !/^https?:\/\//i.test(source)) return false;
+  const brand = canonicalBrand(candidate.brand);
+  const domains = officialDomains(brand);
+  return domains.length ? isOfficialUrl(source, brand) : true;
+}
+
 function fallbackSort(item, candidates) {
   const price = cents(item.itemPrice);
   const withClues = candidates.map((candidate, index) => {
@@ -247,7 +269,9 @@ function fallbackSort(item, candidates) {
     return { candidate, index, clues: clues.score, gap, below, weight: Number.isFinite(weight) ? weight : Infinity };
   });
   const cluePool = withClues.some(row => row.clues > 0) ? withClues.filter(row => row.clues > 0) : withClues;
-  cluePool.sort((a, b) => Number(a.below) - Number(b.below) || a.gap - b.gap || a.weight - b.weight || a.index - b.index);
+  // Nearest price is the primary fallback. At an equal gap prefer the
+  // candidate at or above the receipt price, then the lighter published item.
+  cluePool.sort((a, b) => a.gap - b.gap || Number(a.below) - Number(b.below) || a.weight - b.weight || a.index - b.index);
   return cluePool;
 }
 
@@ -259,7 +283,8 @@ export function matchInitialItem(item, catalogue = [], now = new Date().toISOStr
     const currency = str(candidate.currency)?.toUpperCase() || 'GBP';
     return price !== null && candidatePrice === price && (!item.currency || currency === String(item.currency).toUpperCase());
   });
-  const exactScored = exactRows.map(candidate => ({ candidate, ...clueScore(item, candidate) })).filter(row => row.score > 0).sort((a, b) => b.score - a.score);
+  const exactClued = exactRows.map(candidate => ({ candidate, ...clueScore(item, candidate) })).filter(row => row.score > 0).sort((a, b) => b.score - a.score);
+  const exactScored = exactClued.filter(row => hasOfficialSource(row.candidate));
   if (exactScored.length && (exactScored.length === 1 || exactScored[0].score > exactScored[1].score)) {
     const officialMatch = candidateOutput(exactScored[0].candidate, item, true, now);
     return { status: 'accepted', matchType: 'exact-price-clue', officialMatch, candidates: exactRows.map(candidate => candidateOutput(candidate, item, true, now)), reason: null };
@@ -267,8 +292,13 @@ export function matchInitialItem(item, catalogue = [], now = new Date().toISOStr
   if (exactScored.length) {
     return { status: 'review', matchType: 'exact-price-tie', officialMatch: null, candidates: exactRows.map(candidate => candidateOutput(candidate, item, true, now)), reason: 'More than one exact-price catalogue row has the same best clue score.' };
   }
+  if (exactClued.length) {
+    return { status: 'review', matchType: 'exact-price-no-source', officialMatch: null, candidates: exactRows.map(candidate => candidateOutput(candidate, item, true, now)), reason: 'Exact price and clue matched, but the catalogue row has no official source URL.' };
+  }
   if (!candidates.length) return { status: 'no_match', matchType: 'none', officialMatch: null, candidates: [], reason: 'No catalogue candidates were found.' };
-  const fallback = fallbackSort(item, candidates);
+  const pricedCandidates = candidates.filter(candidate => candidatePriceCents(candidate) !== null);
+  if (!pricedCandidates.length) return { status: 'review', matchType: 'no-official-price', officialMatch: null, candidates: candidates.slice(0, 10).map(candidate => candidateOutput(candidate, item, false, now)), reason: 'Catalogue candidates were found, but none has a usable official price.' };
+  const fallback = fallbackSort(item, pricedCandidates);
   const evidence = fallback.slice(0, 10).map(row => candidateOutput(row.candidate, item, false, now));
   return { status: 'review', matchType: 'nearest-price-review', officialMatch: null, candidates: evidence, reason: 'No exact catalogue price and clue match was found. Nearest candidate is review evidence only.' };
 }

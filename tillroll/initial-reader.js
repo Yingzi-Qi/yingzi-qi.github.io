@@ -122,6 +122,17 @@ function normalisePayment(raw, issues) {
   let values = aliases(source, ['payments', 'paymentBreakdown', 'tenders']);
   if (!Array.isArray(values)) values = null;
   const single = aliases(source, ['paymentMethod', 'payment', 'tender']);
+  if (Array.isArray(single) && single.length > 1) {
+    issues.push({ field: 'paymentMethod', code: 'split_payment', severity: 'Amber', reason: 'The receipt total is split across multiple payment entries.' });
+    return { value: null, methods: single.map(value => normaliseTender(envelope(value).value)).filter(Boolean), split: true };
+  }
+  if (typeof single === 'string' && /[,/;+]|\band\b/i.test(single)) {
+    const methods = single.split(/[,/;+]|\band\b/i).map(value => normaliseTender(value.trim())).filter(Boolean);
+    if (methods.length > 1) {
+      issues.push({ field: 'paymentMethod', code: 'split_payment', severity: 'Amber', reason: 'The receipt total is split across multiple payment entries.' });
+      return { value: null, methods, split: true };
+    }
+  }
   if (values && values.length > 1) {
     issues.push({ field: 'paymentMethod', code: 'split_payment', severity: 'Amber', reason: 'The receipt total is split across multiple payment entries.' });
     return { value: null, methods: values.map(value => normaliseTender(envelope(value).value)).filter(Boolean), split: true };
@@ -166,6 +177,11 @@ export function normaliseInitialReceipt(input = {}) {
   const issues = [];
   const receiptIdRead = fieldResult('receipt ID', aliases(source, ['receiptId', 'receiptReference', 'orderNumber', 'transactionId', 'id']));
   const dateRead = fieldResult('date', aliases(source, ['date', 'purchaseDate', 'transactionDate']), { parser: normaliseInitialDate });
+  const today = normaliseInitialDate(source.today) || new Date().toISOString().slice(0, 10);
+  if (dateRead.value && dateRead.value > today) {
+    dateRead.value = null;
+    dateRead.issue = { code: 'future_date', severity: 'Pink', reason: 'The printed purchase date is in the future.' };
+  }
   const timeRead = fieldResult('time', aliases(source, ['time', 'purchaseTime', 'transactionTime']), { parser: normaliseInitialTime });
   addIssue(issues, receiptIdRead.issue, 'receiptId');
   addIssue(issues, dateRead.issue, 'date');
@@ -176,7 +192,12 @@ export function normaliseInitialReceipt(input = {}) {
   const rawItems = Array.isArray(source.items) ? source.items : [];
   if (!rawItems.length) issues.push({ field: 'items', code: 'missing_items', severity: 'Pink', reason: 'No item line with a readable price was supplied.' });
   const items = rawItems.map((item, index) => normaliseItem(item, index, issues));
+  if (totalRead.value !== null && items.length && items.every(item => item.purchasePrice !== null)) {
+    const itemTotal = Math.round(items.reduce((sum, item) => sum + item.purchasePrice * item.quantity, 0) * 100) / 100;
+    if (Math.abs(itemTotal - totalRead.value) > 0.005) issues.push({ field: 'totalPaid', code: 'total_mismatch', severity: 'Pink', reason: `Receipt total ${totalRead.value.toFixed(2)} does not equal item paid amounts ${itemTotal.toFixed(2)}.` });
+  }
   const flags = issues.map(issue => issue.severity);
+  const evidenceSource = source.evidence && typeof source.evidence === 'object' ? source.evidence : {};
   return {
     receiptId: receiptIdRead.value,
     date: dateRead.value,
@@ -197,8 +218,82 @@ export function normaliseInitialReceipt(input = {}) {
     flags: issues,
     reviewRequired: flags.length > 0,
     status: flags.length ? 'review' : 'ready',
+    evidence: {
+      source: str(evidenceSource.source) || 'unknown',
+      rawText: str(evidenceSource.rawText ?? source.rawText),
+      imageHash: str(evidenceSource.imageHash ?? source.imageHash),
+      imageUrl: str(evidenceSource.imageUrl ?? source.imageUrl),
+      quality: evidenceSource.quality ?? source.imageQuality ?? null,
+    },
   };
 }
 
 export const normalizeInitialReceipt = normaliseInitialReceipt;
 export const validateInitialReceipt = normaliseInitialReceipt;
+
+// Merge a second OCR pass without allowing it to overwrite a different
+// printed value. A disagreement is blanked and carried to review.
+export function reconcileInitialReadings(local, secondary) {
+  const merged = structuredClone(local);
+  const fields = ['receiptId', 'date', 'time', 'paymentMethod', 'totalPaid'];
+  for (const field of fields) {
+    if (merged[field] === null && secondary?.[field] !== null && secondary?.[field] !== undefined) merged[field] = secondary[field];
+    else if (merged[field] !== null && secondary?.[field] !== null && secondary?.[field] !== undefined && String(merged[field]) !== String(secondary[field])) {
+      merged[field] = null;
+      merged.flags.push({ field, code: 'ocr_disagreement', severity: 'Pink', reason: 'Independent OCR passes produced different values.' });
+    }
+  }
+  if (!merged.items.length && secondary?.items?.length) merged.items = structuredClone(secondary.items);
+  else if (merged.items.length && secondary?.items?.length && merged.items.length === secondary.items.length) {
+    for (const [index, item] of merged.items.entries()) {
+      for (const field of ['itemPrice', 'purchasePrice', 'brand', 'name', 'reference']) {
+        if (item[field] === null && secondary.items[index][field] !== null) item[field] = secondary.items[index][field];
+        else if (item[field] !== null && secondary.items[index][field] !== null && String(item[field]) !== String(secondary.items[index][field])) {
+          item[field] = null;
+          merged.flags.push({ field: `items[${index}].${field}`, code: 'ocr_disagreement', severity: 'Pink', reason: 'Independent OCR passes produced different values.' });
+        }
+      }
+    }
+  } else if (merged.items.length && secondary?.items?.length && merged.items.length !== secondary.items.length) {
+    merged.items = [];
+    merged.flags.push({ field: 'items', code: 'ocr_disagreement', severity: 'Pink', reason: 'Independent OCR passes produced different item counts.' });
+  }
+  merged.reviewRequired = merged.flags.length > 0;
+  merged.status = merged.reviewRequired ? 'review' : 'ready';
+  return merged;
+}
+
+// Adapter for the existing image/OCR reader. It keeps the first-reader
+// contract separate from the ten-column export while allowing the browser's
+// strict layout parser to feed it without a second OCR pass.
+export function initialReceiptFromStrict(strict = {}, evidence = {}) {
+  const items = Array.isArray(strict.items) ? strict.items.map(item => {
+    const quantity = Number(item.qty ?? item.quantity ?? 1) > 0 ? Number(item.qty ?? item.quantity ?? 1) : 1;
+    const lineAmount = item.amount ?? item.lineAmount ?? item.purchasePrice ?? item.paidAmount;
+    const purchasePrice = lineAmount === null || lineAmount === undefined ? null : Number(lineAmount) / quantity;
+    return {
+      quantity,
+      itemPrice: item.unitPrice ?? item.itemPrice ?? item.originalPrice ?? item.price,
+      purchasePrice,
+      brand: item.brand ?? item.brandName,
+      name: item.item ?? item.name ?? item.description,
+      reference: item.styleRef ?? item.reference ?? item.itemId ?? item.sku ?? item.ean,
+    };
+  }) : [];
+  const result = normaliseInitialReceipt({
+    receiptId: strict.receiptReference ?? strict.receiptId ?? strict.orderNumber,
+    date: strict.date ?? strict.purchaseDate,
+    time: strict.time ?? strict.purchaseTime,
+    payment: strict.payment ?? strict.paymentMethod ?? strict.tender,
+    totalPaid: strict.totalPaid ?? strict.total ?? strict.receiptTotal,
+    items,
+    evidence: { ...evidence, source: evidence.source || 'strict-layout-ocr' },
+  });
+  const sourceIssues = Array.isArray(strict.fieldIssues) ? strict.fieldIssues : [];
+  for (const issue of sourceIssues) {
+    result.flags.push({ field: issue.field || 'ocr', code: 'ocr_field_issue', severity: 'Pink', reason: issue.reason || 'The strict OCR parser reported an uncertainty.' });
+  }
+  result.reviewRequired = result.flags.length > 0;
+  result.status = result.reviewRequired ? 'review' : 'ready';
+  return result;
+}

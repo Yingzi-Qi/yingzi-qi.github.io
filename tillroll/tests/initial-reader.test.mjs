@@ -5,6 +5,8 @@ import {
   normaliseInitialDate,
   normaliseInitialTime,
   parseInitialMoney,
+  initialReceiptFromStrict,
+  reconcileInitialReadings,
 } from '../initial-reader.js';
 
 test('normalises a complete synthetic receipt without guessing optional clues', () => {
@@ -112,4 +114,43 @@ test('date, time, and money helpers reject malformed values deterministically', 
   assert.equal(normaliseInitialTime('24:00'), null);
   assert.equal(parseInitialMoney('£1,204.50'), 1204.5);
   assert.equal(parseInitialMoney('12.345'), null);
+});
+
+test('adapts the existing strict OCR shape without sending lookup data back into OCR', () => {
+  const result = initialReceiptFromStrict({
+    receiptReference: 'SYN-STRICT-6', date: '2026-05-06', time: '11:10:00', payment: 'Visa', total: 90,
+    items: [{ qty: 2, unitPrice: 50, amount: 90, brand: 'Example House', item: 'Synthetic Scarf', styleRef: 'EX-SCARF' }],
+  }, { source: 'synthetic-strict-ocr', imageHash: 'synthetic-hash-6' });
+  assert.equal(result.receiptId, 'SYN-STRICT-6');
+  assert.equal(result.paymentMethod, 'Card');
+  assert.equal(result.items[0].itemPrice, 50);
+  assert.equal(result.items[0].purchasePrice, 45);
+  assert.equal(result.items[0].reference, 'EX-SCARF');
+  assert.equal(result.evidence.source, 'synthetic-strict-ocr');
+});
+
+test('blanks a future date and records a deterministic review flag', () => {
+  const result = normaliseInitialReceipt({
+    receiptId: 'SYN-FUTURE-7', date: '2026-12-01', today: '2026-11-27', time: '11:00', paymentMethod: 'Card', totalPaid: 10,
+    items: [{ itemPrice: 10, purchasePrice: 10, name: 'Synthetic item' }],
+  });
+  assert.equal(result.date, null);
+  assert.ok(result.flags.some(flag => flag.code === 'future_date'));
+});
+
+test('flags an array-valued payment method as split tender', () => {
+  const result = normaliseInitialReceipt({
+    receiptId: 'SYN-SPLIT-8', date: '2026-11-27', time: '11:01', paymentMethod: ['Card', 'WeChat'], totalPaid: 20,
+    items: [{ itemPrice: 20, purchasePrice: 20, name: 'Synthetic item' }],
+  });
+  assert.equal(result.paymentMethod, null);
+  assert.ok(result.flags.some(flag => flag.code === 'split_payment'));
+});
+
+test('blanks a disagreement between independent OCR passes', () => {
+  const local = normaliseInitialReceipt({ receiptId: 'SYN-OCR-A', date: '2026-11-27', time: '11:03', paymentMethod: 'Card', totalPaid: 10, items: [{ itemPrice: 10, purchasePrice: 10, name: 'Synthetic item' }] });
+  const second = normaliseInitialReceipt({ receiptId: 'SYN-OCR-B', date: '2026-11-27', time: '11:03', paymentMethod: 'Card', totalPaid: 10, items: [{ itemPrice: 10, purchasePrice: 10, name: 'Synthetic item' }] });
+  const merged = reconcileInitialReadings(local, second);
+  assert.equal(merged.receiptId, null);
+  assert.ok(merged.flags.some(flag => flag.code === 'ocr_disagreement' && flag.field === 'receiptId'));
 });
