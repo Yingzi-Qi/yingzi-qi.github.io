@@ -103,6 +103,36 @@ test('qty N becomes N unit rows sharing receipt id and time; line discount sums 
   }
 });
 
+test('strict release gate exports only passed receipt rows and routes review receipts separately', async () => {
+  const accepted = {
+    rowId: 'synthetic-accepted:0:u0', receiptKey: 'synthetic-accepted',
+    cells: {
+      '采购小票id': 'SYN-PASS-01', '采购时间': '2026-11-20 12:00:00', '供应商': 'Harrods',
+      '品牌': 'Synthetic Brand', '品名': 'Accepted Coat', '品牌货号': 'SYN-COAT-01',
+      '采购商品原价': 100, '采购商品金额': 100, '采购商品方法': 'Card', '销售金额': 88,
+    }, flags: {}, exportMeta: {},
+  };
+  const held = {
+    rowId: 'synthetic-held:0:u0', receiptKey: 'synthetic-held',
+    cells: {
+      '采购小票id': 'SYN-REVIEW-01', '采购时间': '2026-11-20 12:00:00', '供应商': 'Harrods',
+      '品牌': 'Synthetic Brand', '品名': 'Held Coat', '品牌货号': null,
+      '采购商品原价': 100, '采购商品金额': 100, '采购商品方法': 'Card', '销售金额': 88,
+    }, flags: { '品牌货号': '#FECDD3' }, exportMeta: { flagReasons: { '品牌货号': 'Synthetic missing identifier.' } },
+  };
+  const blob = await buildV2XlsxBlob({
+    agreedRows: [accepted, held], exportableRows: [accepted],
+    reviewReceipts: [{ receiptKey: 'synthetic-held', receiptId: 'SYN-REVIEW-01', imageLink: 'synthetic://held', failingChecks: ['Synthetic gate failure.'] }],
+  });
+  const packed = await sheetXml(blob);
+  const lineItems = packed.sheet;
+  const review = await packed.zip.file('xl/worksheets/sheet4.xml').async('string');
+  assert.match(lineItems, /Accepted Coat/);
+  assert.doesNotMatch(lineItems, /Held Coat|SYN-REVIEW-01/);
+  assert.match(review, /SYN-REVIEW-01/);
+  assert.match(review, /Synthetic gate failure/);
+});
+
 test('workbook: 10 headers, time, sale amount, only two fills, hidden columns, no formula', async () => {
   const env = makeEnv(KEYS);
   const f = mockFetch(CATALOGUE);
