@@ -77,6 +77,14 @@ export function cleanItemName(value) {
   return name;
 }
 
+// Placeholders and OCR fragments are never valid brand item references. Keep
+// this rule separate from the brand format table so every layout shares the
+// same fail-closed behaviour before catalogue lookup.
+export function isPlaceholderReference(value) {
+  const s = str(value);
+  return Boolean(s && /^(?:und|ine|n\/?a|unknown|none|null|nil|blank|1)$/i.test(s));
+}
+
 const catalogueNoMatch = 'No exact catalogue match in the server lookup table.';
 async function exactCatalogueLookup(env, req) {
   const brand = canonicalBrand(req?.brand);
@@ -153,7 +161,8 @@ export function isConcessionOrStoreCode(value, item = {}) {
 export function isForbiddenBrandItemCode(value, item = {}) {
   const s = str(value);
   if (!s) return false;
-  if (/^(?:staff(?:no)?|terminal|register|auth(?:orisation|orization)?|approval|merchant|mid|tid|store|department|concession|cashier|operator|card|payment|total|tax|vat|und|unknown|none|n\/?a)\b/i.test(s)) return true;
+  if (isPlaceholderReference(s)) return true;
+  if (/^(?:staff(?:no)?|terminal|register|auth(?:orisation|orization)?|approval|merchant|mid|tid|store|department|concession|cashier|operator|card|payment|total|tax|vat)\b/i.test(s)) return true;
   const compact = s.replace(/[\s-]/g, '');
   if (isStoreCode(compact) || STORE_INTERNAL.test(compact) || CONCESSION_PREFIX.test(compact)) return true;
   return isConcessionOrStoreCode(s, item);
@@ -420,6 +429,25 @@ function exactIdAndPrice(top, row) {
   if (top?.matchType !== 'id' || typeof price !== 'number' || top.price == null) return false;
   if (top.currency && row.raw?.currency && top.currency !== row.raw.currency) return false;
   return Math.abs(Number(top.price) - price) <= priceTolerance(price);
+}
+function candidateUsesReceiptId(top, row, request = {}) {
+  const ids = [request.itemId, row.raw?.itemLabels?.itemId, row.raw?.printedItemId, row.cells['品牌货号']]
+    .filter(value => value && !isPlaceholderReference(value));
+  return Boolean(top?.itemId && ids.some(id => idsMatch(id, top.itemId)));
+}
+// Catalogue values may enter canonical cells only after the printed reference
+// identifies the same official item and its price is within the approved
+// tolerance. Price-only, partial, and mismatched-price candidates remain
+// review evidence and never become exported values.
+function trustedExactCandidate(top, row, request = {}) {
+  if (!top || top.matchType !== 'id' || top.onOfficialSite !== true) return false;
+  if (!Array.isArray(top.matchedFields) || !top.matchedFields.includes('itemId')) return false;
+  return candidateUsesReceiptId(top, row, request) && exactIdAndPrice(top, row);
+}
+function untrustedCandidateReason(top) {
+  if (top?.matchType === 'price-fallback') return 'Price-fallback candidate was not accepted; the printed brand item ID was not verified.';
+  if (top?.matchType === 'id') return 'Catalogue item ID or price did not match the receipt; the printed brand item ID was not replaced.';
+  return 'Catalogue candidate was not an exact verified item-ID match; printed values were kept for review.';
 }
 function touchCell(row, col) {
   if (!row._lookupTouched) row._lookupTouched = new Set();
@@ -734,7 +762,8 @@ function settleBrandItemId(row, top, ctx) {
   if (ctx.locked(row.rowId, '品牌货号')) return;
   const printed = row.raw.printedItemId ?? c['品牌货号'];
   const brand = c['品牌'] || row.raw?.printedBrand;
-  const official = officialStyleRef(brand, officialItemId(top, row) || str(top?.itemId));
+  const trusted = trustedExactCandidate(top, row);
+  const official = trusted ? officialStyleRef(brand, officialItemId(top, row) || str(top?.itemId)) : null;
   const ean = rowLabelledEan(row);
   const fittingPrinted = fitsBrandItemIdFormat(brand, c['品牌货号'], ctx?.formatTable);
 
@@ -754,6 +783,9 @@ function settleBrandItemId(row, top, ctx) {
     } else if (top?.matchType === 'price-fallback') {
       lookupFlag(row, '品牌货号', AMBER, 'Price-fallback look-up.', { sourceUrls: top.sourceUrls || [], ...(row._candidates ? { candidates: row._candidates } : {}) });
       appendComment(row, '品牌货号', candidateText(row._candidates?.length ? row._candidates : [top]));
+    } else if (top && !trusted) {
+      lookupFlag(row, '品牌货号', AMBER, untrustedCandidateReason(top), { sourceUrls: top.sourceUrls || [], ...(row._candidates ? { candidates: row._candidates } : {}) });
+      appendComment(row, '品牌货号', candidateText(row._candidates?.length ? row._candidates : [top]));
     }
     return;
   }
@@ -762,7 +794,7 @@ function settleBrandItemId(row, top, ctx) {
   if (c['品牌货号']) c['品牌货号'] = null;
 
   // 2) Official style ref.
-  if (official && top) {
+  if (official && top && trusted) {
     c['品牌货号'] = official;
     row.brandItemId = official;
     row.brandItemIdSource = 'official';
@@ -802,7 +834,9 @@ function settleBrandItemId(row, top, ctx) {
   c['品牌货号'] = null;
   // A rejected printed token may remain in comments, but hidden metadata must
   // agree with the visible empty cell.
-  const rejectedPrintedReason = row.brandItemIdReason && /Printed value kept/i.test(row.brandItemIdReason)
+  const rejectedPrintedReason = top && !trusted
+    ? untrustedCandidateReason(top)
+    : row.brandItemIdReason && /Printed value kept/i.test(row.brandItemIdReason)
     ? row.brandItemIdReason
     : 'no brand item ID printed';
   row.brandItemId = null;
@@ -918,24 +952,24 @@ async function verifierStage(rows, receipt, ctx) {
     // P5: an exact item-id and price match writes the official 品名 with no fill.
     // Amber is only for a partial match, a price-fallback, or no identified item.
     // A Pink reading flag on any other cell is left in place. A lock is not overwritten.
-    const exact = exactIdAndPrice(top, row);
-    if (exact) row._exactIdPrice = true;
-    if (!c['品牌'] && top.brand && !ctx.locked(row.rowId, '品牌')) {
+    const trusted = trustedExactCandidate(top, row, req);
+    if (trusted) row._exactIdPrice = true;
+    if (trusted && !c['品牌'] && top.brand && !ctx.locked(row.rowId, '品牌')) {
       noteMismatch(row, '品牌', c['品牌'], top.brand, 'official');
       c['品牌'] = top.brand;
       lookupFlag(row, '品牌', AMBER, 'Brand recovered by look-up.', { confidence: top.confidence, sourceUrls: top.sourceUrls });
     }
     if (!ctx.locked(row.rowId, '品名') && row.flags['品名'] !== PINK) {
-      if (!row._skipOfficialName && top.officialName && top.officialName !== c['品名']) {
+      if (trusted && !row._skipOfficialName && top.officialName && top.officialName !== c['品名']) {
         noteMismatch(row, '品名', c['品名'], top.officialName, 'official');
         row.previousName = c['品名'];
         c['品名'] = top.officialName;
         row.raw.nameFromOfficial = true;
-      } else if (top.officialName && c['品名'] && String(c['品名']).trim().toLowerCase() === String(top.officialName).trim().toLowerCase()) {
+      } else if (trusted && top.officialName && c['品名'] && String(c['品名']).trim().toLowerCase() === String(top.officialName).trim().toLowerCase()) {
         row.raw.nameFromOfficial = true;
       }
-      if (exact || top.onOfficialSite === true && top.officialName && c['品名'] === top.officialName) row.raw.nameFromOfficial = true;
-      if (exact) {
+      if (trusted && top.officialName && c['品名'] === top.officialName) row.raw.nameFromOfficial = true;
+      if (trusted) {
         touchCell(row, '品名');
         if (row.flags['品名'] === AMBER) delete row.flags['品名'];
       } else {
@@ -945,7 +979,7 @@ async function verifierStage(rows, receipt, ctx) {
         lookupFlag(row, '品名', AMBER, why, { confidence: top.confidence, sourceUrls: top.sourceUrls, ...(row._candidates ? { candidates: row._candidates } : {}) });
       }
     }
-    const exactOfficial = exact || (top.onOfficialSite === true && top.itemId && req.itemId && idsMatch(top.itemId, req.itemId) && top.price != null && c['采购商品原价'] != null && Math.abs(Number(top.price) - Number(c['采购商品原价'])) < 0.005);
+    const exactOfficial = trusted;
     if (exactOfficial) row._exactIdPrice = true;
     if (top.price === null || top.price === undefined) {
       if (!ctx.locked(row.rowId, '采购商品原价')) lookupFlag(row, '采购商品原价', AMBER, 'official price unavailable', { confidence: top.confidence, sourceUrls: top.sourceUrls });

@@ -359,7 +359,7 @@ test('flags persist on an untouched Refresh, and both renders write the extra sh
   assert.equal(pink2.flags['品牌货号'], PINK);
   assert.notEqual(pink2.flags['品牌货号'], AMBER);
   assert.equal(pink2.flagReasons['品牌货号'], reason);
-  assert.equal(other2.cells['品名'], 'Official Synthetic Scarf');
+  assert.equal(other2.cells['品名'], 'Notebook');
   assert.equal(supplier2.flags['供应商'], AMBER);
   assert.equal(supplier2.cells['供应商'], 'Rolex Canary Wharf');
   assert.equal(round2.result.excludedZero.some(z => z.name === 'Tissue'), true);
@@ -527,18 +527,17 @@ test('P1: 品牌货号 prefers a style reference over an EAN or concession code'
       { brand: 'Synthetic', item: 'Scarf', itemId: '9999999001', unitPrice: 15, amount: 15 },
     ],
   }] }, { lookup });
-  const ean = result.agreedRows.find(r => r.cells['品名'] === 'Style Bag');
-  const concession = result.agreedRows.find(r => r.cells['品名'] === 'Concession Scarf');
+  const ean = result.agreedRows.find(r => r.cells['品名'] === 'Bag');
+  const concession = result.agreedRows.find(r => r.cells['品名'] === 'Scarf');
   assert.equal(ean.cells['品牌货号'], 'ST-88');
   assert.equal(ean.flags['品牌货号'], AMBER);
   assert.match(ean.exportMeta.comments['品牌货号'], /5012345678901/);
-  assert.equal(ean.exportMeta.alternates['品牌货号'].official, 'ST-88');
   assert.equal(ean.exportMeta.alternates['品牌货号'].receipt, '5012345678901');
   assert.equal(concession.cells['品牌货号'], null);
   assert.equal(concession.flags['品牌货号'], PINK);
-  assert.equal(concession.flagReasons['品牌货号'], 'no brand item ID printed');
+  assert.match(concession.flagReasons['品牌货号'], /Price-fallback candidate was not accepted/);
   assert.match(concession.exportMeta.comments['品牌货号'], /9999999001/);
-  assert.match(concession.exportMeta.comments['品牌货号'], /no brand item ID printed/);
+  assert.match(concession.exportMeta.comments['品牌货号'], /Price-fallback candidate was not accepted/);
   assert.equal(concession.exportMeta.alternates['品牌货号'].receipt, '9999999001');
   assert.equal(concession.exportMeta.alternates['品牌货号'].shown, 'receipt');
 });
@@ -619,8 +618,8 @@ test('2: a concession code never stays in 品牌货号; an official id, an EAN a
     ],
   }] }, { lookup });
   const by = Object.fromEntries(result.agreedRows.map(r => [r.rowId, r]));
-  assert.equal(by['id-official'].cells['品牌货号'], 'BR-100');
-  assert.equal(by['id-official'].flags['品牌货号'], AMBER);
+  assert.equal(by['id-official'].cells['品牌货号'], null);
+  assert.equal(by['id-official'].flags['品牌货号'], PINK);
   assert.match(by['id-official'].exportMeta.comments['品牌货号'], /9999999100/);
   assert.equal(by['id-official'].exportMeta.alternates['品牌货号'].receipt, '9999999100');
   assert.doesNotMatch(String(by['id-official'].cells['品牌货号']), /9999999/);
@@ -638,11 +637,11 @@ test('2: a concession code never stays in 品牌货号; an official id, an EAN a
   assert.equal(by['id-pf-style'].flags['品牌货号'], AMBER);
   assert.match(by['id-pf-style'].exportMeta.comments['品牌货号'], /OFF-99/);
   assert.match(by['id-pf-style'].exportMeta.comments['品牌货号'], /Candidates/);
-  assert.equal(by['id-pf-cc'].cells['品牌货号'], 'BR-55');
-  assert.equal(by['id-pf-cc'].flags['品牌货号'], AMBER);
+  assert.equal(by['id-pf-cc'].cells['品牌货号'], null);
+  assert.equal(by['id-pf-cc'].flags['品牌货号'], PINK);
   assert.match(by['id-pf-cc'].exportMeta.comments['品牌货号'], /9999999300/);
-  assert.match(by['id-pf-cc'].exportMeta.comments['品牌货号'], /Candidates/);
-  assert.equal(by['id-pf-cc'].exportMeta.alternates['品牌货号'].official, 'BR-55');
+  assert.match(by['id-pf-cc'].exportMeta.comments['品牌货号'], /Price-fallback candidate was not accepted/);
+  assert.equal(by['id-pf-cc'].exportMeta.alternates['品牌货号'].official, null);
 });
 
 test("P6: Chanel confirmed only on chanel.cn or chanel.com/gb gets the blocked-site comment", async () => {
@@ -844,8 +843,8 @@ test('an unlabelled numeric-only 10-digit id stays out of 品牌货号 unless th
   assert.equal(none.flagReasons['品牌货号'], 'no brand item ID printed');
   assert.match(none.exportMeta.comments['品牌货号'], /2222222222/);
   assert.match(none.exportMeta.alternates['品牌货号'].receipt, /2222222222/);
-  assert.equal(fill.cells['品牌货号'], 'BR-10');
-  assert.equal(fill.flags['品牌货号'], AMBER);
+  assert.equal(fill.cells['品牌货号'], null);
+  assert.equal(fill.flags['品牌货号'], PINK);
   assert.match(fill.exportMeta.comments['品牌货号'], /1234567890/);
   assert.equal(style.cells['品牌货号'], '000001');
   const matched = await runSanity(env, { batchId: 'ten-fmt', mode: 'round1', receipts: [{
@@ -1101,13 +1100,12 @@ test('an official look-up name that contains the brand keeps its Amber and is no
   const dior = result.agreedRows.find(r => r.rowId === 'off-dior');
   const chanel = result.agreedRows.find(r => r.rowId === 'off-chanel');
   const plain = result.agreedRows.find(r => r.rowId === 'off-plain');
-  assert.equal(dior.cells['品名'], 'Dior Aurora Folio, Sage');
+  assert.equal(dior.cells['品名'], 'Bag');
   assert.equal(dior.flags['品名'], AMBER);
-  assert.doesNotMatch(String(dior.flagReasons['品名'] || ''), /Name needs checking/);
-  assert.doesNotMatch(String(dior.exportMeta.comments['品名'] || ''), /Name needs checking/);
-  assert.equal(chanel.cells['品名'], 'Chanel Meridian Satchel, Slate');
+  assert.doesNotMatch(dior.flagReasons['品名'], /Name needs checking/);
+  assert.equal(chanel.cells['品名'], 'Bag');
   assert.equal(chanel.flags['品名'], AMBER);
-  assert.doesNotMatch(String(chanel.flagReasons['品名'] || ''), /Name needs checking/);
+  assert.doesNotMatch(chanel.flagReasons['品名'], /Name needs checking/);
   assert.equal(plain.cells['品名'], 'Dior Tote');
   assert.equal(plain.flags['品名'], PINK);
   assert.match(plain.flagReasons['品名'], /Name needs checking/);

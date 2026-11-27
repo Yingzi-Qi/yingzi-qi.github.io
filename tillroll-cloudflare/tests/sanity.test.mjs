@@ -216,7 +216,7 @@ test('stored sample readings keep field invariants and route unsupported receipt
   assert.ok(!JSON.stringify(result).includes('trail'), 'no internal debate in final output');
 });
 
-test('look-ups enrich rows (Amber) without overwriting printed prices or item IDs', async () => {
+test('look-ups enrich only verified rows and keep weak catalogue guesses out of canonical cells', async () => {
   const env = makeEnv(KEYS); const f = mockFetch(CATALOGUE);
   const receipt = { receiptKey: 'lux1', merchant: 'Selfridges', receiptReference: '0456-7788', date: '2026-11-20', time: '3:15 pm', payment: 'VISA CONTACTLESS', currency: 'GBP',
     storeClues: { addressLines: ['400 Oxford Street', 'London'], postcode: 'W1A 1AB' },
@@ -252,8 +252,9 @@ test('look-ups enrich rows (Amber) without overwriting printed prices or item ID
   assert.equal(gucci.brandItemIdReason, 'official site shows 658574');
   assert.equal(gucci.exportMeta.brandItemId, '000001');
   assert.equal(gucci.exportMeta.brandItemIdReason, 'official site shows 658574');
-  assert.equal(gucci.cells['品名'], 'Horsebit 1955 Mini Bag');
+  assert.equal(gucci.cells['品名'], 'Handbag');
   assert.equal(gucci.lookup.matchType, 'price-fallback');
+  assert.match(gucci.flagReasons['品名'], /Price-fallback/);
   assert.equal(dior.cells['品名'], 'Handbag'); // ambiguous, weightless: not guessed
   assert.ok(result.lookupUncertainties.some(u => u.rowId === dior.rowId && u.candidates?.length === 2));
 });
@@ -329,7 +330,7 @@ test('qty 3 with a line discount is estimated, Amber, and sums to the paid total
   assert.ok(result.agreedRows.every(r => r.estimated && r.flags['采购商品金额'] === AMBER));
 });
 
-test('brand/name take official values on mismatch; price and item ID stay as printed', async () => {
+test('an ID with a mismatched price keeps the printed brand and name for review', async () => {
   const env = makeEnv(KEYS); const f = mockFetch(CATALOGUE);
   const { result } = await runSanity(env, { batchId: 'mm', mode: 'round1', receipts: [{
     receiptKey: 'mm', merchant: 'Selfridges', receiptReference: 'M1', date: '2026-11-20', time: '12:00', payment: 'Visa', currency: 'GBP',
@@ -338,7 +339,7 @@ test('brand/name take official values on mismatch; price and item ID stay as pri
   const row = result.agreedRows[0];
   assert.equal(row.cells['品牌'], 'Van Cleef & Arpels');
   assert.equal(row.flags['品牌'], AMBER);
-  assert.equal(row.cells['品名'], 'Vintage Laurel Pendant');
+  assert.equal(row.cells['品名'], 'Pendant');
   assert.equal(row.flags['品名'], AMBER);
   assert.equal(row.cells['采购商品原价'], 3700);
   assert.equal(row.flags['采购商品原价'], AMBER);
@@ -549,7 +550,8 @@ test('brandItemId: printed style is kept; official ID is used only when none is 
   assert.equal(sameId.brandItemIdFlag, PINK);
   assert.equal(sameId.flags['品牌货号'], PINK);
 
-  // No printed style / brand code (EAN only): official ID is used, Amber unless P5.
+  // An EAN-only row cannot be promoted to an official style without an exact
+  // printed-ID and price match.
   const eanOnlyLookup = async () => ({
     candidates: [{ brand: 'Chanel', officialName: 'Classic Flap Mini Bag', itemId: 'A69900', price: 4950, currency: 'GBP', matchType: 'id', confidence: 0.9, onOfficialSite: true, sourceUrls: ['https://www.chanel.com/p/A69900'], matchedFields: ['itemId', 'price'] }],
     cacheHit: false, cacheKey: 'ean', sourcesQueried: ['brave'], printedItemId: '3145892123459', canonicalBrand: 'Chanel', flag: '#FDE68A',
@@ -561,10 +563,27 @@ test('brandItemId: printed style is kept; official ID is used only when none is 
   };
   const { result: r2 } = await runSanity(makeEnv(KEYS), { mode: 'round1', receipts: [eanOnly] }, { lookup: eanOnlyLookup });
   const off = r2.agreedRows[0];
-  assert.equal(off.brandItemId, 'A69900');
-  assert.equal(off.brandItemIdSource, 'official');
-  assert.equal(off.cells['品牌货号'], 'A69900');
-  assert.equal(off.exportMeta.brandItemIdSource, 'official');
+  assert.equal(off.brandItemId, null);
+  assert.equal(off.cells['品牌货号'], null);
+  assert.equal(off.brandItemIdSource, null);
+  assert.equal(off.flags['品牌货号'], PINK);
+  assert.equal(off.exportMeta.brandItemIdSource, null);
+});
+
+test('placeholder references are rejected before catalogue lookup', async () => {
+  const { result } = await runSanity(makeEnv(), { batchId: 'placeholder-refs', mode: 'round1', receipts: [{
+    receiptKey: 'placeholder-refs', merchant: 'Synthetic Store', receiptReference: 'PH-1', date: '2026-11-20', time: '10:00', payment: 'Card', currency: 'GBP',
+    items: [
+      { rowId: 'ph-und', brand: 'Synthetic', item: 'Coat', itemId: 'UND', unitPrice: 10, amount: 10 },
+      { rowId: 'ph-one', brand: 'Synthetic', item: 'Scarf', itemId: '1', unitPrice: 12, amount: 12 },
+      { rowId: 'ph-ine', brand: 'Synthetic', item: 'Hat', itemId: 'ine', unitPrice: 8, amount: 8 },
+    ],
+  }] });
+  for (const row of result.agreedRows) {
+    assert.equal(row.cells['品牌货号'], null);
+    assert.equal(row.flags['品牌货号'], PINK);
+    assert.match(row.flagReasons['品牌货号'], /no brand item ID printed/i);
+  }
 });
 
 test('brandItemId: Gucci printed ref 000001 is kept, Amber official site shows 658574', async () => {
