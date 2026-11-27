@@ -94,6 +94,15 @@ test('does not accept a known brand from a non-official source URL', () => {
   assert.equal(result.matchType, 'exact-price-no-source');
 });
 
+test('rejects malformed source evidence before accepting an exact-price match', () => {
+  const result = matchInitialItem({ itemPrice: 75, brand: 'Synthetic House', reference: 'SYN-MALFORMED-1' }, [
+    { brand: 'Synthetic House', itemId: 'SYN-MALFORMED-1', officialName: 'Synthetic item', price: 75, sourceUrl: 'https://' },
+  ], '2026-11-27T09:00:00.000Z');
+  assert.equal(result.status, 'review');
+  assert.equal(result.matchType, 'exact-price-no-source');
+  assert.equal(result.officialMatch, null);
+});
+
 test('fallback prefers a more expensive candidate, then lighter weight, and remains review-only', () => {
   const item = { itemPrice: 100, brand: 'Synthetic House', name: 'Pouch' };
   const result = matchInitialItem(item, [
@@ -172,4 +181,10 @@ test('flags an array-valued payment method as split tender at the server boundar
   });
   assert.equal(result.paymentMethod, null);
   assert.ok(result.flags.some(flag => flag.code === 'split_payment'));
+});
+
+test('rejects generic OCR placeholders as receipt IDs at the server boundary', () => {
+  const result = normaliseInitialReceipt({ receiptId: 'N/A', date: '2026-11-27', time: '11:05', paymentMethod: 'Card', totalPaid: 10, items: [{ itemPrice: 10, purchasePrice: 10, name: 'Synthetic item' }] });
+  assert.equal(result.receiptId, null);
+  assert.ok(result.flags.some(flag => flag.field === 'receiptId' && /invalid/.test(flag.reason)));
 });

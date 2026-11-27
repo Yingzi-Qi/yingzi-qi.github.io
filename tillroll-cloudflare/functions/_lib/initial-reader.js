@@ -39,6 +39,12 @@ function positiveAmount(value) {
   return n !== null && n > 0 ? Math.round(n * 100) / 100 : null;
 }
 
+function receiptIdValue(value) {
+  const text = str(rawValue(value));
+  if (!text || /^(?:und|unknown|n\/?a|null|none|[-—?]+)$/i.test(text) || !/[A-Za-z0-9]/.test(text)) return null;
+  return text;
+}
+
 function dateValue(value) {
   const s = str(rawValue(value));
   if (!s) return null;
@@ -143,7 +149,7 @@ function readItem(item, index) {
 export function normaliseInitialReceipt(input = {}) {
   const source = input && typeof input === 'object' ? input : {};
   const flags = [];
-  const receiptId = readFundamental(source.receiptId ?? source.receipt_id ?? source.receiptReference ?? source.orderNumber ?? source.transactionId, 'receiptId', value => str(rawValue(value)), 'Receipt ID is missing.', 'Receipt ID is invalid.');
+  const receiptId = readFundamental(source.receiptId ?? source.receipt_id ?? source.receiptReference ?? source.orderNumber ?? source.transactionId, 'receiptId', receiptIdValue, 'Receipt ID is missing.', 'Receipt ID is invalid.');
   const date = readFundamental(source.date ?? source.purchaseDate, 'date', dateValue, 'Purchase date is missing.', 'Purchase date must be a valid YYYY-MM-DD date.');
   const today = dateValue(source.today) || new Date().toISOString().slice(0, 10);
   if (date.value && date.value > today) {
@@ -157,7 +163,7 @@ export function normaliseInitialReceipt(input = {}) {
     : readTender(Array.isArray(rawTender) ? rawTender[0] : rawTender);
   flags.push(...receiptId.flags, ...date.flags, ...time.flags, ...tender.flags);
   const entries = paymentEntries(source);
-  if (entries.length > 1) flags.push(flag('paymentMethod', 'A single receipt total is split across multiple tender entries.', REVIEW, { code: 'split_payment' }));
+  if (entries.length > 1 && !tender.flags.some(item => item.code === 'split_payment')) flags.push(flag('paymentMethod', 'A single receipt total is split across multiple tender entries.', REVIEW, { code: 'split_payment' }));
   const itemsInput = Array.isArray(source.items) ? source.items : [];
   const items = itemsInput.map(readItem);
   flags.push(...items.flatMap(item => item.flags));
@@ -252,7 +258,13 @@ function candidateOutput(candidate, item, exact, now) {
 
 function hasOfficialSource(candidate) {
   const source = str(candidate.sourceUrl ?? candidate.source_url ?? candidate.url);
-  if (!source || !/^https?:\/\//i.test(source)) return false;
+  let parsed;
+  try {
+    parsed = new URL(source);
+  } catch {
+    return false;
+  }
+  if (!parsed.hostname || !['http:', 'https:'].includes(parsed.protocol)) return false;
   const brand = canonicalBrand(candidate.brand);
   const domains = officialDomains(brand);
   return domains.length ? isOfficialUrl(source, brand) : true;

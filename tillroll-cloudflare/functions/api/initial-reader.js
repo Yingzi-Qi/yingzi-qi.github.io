@@ -75,22 +75,23 @@ async function persist(env, reading, matches, reviewFlags, now) {
     if (existing?.reading_id) return { readingId: existing.reading_id, duplicate: true };
   }
   const readingId = randomId('ird_');
-  await env.DB.prepare(`INSERT INTO initial_receipt_readings
+  const statements = [env.DB.prepare(`INSERT INTO initial_receipt_readings
     (reading_id, image_hash, receipt_id, reading_json, status, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?)`)
-    .bind(readingId, reading.evidence.imageHash, reading.receiptId, JSON.stringify(reading), reviewFlags.length || reading.reviewRequired ? 'review' : 'ready', now, now).run();
+    .bind(readingId, reading.evidence.imageHash, reading.receiptId, JSON.stringify(reading), reviewFlags.length || reading.reviewRequired ? 'review' : 'ready', now, now)];
   for (const item of reading.items) {
-    await env.DB.prepare('INSERT INTO initial_receipt_lines (reading_id, line_index, line_json) VALUES (?, ?, ?)')
-      .bind(readingId, item.index, JSON.stringify(item)).run();
+    statements.push(env.DB.prepare('INSERT INTO initial_receipt_lines (reading_id, line_index, line_json) VALUES (?, ?, ?)')
+      .bind(readingId, item.index, JSON.stringify(item)));
   }
   for (const [index, match] of matches.entries()) {
-    await env.DB.prepare('INSERT INTO initial_match_candidates (reading_id, line_index, match_json, created_at) VALUES (?, ?, ?, ?)')
-      .bind(readingId, index, JSON.stringify(match), now).run();
+    statements.push(env.DB.prepare('INSERT INTO initial_match_candidates (reading_id, line_index, match_json, created_at) VALUES (?, ?, ?, ?)')
+      .bind(readingId, index, JSON.stringify(match), now));
   }
   for (const item of [...reading.flags, ...reviewFlags]) {
-    await env.DB.prepare('INSERT INTO initial_review_events (reading_id, field, reason, severity, created_at) VALUES (?, ?, ?, ?, ?)')
-      .bind(readingId, item.field, item.reason, item.severity || 'Amber', now).run();
+    statements.push(env.DB.prepare('INSERT INTO initial_review_events (reading_id, field, reason, severity, created_at) VALUES (?, ?, ?, ?, ?)')
+      .bind(readingId, item.field, item.reason, item.severity || 'Amber', now));
   }
+  await env.DB.batch(statements);
   return { readingId, duplicate: false };
 }
 

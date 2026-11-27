@@ -154,3 +154,9 @@ test('blanks a disagreement between independent OCR passes', () => {
   assert.equal(merged.receiptId, null);
   assert.ok(merged.flags.some(flag => flag.code === 'ocr_disagreement' && flag.field === 'receiptId'));
 });
+
+test('rejects generic OCR placeholders as receipt IDs', () => {
+  const result = normaliseInitialReceipt({ receiptId: 'UND', date: '2026-11-27', time: '11:04', paymentMethod: 'Card', totalPaid: 10, items: [{ itemPrice: 10, purchasePrice: 10, name: 'Synthetic item' }] });
+  assert.equal(result.receiptId, null);
+  assert.ok(result.flags.some(flag => flag.code === 'invalid_receipt_id'));
+});

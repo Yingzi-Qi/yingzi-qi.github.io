@@ -49,6 +49,12 @@ function fieldKey(field) {
   return String(field).replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_|_$/g, '').toLowerCase();
 }
 
+function normaliseReceiptId(value) {
+  const text = str(value);
+  if (!text || /^(?:und|unknown|n\/?a|null|none|[-—?]+)$/i.test(text) || !/[A-Za-z0-9]/.test(text)) return null;
+  return text;
+}
+
 function fieldResult(field, raw, { required = true, parser = value => value } = {}) {
   const key = fieldKey(field);
   const read = envelope(raw);
@@ -175,7 +181,7 @@ function normaliseItem(item, index, issues) {
 export function normaliseInitialReceipt(input = {}) {
   const source = input && typeof input === 'object' ? input : {};
   const issues = [];
-  const receiptIdRead = fieldResult('receipt ID', aliases(source, ['receiptId', 'receiptReference', 'orderNumber', 'transactionId', 'id']));
+  const receiptIdRead = fieldResult('receipt ID', aliases(source, ['receiptId', 'receiptReference', 'orderNumber', 'transactionId', 'id']), { parser: normaliseReceiptId });
   const dateRead = fieldResult('date', aliases(source, ['date', 'purchaseDate', 'transactionDate']), { parser: normaliseInitialDate });
   const today = normaliseInitialDate(source.today) || new Date().toISOString().slice(0, 10);
   if (dateRead.value && dateRead.value > today) {

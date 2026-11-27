@@ -72,6 +72,31 @@ function renderReading(file, reading, server) {
     const matches = document.createElement('pre');
     matches.textContent = JSON.stringify(server.matches.map(match => ({ status: match.status, matchType: match.matchType, officialMatch: match.officialMatch, candidates: match.candidates?.slice(0, 3) })), null, 2);
     box.append(matches);
+    const urls = [...new Set(server.matches.flatMap(match => {
+      const sources = [match.officialMatch?.sourceUrl, ...(match.candidates || []).map(candidate => candidate.sourceUrl)];
+      return sources.flatMap(url => {
+        try {
+          const parsed = new URL(url);
+          return parsed.protocol === 'https:' && parsed.hostname ? [parsed.href] : [];
+        } catch {
+          return [];
+        }
+      });
+    }))];
+    if (urls.length) {
+      const links = document.createElement('p');
+      links.textContent = 'Official evidence: ';
+      urls.slice(0, 5).forEach((url, index) => {
+        if (index) links.append(' · ');
+        const link = document.createElement('a');
+        link.href = url;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.textContent = new URL(url).hostname;
+        links.append(link);
+      });
+      box.append(links);
+    }
   }
   results.append(box);
 }
