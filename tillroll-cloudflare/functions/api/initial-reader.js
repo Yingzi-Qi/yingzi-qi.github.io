@@ -111,11 +111,17 @@ export async function onRequestPost({ request, env }) {
   const discovery = await Promise.all(reading.items.map((item, index) => discoverCandidates(env, item, configuredDiscovery && localMatched.matches[index]?.status !== 'accepted').then(result => ({ index, ...result }))));
   const catalogues = localCatalogues.map((rows, index) => uniqueCandidates([...rows, ...discovery[index].candidates]));
   const matched = matchInitialReceipt(reading, catalogues);
+  const discoveryFlags = discovery.filter(result => result.error).map(result => ({
+    field: `items[${result.index}].catalogue`,
+    code: 'catalogue_discovery',
+    severity: 'Amber',
+    reason: 'Official catalogue discovery failed. The item remains review-only.',
+  }));
   const now = nowIso();
   let readingId = null;
   let duplicate = false;
   let persistenceWarning = null;
-  try { const persisted = await persist(env, reading, matched.matches, [...matched.reviewFlags, ...duplicateFlags], now); readingId = persisted?.readingId || null; duplicate = Boolean(persisted?.duplicate); }
+  try { const persisted = await persist(env, reading, matched.matches, [...matched.reviewFlags, ...duplicateFlags, ...discoveryFlags], now); readingId = persisted?.readingId || null; duplicate = Boolean(persisted?.duplicate); }
   catch (cause) { persistenceWarning = 'Initial-reader result was produced, but D1 persistence failed. Apply migration 0003_initial_reader.sql and retry.'; }
   return json({
     readingId,
@@ -123,8 +129,8 @@ export async function onRequestPost({ request, env }) {
     reading,
     matches: matched.matches,
     discovery: discovery.map(({ index, attempted, candidates, error: discoveryError }) => ({ index, attempted, candidateCount: candidates.length, error: discoveryError })),
-    reviewFlags: [...reading.flags, ...duplicateFlags, ...matched.reviewFlags],
-    reviewRequired: matched.reviewRequired || duplicateFlags.length > 0 || Boolean(persistenceWarning),
+    reviewFlags: [...reading.flags, ...duplicateFlags, ...discoveryFlags, ...matched.reviewFlags],
+    reviewRequired: matched.reviewRequired || duplicateFlags.length > 0 || discoveryFlags.length > 0 || Boolean(persistenceWarning),
     persistenceWarning,
   });
 }
