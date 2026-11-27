@@ -27,6 +27,73 @@ test('strict layouts reject unknown mastheads instead of guessing a boutique par
   assert.ok(data.parserReasons.some(reason => /unknown|supported/i.test(reason)));
 });
 
+test('Selfridges tolerates OCR masthead marks and reads a text-only barcode reference', () => {
+  const data = extractStrictReceipt(makeOcr([
+    '###',
+    'SELFRIDGES&C®',
+    '15/11/2026 10:04',
+    'A12345 Synthetic wool coat 120.00',
+    'TOTAL (1 item) 120.00',
+    'VISA',
+    'SYNREF20261115',
+    'Customer Copy',
+  ]));
+  assert.equal(data.layoutStatus, 'known');
+  assert.equal(data.layout, 'selfridges');
+  assert.equal(data.receiptReference, 'SYNREF20261115');
+  assert.equal(data.items.length, 1);
+  assert.equal(data.items[0].item, 'Synthetic wool coat');
+});
+
+test('Selfridges keeps the layout known when the barcode text is unreadable', () => {
+  const data = extractStrictReceipt(makeOcr([
+    'noise before masthead',
+    'SELFRIDGES&CO',
+    'Sales Voucher',
+    'Customer Copy',
+    'Date B/11/26 8:37 pm',
+    'Synthetic coat 120.00',
+    'TOTAL 120.00',
+    'Customer Copy',
+  ]));
+  assert.equal(data.layoutStatus, 'known');
+  assert.equal(data.layout, 'selfridges');
+  assert.equal(data.receiptReference, null);
+  assert.ok(data.parserReasons.some(reason => /low confidence|missing|ambiguous/i.test(reason)));
+});
+
+test('Selfridges uses Product labels to join each item with its nearby price', () => {
+  const data = extractStrictReceipt(makeOcr([
+    'SELFRIDGES&CO',
+    'Sales Voucher',
+    'Customer Copy',
+    'Date 15/11/26 10:04 pm',
+    'Synthetic brand jacket',
+    'Product: SYN-PROD-0007',
+    '£120.00',
+    'Synthetic brand scarf',
+    'Product: SYN-PROD-0008',
+    '£80.00',
+    'Tax % 20%',
+    'Total 2 £200.00',
+    'VISA',
+  ]));
+  assert.equal(data.layoutStatus, 'known');
+  assert.deepEqual(data.items.map(item => item.item), ['Synthetic brand jacket', 'Synthetic brand scarf']);
+  assert.deepEqual(data.items.map(item => item.itemId), ['SYN-PROD-0007', 'SYN-PROD-0008']);
+  assert.deepEqual(data.items.map(item => item.amount), [120, 80]);
+});
+
+test('Selfridges leaves a style-only description blank instead of exporting the code as the name', () => {
+  const data = extractStrictReceipt(makeOcr([
+    'SELFRIDGES&CO', 'Sales Voucher', 'Customer Copy', 'Date 15/11/26 10:04 pm',
+    'Moncler 5660', 'Product: SYN-PROD-0009', '£120.00', 'Total 1 £120.00', 'VISA',
+  ]));
+  assert.equal(data.items.length, 1);
+  assert.equal(data.items[0].item, null);
+  assert.equal(data.items[0].itemId, 'SYN-PROD-0009');
+});
+
 test('strict layouts exclude a priced staff or customer line when the total is OCR-confusable', () => {
   const data = extractStrictReceipt(makeOcr(['CHANEL', '15/11/2026 10:04', 'Receipt # SYN-CH-0002', 'A12345 Synthetic coat 120.00', 'T0TAL 120.00', 'StaffNo 4821 120.00', 'Customer copy 120.00']));
   assert.deepEqual(data.items.map(item => item.item), ['Synthetic coat']);

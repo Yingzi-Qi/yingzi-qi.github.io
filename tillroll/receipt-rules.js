@@ -457,6 +457,7 @@ export function mergeStoreClues(existing, printed) {
 // 采购小票id store layouts. Geometry is normalised (0–1) to the upright photo.
 const hasBox = b => b && ['x', 'y', 'w', 'h'].every(k => Number.isFinite(b[k])) && b.w > 0 && b.h > 0;
 const idShape = /^(?=[A-Z\d/-]*\d)[A-Z\d][A-Z\d/-]{3,29}$/i;
+const selfridgesTextBarcode = /^(?=[A-Z0-9/-]{12,29}$)(?=.*[A-Z])(?=.*\d)[A-Z0-9][A-Z0-9/-]*$/i;
 const dateToken = /^\d{1,4}[-/.]\d{1,2}[-/.]\d{2,4}$/;
 const clockToken = /^\d{1,2}:\d{2}(?::\d{2})?$/;
 const barGlyphs = /[|Il1!\[\](){}\/\\]/g;
@@ -478,6 +479,19 @@ function idFrom(line) {
     .filter(w => idShape.test(w.token) && !dateToken.test(w.token) && !clockToken.test(w.token) && !/^\d+[.,]\d{2}$/.test(w.token));
 }
 
+function selfridgesTextBarcodeCandidate(lines) {
+  const text = lines.map(line => clean(line.text));
+  const dateIndex = [...text].findLastIndex(line => /\bdate\b/i.test(line) && /\d/.test(line));
+  const start = dateIndex >= 0 ? dateIndex + 1 : Math.max(0, text.length - 6);
+  const end = dateIndex >= 0 ? Math.min(text.length, start + 3) : text.length;
+  for (let index = start; index < end; index++) {
+    if (/^product(?:\s+info)?\b/i.test(text[index])) continue;
+    const value = text[index].replace(/\s+/g, '');
+    if (selfridgesTextBarcode.test(value) && !/customer\s+copy/i.test(value)) return {line: lines[index], value};
+  }
+  return null;
+}
+
 // Returns {rule, status:'found'|'unclear'|'missing', value, evidence, certainty, reason} or null
 // when the retailer has no store-specific 采购小票id rule.
 export function storeReceiptId(merchant, ocr) {
@@ -490,7 +504,15 @@ export function storeReceiptId(merchant, ocr) {
   const typical = median(lines.map(l => l.h));
   if (rule === 'selfridges-below-barcode') {
     const bars = lines.map((l, i) => isBarcodeLine(l, typical) ? i : -1).filter(i => i >= 0);
-    if (!bars.length) return missing('Selfridges receipt number: no barcode was found on the photo.');
+    if (!bars.length) {
+      const textBarcode = selfridgesTextBarcodeCandidate(lines);
+      if (textBarcode) {
+        const certainty = Number(textBarcode.line.confidence) || 0;
+        return {rule, status: certainty >= .8 ? 'found' : 'unclear', value: textBarcode.value, evidence: textBarcode.line.text, certainty,
+          reason: certainty >= .8 ? 'Selfridges: the text printed below the barcode is the receipt number.' : 'Selfridges: the text below the barcode is not clearly legible.'};
+      }
+      return missing('Selfridges receipt number: no barcode was found on the photo.');
+    }
     for (const b of bars.reverse()) {
       const bar = lines[b];
       // The receipt number is the first text row directly below the barcode band.

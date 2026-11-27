@@ -32,7 +32,7 @@ function possibleDates(year,day,month,swap=false) {
   if (swap && Number(day)!==Number(month)) values.push(y+'-'+pad(day)+'-'+pad(month));
   return values.filter(validCalendarDate);
 }
-const otherDate=/\b(?:return(?:s)?\s+(?:by|before|until|date|deadline)|expir\w*(?:\s+date)?|valid\s+(?:until|through)|best\s+before|use\s+by|delivery\s+date|ship(?:ping|ment)?\s+date|date\s+of\s+birth|birth\w*(?:\s+date)?|member\s+since|due\s+date|print(?:ed)?\s+(?:on|date))\b/gi;
+const otherDate=/\b(?:return(?:s)?\s+(?:by|before|until|date|deadline)|purchases?\s+by|expir\w*(?:\s+date)?|valid\s+(?:until|through)|best\s+before|use\s+by|delivery\s+date|ship(?:ping|ment)?\s+date|date\s+of\s+birth|birth\w*(?:\s+date)?|member\s+since|due\s+date|print(?:ed)?\s+(?:on|date))\b/gi;
 const dateLabel=/\b(?:(?:purchase|transaction|sale|sales|invoice)\s+date|date\s+(?:of\s+(?:purchase|sale)|d'achat)|purchased\s+on|date|datum)\b/gi;
 const structure=/\b(?:transaction|sale|purchase|date|datum|time|heure|ticket|receipt)\b|\b\d{1,2}:\d{2}\b/i;
 const identifierPrefix=/\b(?:sku|barcode|ean|upc|style|product|item|order\s*(?:id|number|no)|lot|batch|serial)\s*[:#-]?\s*$/i;
@@ -45,7 +45,7 @@ function contextScore(line,index) {
   if (excluded && (!labelled || labelled.index<excluded.index+excluded[0].length)) return 0;
   if (labelled) return /^(?:date|datum)$/i.test(labelled[0]) ? 3 : 4;
   // A non-purchase date label may also follow the value.
-  if (/\b(?:expir\w*|best before|return deadline|valid until)\b/i.test(line.slice(index))) return 0;
+  if (/\b(?:expir\w*|best before|return deadline|valid until|purchases?\s+by)\b/i.test(line.slice(index))) return 0;
   return structure.test(line) ? 2 : 1;
 }
 

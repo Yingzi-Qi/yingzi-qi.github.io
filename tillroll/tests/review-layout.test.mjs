@@ -32,6 +32,20 @@ test('P7: a UK ambiguous date is DD/MM and an unambiguous date stays', () => {
   assert.equal(foreignClear.data.date, '2026-11-25');
 });
 
+test('Selfridges return-policy dates never become the purchase date', () => {
+  const broken = read([
+    'SELFRIDGES & CO',
+    'You are welcome to exchange or refund your purchases by 02/01/2027',
+    'Date B/11/26 8:37 pm',
+    'Synthetic coat 120.00',
+    'TOTAL 120.00',
+  ]);
+  assert.equal(broken.data.date, null);
+  assert.equal(broken.data.dateIssue, null);
+  assert.ok(broken.review.flags.some(flag => flag.field === 'date' && /missing|valid date/i.test(flag.message)));
+  assert.equal(JSON.stringify(broken.data).includes('2027-01-02'), false);
+});
+
 test('Harrods block: codes, brand, description and one Rewards Saving', () => {
   const {data} = read(['HARRODS', '04/11/2026 14:03 NT0682-111111',
     '2469 9999991234 3612345678901 £5,700.00', 'CHANEL', 'WOOL COAT',

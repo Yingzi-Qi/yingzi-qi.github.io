@@ -1059,7 +1059,10 @@ export function receiptGate(receipt, items, { rawItems = [], duplicateReason = n
   const layoutStatus = str(receipt?.layoutStatus);
   if (!compatibility && (layoutStatus !== 'known' || !layout)) hard.push(layoutStatus === 'unknown' ? 'Unknown receipt layout.' : 'Receipt layout is missing.');
   const receiptId = str(receipt?.receiptReference || receipt?.orderNumber || receipt?.orderId);
-  if (!compatibility && layoutStatus === 'known' && !validLayoutReceiptId(layout, receiptId)) hard.push(`Receipt ID does not match the ${layout} layout format.`);
+  if (!compatibility && layoutStatus === 'known' && !receiptId)
+    hard.push(`${layout} receipt ID is missing or unreadable.`);
+  else if (!compatibility && layoutStatus === 'known' && !validLayoutReceiptId(layout, receiptId))
+    hard.push(`Receipt ID does not match the ${layout} layout format.`);
   if (!compatibility && duplicateReason) hard.push(duplicateReason);
   for (const entry of compatibility ? [] : (Array.isArray(receipt?.parserReasons) ? receipt.parserReasons : [])) {
     const reason = entry && typeof entry === 'object' ? (entry.reason || entry.message || entry.detail) : entry;
