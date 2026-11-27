@@ -69,7 +69,7 @@ function readFundamental(value, field, parse, missingReason, invalidReason) {
     return { value: null, confidence, flags: [flag(field, rawValue(value) ? invalidReason : missingReason)] };
   }
   if (ambiguous(value) || (confidence !== null && confidence < FUNDAMENTAL_CONFIDENCE)) {
-    return { value: parsed, confidence, flags: [flag(field, 'OCR reading is ambiguous or below the fundamental-field confidence threshold.')] };
+    return { value: null, confidence, flags: [flag(field, 'OCR reading is ambiguous or below the fundamental-field confidence threshold.')] };
   }
   return { value: parsed, confidence, flags: [] };
 }
@@ -90,7 +90,7 @@ function readTender(value) {
   const confidence = confidenceOf(value);
   if (!normalised) return { value: null, confidence, flags: [flag('paymentMethod', 'Payment method is missing.')] };
   if (ambiguous(value) || (confidence !== null && confidence < FUNDAMENTAL_CONFIDENCE)) {
-    return { value: normalised, confidence, flags: [flag('paymentMethod', 'OCR reading is ambiguous or below the fundamental-field confidence threshold.')] };
+    return { value: null, confidence, flags: [flag('paymentMethod', 'OCR reading is ambiguous or below the fundamental-field confidence threshold.')] };
   }
   if (!ALLOWED_TENDERS.has(normalised)) return { value: null, confidence, flags: [flag('paymentMethod', `Unsupported payment method: ${normalised}.`)] };
   return { value: normalised, confidence, flags: [] };
@@ -114,22 +114,26 @@ function readItem(item, index) {
   const quantity = Math.max(1, Math.floor(numeric(quantityRaw) || 1));
   const itemPriceRaw = fieldFrom(source, ['itemPrice', 'originalPrice', 'unitPrice', 'price']);
   const purchasePriceRaw = fieldFrom(source, ['purchasePrice', 'paidAmount', 'finalPrice', 'amount', 'price']);
-  const itemPrice = positiveAmount(itemPriceRaw);
-  const purchasePrice = positiveAmount(purchasePriceRaw);
+  let itemPrice = positiveAmount(itemPriceRaw);
+  let purchasePrice = positiveAmount(purchasePriceRaw);
   const flags = [];
   if (itemPrice === null) flags.push(flag(`items[${index}].itemPrice`, rawValue(itemPriceRaw) ? 'Item price is invalid or not positive.' : 'Item price is missing.'));
-  else if (ambiguous(itemPriceRaw) || (confidenceOf(itemPriceRaw) !== null && confidenceOf(itemPriceRaw) < FUNDAMENTAL_CONFIDENCE)) flags.push(flag(`items[${index}].itemPrice`, 'OCR reading is ambiguous or below the fundamental-field confidence threshold.'));
+  else if (ambiguous(itemPriceRaw) || (confidenceOf(itemPriceRaw) !== null && confidenceOf(itemPriceRaw) < FUNDAMENTAL_CONFIDENCE)) { itemPrice = null; flags.push(flag(`items[${index}].itemPrice`, 'OCR reading is ambiguous or below the fundamental-field confidence threshold.')); }
   if (purchasePrice === null) flags.push(flag(`items[${index}].purchasePrice`, rawValue(purchasePriceRaw) ? 'Paid purchase amount is invalid or not positive.' : 'Paid purchase amount is missing.'));
-  else if (ambiguous(purchasePriceRaw) || (confidenceOf(purchasePriceRaw) !== null && confidenceOf(purchasePriceRaw) < FUNDAMENTAL_CONFIDENCE)) flags.push(flag(`items[${index}].purchasePrice`, 'OCR reading is ambiguous or below the fundamental-field confidence threshold.'));
+  else if (ambiguous(purchasePriceRaw) || (confidenceOf(purchasePriceRaw) !== null && confidenceOf(purchasePriceRaw) < FUNDAMENTAL_CONFIDENCE)) { purchasePrice = null; flags.push(flag(`items[${index}].purchasePrice`, 'OCR reading is ambiguous or below the fundamental-field confidence threshold.')); }
+  const brand = readOptional(fieldFrom(source, ['brand', 'brandName']));
+  const name = readOptional(fieldFrom(source, ['name', 'description', 'productName']));
+  const reference = readOptional(fieldFrom(source, ['reference', 'ref', 'itemId', 'productId', 'sku']));
+  if (!brand && !name && !reference) flags.push(flag(`items[${index}].clue`, 'No brand, item name, or reference was read for this priced line.', AMBER, { code: 'missing_item_clue' }));
   if (itemPrice !== null && purchasePrice !== null && purchasePrice > itemPrice + 0.005) flags.push(flag(`items[${index}].purchasePrice`, 'Paid purchase amount is greater than the printed item price.'));
   return {
     index,
     quantity,
     itemPrice,
     purchasePrice,
-    brand: readOptional(fieldFrom(source, ['brand', 'brandName'])),
-    name: readOptional(fieldFrom(source, ['name', 'description', 'productName'])),
-    reference: readOptional(fieldFrom(source, ['reference', 'ref', 'itemId', 'productId', 'sku'])),
+    brand,
+    name,
+    reference,
     flags,
   };
 }
