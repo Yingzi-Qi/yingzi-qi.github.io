@@ -162,7 +162,7 @@ export function normaliseInitialReceipt(input = {}) {
   const items = itemsInput.map(readItem);
   flags.push(...items.flatMap(item => item.flags));
   if (!items.length) flags.push(flag('items', 'No item line with a positive price and an item clue was supplied.'));
-  const totalRaw = source.totalPaid ?? source.paidTotal ?? source.total;
+  const totalRaw = source.totalPaid ?? source.paidTotal ?? source.receiptTotal ?? source.total;
   const totalPaid = positiveAmount(totalRaw);
   if (totalPaid === null) flags.push(flag('totalPaid', rawValue(totalRaw) ? 'Receipt total is invalid or not positive.' : 'Receipt total is missing.', AMBER));
   if (totalPaid !== null && items.length && items.every(item => item.purchasePrice !== null)) {
