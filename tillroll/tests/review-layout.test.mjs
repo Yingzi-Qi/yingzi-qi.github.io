@@ -49,6 +49,12 @@ test('Harrods block: codes, brand, description and one Rewards Saving', () => {
   assert.equal(data.total, 5130);
 });
 
+test('money: a long unsymbolled digit run is not a price', () => {
+  const slip = read(['ATELIER', '12/11/2026 11:00', 'Wool hat 12345678.00', 'Scarf £12.00', 'TOTAL £12.00']);
+  assert.deepEqual(slip.data.items.map(row => row.item), ['Scarf']);
+  assert.equal(slip.data.items[0].amount, 12);
+  assert.equal(slip.data.total, 12);
+});
 test('money: thousands, European cents, and qty 1', () => {
   const {data} = read(['SHOP', '25/11/2026 10:00', 'Parka 1 x £1.295,00', '1 Unit(s)', 'TOTAL 1295.00']);
   assert.equal(data.items.length, 1);

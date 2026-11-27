@@ -105,7 +105,8 @@ export const secondReadPhoto = file => recognize(file, true);
 
 // A decimal comma or point is data on the receipt. Parse the last separator as
 // the decimal marker and require a complete monetary token (never part of a date or SKU).
-const moneyToken=/(?<![\p{L}\d.,])(?:[-−]?(?:[£$€]\s*)?(?:\d{1,3}(?:[.,'’\u00a0\u202f]\s*\d{3})+|\d+)[.,]\d{2}|[-−]\s*[£$€]\s*\d+)(?![.,]\d|\d)/gu;
+// A currency mark may introduce any length. Without one, a plain amount is at most six digits, or a grouped thousands amount.
+const moneyToken=/(?<![\p{L}\d.,])(?:[-−]?(?:(?:[£$€]\s*)(?:\d{1,3}(?:[.,'’\u00a0\u202f]\s*\d{3})+|\d+)|\d{1,3}(?:[.,'’\u00a0\u202f]\s*\d{3})+|\d{1,6})[.,]\d{2}|[-−]\s*[£$€]\s*\d+)(?![.,]\d|\d)/gu;
 function amounts(text) {
   return [...String(text).matchAll(moneyToken)].map(m=>{
     const whole=m[0].match(/^[-−]\s*[£$€]\s*(\d+)$/);
